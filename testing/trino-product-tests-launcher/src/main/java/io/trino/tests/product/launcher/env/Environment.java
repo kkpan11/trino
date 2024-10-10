@@ -40,7 +40,9 @@ import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.MountableFile;
 
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
@@ -129,7 +131,8 @@ public final class Environment
                 .onSuccess(event -> log.info("Environment '%s' started in %s, %d attempt(s)", this, event.getElapsedTime(), event.getAttemptCount()))
                 .onFailure(event -> {
                     if (getenv("GITHUB_RUN_ID") != null) {
-                        log.info("::error title=Failed to start environment '%s'::%s", this, event.getException());
+                        PrintStream out = new PrintStream(new FileOutputStream(FileDescriptor.out));
+                        out.printf("::error title=Failed to start environment '%s'::%s%n", this, event.getException());
                     }
                     log.info("Environment '%s' failed to start in attempt(s): %d: %s", this, event.getAttemptCount(), event.getException());
                 })
@@ -699,7 +702,7 @@ public final class Environment
             catch (IOException e) {
                 throw new RuntimeException(e);
             }
-            String temptoConfig = "/docker/presto-product-tests/conf/tempto/tempto-configured-features.yaml";
+            String temptoConfig = "/docker/trino-product-tests/conf/tempto/tempto-configured-features.yaml";
             testContainer.withCopyFileToContainer(forHostPath(tempFile.getPath()), temptoConfig);
             // add custom tempto config and configured_features to arguments if there are any other groups enabled
             String[] commandParts = testContainer.getCommandParts();
