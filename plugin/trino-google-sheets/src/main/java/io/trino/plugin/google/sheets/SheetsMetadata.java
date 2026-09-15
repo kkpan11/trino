@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.slice.Slice;
+import io.trino.plugin.google.sheets.ptf.Sheet.SheetFunctionHandle;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -46,7 +47,6 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.plugin.google.sheets.SheetsConnectorTableHandle.tableNotFound;
 import static io.trino.plugin.google.sheets.SheetsErrorCode.SHEETS_UNKNOWN_TABLE_ERROR;
-import static io.trino.plugin.google.sheets.ptf.Sheet.SheetFunctionHandle;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static java.lang.String.format;
@@ -192,11 +192,11 @@ public class SheetsMetadata
     @Override
     public Optional<TableFunctionApplicationResult<ConnectorTableHandle>> applyTableFunction(ConnectorSession session, ConnectorTableFunctionHandle handle)
     {
-        if (!(handle instanceof SheetFunctionHandle)) {
+        if (!(handle instanceof SheetFunctionHandle sheetFunctionHandle)) {
             return Optional.empty();
         }
 
-        ConnectorTableHandle tableHandle = ((SheetFunctionHandle) handle).getTableHandle();
+        ConnectorTableHandle tableHandle = sheetFunctionHandle.getTableHandle();
         List<ColumnHandle> columnHandles = ImmutableList.copyOf(getColumnHandles(session, tableHandle).values());
         return Optional.of(new TableFunctionApplicationResult<>(tableHandle, columnHandles));
     }

@@ -23,10 +23,12 @@ import io.trino.spi.function.AggregationState;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.DoubleType;
 
 import java.util.Map;
+import java.util.Map.Entry;
 
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.StandardTypes.BIGINT;
@@ -39,9 +41,7 @@ public final class DoubleHistogramAggregation
 {
     public static final int ENTRY_BUFFER_SIZE = 100;
 
-    private DoubleHistogramAggregation()
-    {
-    }
+    private DoubleHistogramAggregation() {}
 
     @AccumulatorStateMetadata(stateSerializerClass = DoubleHistogramStateSerializer.class, stateFactoryClass = NumericHistogramStateFactory.class)
     public interface State
@@ -85,6 +85,7 @@ public final class DoubleHistogramAggregation
         }
     }
 
+    @SqlNullable
     @OutputFunction("map(double,double)")
     public static void output(@AggregationState State state, BlockBuilder out)
     {
@@ -94,7 +95,7 @@ public final class DoubleHistogramAggregation
         else {
             Map<Double, Double> value = state.get().getBuckets();
             ((MapBlockBuilder) out).buildEntry((keyBuilder, valueBuilder) -> {
-                for (Map.Entry<Double, Double> entry : value.entrySet()) {
+                for (Entry<Double, Double> entry : value.entrySet()) {
                     DoubleType.DOUBLE.writeDouble(keyBuilder, entry.getKey());
                     DoubleType.DOUBLE.writeDouble(valueBuilder, entry.getValue());
                 }

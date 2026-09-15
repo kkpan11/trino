@@ -14,7 +14,7 @@
 package io.trino.testing.kafka;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.apache.kafka.common.serialization.Serializer;
 
 import java.util.Map;
@@ -22,18 +22,16 @@ import java.util.Map;
 public class JsonSerializer
         implements Serializer<Object>
 {
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final JsonMapper jsonMapper = new JsonMapper();
 
     @Override
-    public void configure(Map<String, ?> props, boolean isKey)
-    {
-    }
+    public void configure(Map<String, ?> props, boolean isKey) {}
 
     @Override
     public byte[] serialize(String topic, Object data)
     {
         try {
-            return objectMapper.writeValueAsBytes(data);
+            return jsonMapper.writeValueAsBytes(data);
         }
         catch (JsonProcessingException e) {
             throw new RuntimeException(e);
@@ -41,7 +39,5 @@ public class JsonSerializer
     }
 
     @Override
-    public void close()
-    {
-    }
+    public void close() {}
 }

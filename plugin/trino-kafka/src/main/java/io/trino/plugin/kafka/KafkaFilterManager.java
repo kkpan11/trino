@@ -47,7 +47,6 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
 import static io.trino.plugin.kafka.KafkaInternalFieldManager.InternalFieldId.OFFSET_TIMESTAMP_FIELD;
 import static io.trino.plugin.kafka.KafkaInternalFieldManager.InternalFieldId.PARTITION_ID_FIELD;
@@ -112,10 +111,12 @@ public class KafkaFilterManager
             // push down offset
             if (offsetRanged.isPresent()) {
                 Range range = offsetRanged.get();
-                partitionBeginOffsets = overridePartitionBeginOffsets(partitionBeginOffsets,
-                        partition -> (range.begin() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.begin()) : Optional.empty());
-                partitionEndOffsets = overridePartitionEndOffsets(partitionEndOffsets,
-                        partition -> (range.end() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.end()) : Optional.empty());
+                partitionBeginOffsets = overridePartitionBeginOffsets(
+                        partitionBeginOffsets,
+                        _ -> (range.begin() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.begin()) : Optional.empty());
+                partitionEndOffsets = overridePartitionEndOffsets(
+                        partitionEndOffsets,
+                        _ -> (range.end() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.end()) : Optional.empty());
             }
 
             // push down timestamp if possible
@@ -123,13 +124,19 @@ public class KafkaFilterManager
                 try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.create(session)) {
                     // filter negative value to avoid java.lang.IllegalArgumentException when using KafkaConsumer offsetsForTimes
                     if (offsetTimestampRanged.get().begin() > INVALID_KAFKA_RANGE_INDEX) {
-                        partitionBeginOffsets = overridePartitionBeginOffsets(partitionBeginOffsets,
-                                partition -> findOffsetsForTimestampGreaterOrEqual(kafkaConsumer, partition, offsetTimestampRanged.get().begin()));
+                        long partitionBeginTimestamp = floorDiv(offsetTimestampRanged.get().begin(), MICROSECONDS_PER_MILLISECOND);
+                        Map<TopicPartition, Long> partitionBeginTimestamps = partitionBeginOffsets.entrySet().stream()
+                                .collect(toImmutableMap(Map.Entry::getKey, _ -> partitionBeginTimestamp));
+                        Map<TopicPartition, Optional<Long>> beginOffsets = findOffsetsForTimestampGreaterOrEqual(kafkaConsumer, partitionBeginTimestamps);
+                        partitionBeginOffsets = overridePartitionBeginOffsets(partitionBeginOffsets, beginOffsets::get);
                     }
                     if (isTimestampUpperBoundPushdownEnabled(session, kafkaTableHandle.topicName())) {
                         if (offsetTimestampRanged.get().end() > INVALID_KAFKA_RANGE_INDEX) {
-                            partitionEndOffsets = overridePartitionEndOffsets(partitionEndOffsets,
-                                    partition -> findOffsetsForTimestampGreaterOrEqual(kafkaConsumer, partition, offsetTimestampRanged.get().end()));
+                            long partitionEndTimestamp = floorDiv(offsetTimestampRanged.get().end(), MICROSECONDS_PER_MILLISECOND);
+                            Map<TopicPartition, Long> partitionEndTimestamps = partitionEndOffsets.entrySet().stream()
+                                    .collect(toImmutableMap(Map.Entry::getKey, _ -> partitionEndTimestamp));
+                            Map<TopicPartition, Optional<Long>> endOffsets = findOffsetsForTimestampGreaterOrEqual(kafkaConsumer, partitionEndTimestamps);
+                            partitionEndOffsets = overridePartitionEndOffsets(partitionEndOffsets, endOffsets::get);
                         }
                     }
                 }
@@ -172,14 +179,15 @@ public class KafkaFilterManager
         return KafkaSessionProperties.isTimestampUpperBoundPushdownEnabled(session);
     }
 
-    private static Optional<Long> findOffsetsForTimestampGreaterOrEqual(KafkaConsumer<byte[], byte[]> kafkaConsumer, TopicPartition topicPartition, long timestamp)
+    private static Map<TopicPartition, Optional<Long>> findOffsetsForTimestampGreaterOrEqual(KafkaConsumer<byte[], byte[]> kafkaConsumer, Map<TopicPartition, Long> timestamps)
     {
-        final long transferTimestamp = floorDiv(timestamp, MICROSECONDS_PER_MILLISECOND);
-        Map<TopicPartition, OffsetAndTimestamp> topicPartitionOffsets = kafkaConsumer.offsetsForTimes(ImmutableMap.of(topicPartition, transferTimestamp));
-        return Optional.ofNullable(getOnlyElement(topicPartitionOffsets.values(), null)).map(OffsetAndTimestamp::offset);
+        Map<TopicPartition, OffsetAndTimestamp> topicPartitionOffsetAndTimestamps = kafkaConsumer.offsetsForTimes(timestamps);
+        return topicPartitionOffsetAndTimestamps.entrySet().stream()
+                .collect(toImmutableMap(Map.Entry::getKey, entry -> Optional.ofNullable(entry.getValue()).map(OffsetAndTimestamp::offset)));
     }
 
-    private static Map<TopicPartition, Long> overridePartitionBeginOffsets(Map<TopicPartition, Long> partitionBeginOffsets,
+    private static Map<TopicPartition, Long> overridePartitionBeginOffsets(
+            Map<TopicPartition, Long> partitionBeginOffsets,
             Function<TopicPartition, Optional<Long>> overrideFunction)
     {
         ImmutableMap.Builder<TopicPartition, Long> partitionFilteredBeginOffsetsBuilder = ImmutableMap.builder();
@@ -190,7 +198,8 @@ public class KafkaFilterManager
         return partitionFilteredBeginOffsetsBuilder.buildOrThrow();
     }
 
-    private static Map<TopicPartition, Long> overridePartitionEndOffsets(Map<TopicPartition, Long> partitionEndOffsets,
+    private static Map<TopicPartition, Long> overridePartitionEndOffsets(
+            Map<TopicPartition, Long> partitionEndOffsets,
             Function<TopicPartition, Optional<Long>> overrideFunction)
     {
         ImmutableMap.Builder<TopicPartition, Long> partitionFilteredEndOffsetsBuilder = ImmutableMap.builder();
@@ -213,9 +222,9 @@ public class KafkaFilterManager
         }
         else {
             ValueSet valueSet = domain.getValues();
-            if (valueSet instanceof SortedRangeSet) {
+            if (valueSet instanceof SortedRangeSet sortedRangeSet) {
                 // still return range for single value case like (_partition_offset in (XXX1,XXX2) or _timestamp in XXX1, XXX2)
-                Ranges ranges = ((SortedRangeSet) valueSet).getRanges();
+                Ranges ranges = sortedRangeSet.getRanges();
                 List<io.trino.spi.predicate.Range> rangeList = ranges.getOrderedRanges();
                 if (rangeList.stream().allMatch(io.trino.spi.predicate.Range::isSingleValue)) {
                     List<Long> values = rangeList.stream()
@@ -246,8 +255,8 @@ public class KafkaFilterManager
             return sourceValues.stream().filter(sourceValue -> sourceValue == singleValue).collect(toImmutableSet());
         }
         ValueSet valueSet = domain.getValues();
-        if (valueSet instanceof SortedRangeSet) {
-            Ranges ranges = ((SortedRangeSet) valueSet).getRanges();
+        if (valueSet instanceof SortedRangeSet sortedRangeSet) {
+            Ranges ranges = sortedRangeSet.getRanges();
             List<io.trino.spi.predicate.Range> rangeList = ranges.getOrderedRanges();
             if (rangeList.stream().allMatch(io.trino.spi.predicate.Range::isSingleValue)) {
                 return rangeList.stream()
@@ -287,7 +296,7 @@ public class KafkaFilterManager
         if (type == BIGINT) {
             return 1;
         }
-        if (type instanceof TimestampType && ((TimestampType) type).getPrecision() == 3) {
+        if (type instanceof TimestampType timestampType && timestampType.getPrecision() == 3) {
             // native representation is in microseconds
             return 1000;
         }

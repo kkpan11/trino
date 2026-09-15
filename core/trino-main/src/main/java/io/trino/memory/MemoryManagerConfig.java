@@ -16,6 +16,7 @@ package io.trino.memory;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.DefunctConfig;
+import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.DataSize;
 import jakarta.validation.constraints.NotNull;
 
@@ -29,12 +30,13 @@ import static java.util.Locale.ENGLISH;
         "experimental.cluster-memory-manager-enabled",
         "query.low-memory-killer.enabled",
         "resources.reserved-system-memory",
-        "query.low-memory-killer.delay"})
+        "query.low-memory-killer.delay",
+})
 public class MemoryManagerConfig
 {
-    // enforced against user memory allocations
+    // enforced against normal memory allocations
     private DataSize maxQueryMemory = DataSize.of(20, GIGABYTE);
-    // enforced against user + system memory allocations (default is maxQueryMemory * 2)
+    // enforced against normal + and revocable memory allocations (default is maxQueryMemory * 2)
     private DataSize maxQueryTotalMemory;
     private DataSize faultTolerantExecutionCoordinatorTaskMemory = DataSize.of(2, GIGABYTE);
     private DataSize faultTolerantExecutionTaskMemory = DataSize.of(5, GIGABYTE);
@@ -151,7 +153,8 @@ public class MemoryManagerConfig
         return faultTolerantExecutionMemoryRequirementIncreaseOnWorkerCrashEnabled;
     }
 
-    @Config("fault-tolerant-execution.memory-requirement-increase-on-worker-crash-enabled")
+    @Config("fault-tolerant-execution-memory-requirement-increase-on-worker-crash-enabled")
+    @LegacyConfig("fault-tolerant-execution.memory-requirement-increase-on-worker-crash-enabled")
     @ConfigDescription("Increase memory requirement for tasks failed due to a suspected worker crash")
     public MemoryManagerConfig setFaultTolerantExecutionMemoryRequirementIncreaseOnWorkerCrashEnabled(boolean faultTolerantExecutionMemoryRequirementIncreaseOnWorkerCrashEnabled)
     {
@@ -164,7 +167,8 @@ public class MemoryManagerConfig
         return faultTolerantExecutionEagerSpeculativeTasksNodeMemoryOvercommit;
     }
 
-    @Config("fault-tolerant-execution-eager-speculative-tasks-node_memory-overcommit")
+    @Config("fault-tolerant-execution-eager-speculative-tasks-node-memory-overcommit")
+    @LegacyConfig("fault-tolerant-execution-eager-speculative-tasks-node_memory-overcommit")
     public MemoryManagerConfig setFaultTolerantExecutionEagerSpeculativeTasksNodeMemoryOvercommit(DataSize faultTolerantExecutionEagerSpeculativeTasksNodeMemoryOvercommit)
     {
         this.faultTolerantExecutionEagerSpeculativeTasksNodeMemoryOvercommit = faultTolerantExecutionEagerSpeculativeTasksNodeMemoryOvercommit;

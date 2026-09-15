@@ -23,6 +23,8 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.trino.spooling.filesystem.FileSystemSpoolingConfig.Layout.PARTITIONED;
+import static io.trino.spooling.filesystem.FileSystemSpoolingConfig.Layout.SIMPLE;
 
 class TestFileSystemSpoolingConfig
 {
@@ -34,8 +36,11 @@ class TestFileSystemSpoolingConfig
                 .setGcsEnabled(false)
                 .setS3Enabled(false)
                 .setLocation(null)
+                .setLayout(SIMPLE)
                 .setEncryptionEnabled(true)
+                .setExplicitAckEnabled(true)
                 .setTtl(new Duration(12, TimeUnit.HOURS))
+                .setDirectAccessTtl(new Duration(1, TimeUnit.HOURS))
                 .setPruningEnabled(true)
                 .setPruningInterval(new Duration(5, TimeUnit.MINUTES))
                 .setPruningBatchSize(250));
@@ -49,8 +54,11 @@ class TestFileSystemSpoolingConfig
                 .put("fs.gcs.enabled", "true")
                 .put("fs.s3.enabled", "true")
                 .put("fs.location", "test")
+                .put("fs.layout", "PARTITIONED")
                 .put("fs.segment.encryption", "false")
+                .put("fs.segment.explicit-ack", "false")
                 .put("fs.segment.ttl", "1h")
+                .put("fs.segment.direct.ttl", "2h")
                 .put("fs.segment.pruning.enabled", "false")
                 .put("fs.segment.pruning.interval", "12h")
                 .put("fs.segment.pruning.batch-size", "5")
@@ -61,8 +69,11 @@ class TestFileSystemSpoolingConfig
                 .setGcsEnabled(true)
                 .setS3Enabled(true)
                 .setLocation("test")
+                .setLayout(PARTITIONED)
                 .setEncryptionEnabled(false)
+                .setExplicitAckEnabled(false)
                 .setTtl(new Duration(1, TimeUnit.HOURS))
+                .setDirectAccessTtl(new Duration(2, TimeUnit.HOURS))
                 .setPruningEnabled(false)
                 .setPruningInterval(new Duration(12, TimeUnit.HOURS))
                 .setPruningBatchSize(5);

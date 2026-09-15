@@ -13,16 +13,12 @@
  */
 package io.trino.operator.unnest;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 import io.trino.spi.Page;
-import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.ColumnarArray;
 import io.trino.spi.block.ColumnarMap;
 import io.trino.spi.block.RowBlock;
-import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
@@ -34,231 +30,14 @@ import java.util.Optional;
 import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Verify.verify;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Math.max;
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public final class TestingUnnesterUtil
 {
     private TestingUnnesterUtil() {}
-
-    public static Block createSimpleBlock(Slice[] values)
-    {
-        BlockBuilder elementBlockBuilder = VARCHAR.createBlockBuilder(null, values.length);
-        for (Slice v : values) {
-            if (v == null) {
-                elementBlockBuilder.appendNull();
-            }
-            else {
-                VARCHAR.writeSlice(elementBlockBuilder, v);
-            }
-        }
-        return elementBlockBuilder.build();
-    }
-
-    public static Block createArrayBlock(Slice[][] values)
-    {
-        ArrayType arrayType = new ArrayType(VARCHAR);
-        BlockBuilder blockBuilder = arrayType.createBlockBuilder(null, 100, 100);
-        for (Slice[] expectedValue : values) {
-            if (expectedValue == null) {
-                blockBuilder.appendNull();
-            }
-            else {
-                arrayType.writeObject(blockBuilder, createSimpleBlock(expectedValue));
-            }
-        }
-        return blockBuilder.build();
-    }
-
-    public static Block createArrayBlockOfRowBlocks(Slice[][][] elements, RowType rowType)
-    {
-        ArrayType arrayType = new ArrayType(rowType);
-        BlockBuilder arrayBlockBuilder = arrayType.createBlockBuilder(null, 100, 100);
-        for (int i = 0; i < elements.length; i++) {
-            if (elements[i] == null) {
-                arrayBlockBuilder.appendNull();
-            }
-            else {
-                Slice[][] expectedValues = elements[i];
-                RowBlockBuilder elementBlockBuilder = rowType.createBlockBuilder(null, elements[i].length);
-                for (Slice[] expectedValue : expectedValues) {
-                    if (expectedValue == null) {
-                        elementBlockBuilder.appendNull();
-                    }
-                    else {
-                        elementBlockBuilder.buildEntry(fieldBuilders -> {
-                            for (int fieldId = 0; fieldId < expectedValue.length; fieldId++) {
-                                Slice v = expectedValue[fieldId];
-                                if (v == null) {
-                                    fieldBuilders.get(fieldId).appendNull();
-                                }
-                                else {
-                                    VARCHAR.writeSlice(fieldBuilders.get(fieldId), v);
-                                }
-                            }
-                        });
-                    }
-                }
-                arrayType.writeObject(arrayBlockBuilder, elementBlockBuilder.build());
-            }
-        }
-        return arrayBlockBuilder.build();
-    }
-
-    public static boolean nullExists(Slice[][] elements)
-    {
-        for (int i = 0; i < elements.length; i++) {
-            if (elements[i] != null) {
-                for (int j = 0; j < elements[i].length; j++) {
-                    if (elements[i][j] == null) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    public static Slice[] computeExpectedUnnestedOutput(Slice[][] elements, int[] requiredOutputCounts, int startPosition, int length)
-    {
-        checkArgument(startPosition >= 0 && length >= 0);
-        checkArgument(startPosition + length - 1 < requiredOutputCounts.length);
-        checkArgument(elements.length == requiredOutputCounts.length);
-
-        int outputCount = 0;
-        for (int i = 0; i < length; i++) {
-            int position = startPosition + i;
-            int arrayLength = elements[position] == null ? 0 : elements[position].length;
-            checkArgument(requiredOutputCounts[position] >= arrayLength);
-            outputCount += requiredOutputCounts[position];
-        }
-
-        Slice[] expectedOutput = new Slice[outputCount];
-        int offset = 0;
-
-        for (int i = 0; i < length; i++) {
-            int position = startPosition + i;
-            int arrayLength = elements[position] == null ? 0 : elements[position].length;
-
-            int requiredCount = requiredOutputCounts[position];
-
-            for (int j = 0; j < arrayLength; j++) {
-                expectedOutput[offset++] = elements[position][j];
-            }
-            for (int j = 0; j < (requiredCount - arrayLength); j++) {
-                expectedOutput[offset++] = null;
-            }
-        }
-
-        return expectedOutput;
-    }
-
-    /**
-     * Extract elements corresponding to a specific field from 3D slices
-     */
-    public static Slice[][] getFieldElements(Slice[][][] slices, int fieldNo)
-    {
-        Slice[][] output = new Slice[slices.length][];
-
-        for (int i = 0; i < slices.length; i++) {
-            if (slices[i] != null) {
-                output[i] = new Slice[slices[i].length];
-
-                for (int j = 0; j < slices[i].length; j++) {
-                    if (slices[i][j] != null) {
-                        output[i][j] = slices[i][j][fieldNo];
-                    }
-                    else {
-                        output[i][j] = null;
-                    }
-                }
-            }
-            else {
-                output[i] = null;
-            }
-        }
-
-        return output;
-    }
-
-    public static void validateTestInput(int[] requiredOutputCounts, int[] unnestedLengths, Slice[][][] slices, int fieldCount)
-    {
-        requireNonNull(requiredOutputCounts, "requiredOutputCounts is null");
-        requireNonNull(unnestedLengths, "unnestedLengths is null");
-        requireNonNull(slices, "slices array is null");
-
-        // verify lengths
-        int positionCount = slices.length;
-        assertThat(requiredOutputCounts.length).isEqualTo(positionCount);
-        assertThat(unnestedLengths.length).isEqualTo(positionCount);
-
-        // Unnested array lengths must be <= required output count
-        for (int i = 0; i < requiredOutputCounts.length; i++) {
-            assertThat(unnestedLengths[i] <= requiredOutputCounts[i]).isTrue();
-        }
-
-        // Elements should have the right shape for every field
-        for (int index = 0; index < positionCount; index++) {
-            Slice[][] entry = slices[index];
-
-            int entryLength = entry != null ? entry.length : 0;
-            assertThat(entryLength).isEqualTo(unnestedLengths[index]);
-
-            // Verify number of fields
-            for (int i = 0; i < entryLength; i++) {
-                if (entry[i] != null) {
-                    assertThat(entry[i].length).isEqualTo(fieldCount);
-                }
-            }
-        }
-    }
-
-    public static Slice[] createReplicatedOutputSlice(Slice[] input, int[] counts)
-    {
-        assertThat(input.length).isEqualTo(counts.length);
-
-        int outputLength = 0;
-        for (int i = 0; i < input.length; i++) {
-            outputLength += counts[i];
-        }
-
-        Slice[] output = new Slice[outputLength];
-        int offset = 0;
-        for (int i = 0; i < input.length; i++) {
-            for (int j = 0; j < counts[i]; j++) {
-                output[offset++] = input[i];
-            }
-        }
-
-        return output;
-    }
-
-    static Slice[][][] column(Slice[][]... arraysOfRow)
-    {
-        return arraysOfRow;
-    }
-
-    static Slice[][] array(Slice[]... rows)
-    {
-        return rows;
-    }
-
-    static Slice[] toSlices(String... values)
-    {
-        Slice[] slices = new Slice[values.length];
-        for (int i = 0; i < values.length; i++) {
-            if (values[i] != null) {
-                slices[i] = Slices.utf8Slice(values[i]);
-            }
-        }
-
-        return slices;
-    }
 
     static UnnestedLengths calculateMaxCardinalities(Page page, List<Type> replicatedTypes, List<Type> unnestTypes, boolean outer)
     {
@@ -279,20 +58,17 @@ public final class TestingUnnesterUtil
                     maxCardinalities[j] = max(maxCardinalities[j], columnarArray.getLength(j));
                 }
             }
-            else if (type instanceof MapType) {
+            else {
                 ColumnarMap columnarMap = ColumnarMap.toColumnarMap(block);
                 for (int j = 0; j < positionCount; j++) {
                     maxCardinalities[j] = max(maxCardinalities[j], columnarMap.getEntryCount(j));
                 }
             }
-            else {
-                throw new RuntimeException("expected an ArrayType or MapType, but found " + type);
-            }
         }
 
         if (outer) {
             boolean[] nullAppendForOuter = new boolean[positionCount];
-            // For outer node, atleast one row should be output for every input row
+            // For outer node, at least one row should be output for every input row
             for (int j = 0; j < positionCount; j++) {
                 if (maxCardinalities[j] == 0) {
                     maxCardinalities[j] = 1;
@@ -331,11 +107,10 @@ public final class TestingUnnesterUtil
             Type type = unnestTypes.get(i);
             Block inputBlock = page.getBlock(replicatedTypes.size() + i);
 
-            if (type instanceof ArrayType) {
-                Type elementType = ((ArrayType) type).getElementType();
-                if (elementType instanceof RowType) {
-                    List<Type> rowTypes = elementType.getTypeParameters();
-                    Block[] blocks = buildExpectedUnnestedArrayOfRowBlock(inputBlock, rowTypes, maxCardinalities, totalEntries);
+            if (type instanceof ArrayType arrayType) {
+                Type elementType = arrayType.getElementType();
+                if (elementType instanceof RowType rowType) {
+                    Block[] blocks = buildExpectedUnnestedArrayOfRowBlock(inputBlock, rowType.getFieldTypes(), maxCardinalities, totalEntries);
                     for (Block block : blocks) {
                         outputBlocks[outputChannel++] = block;
                     }
@@ -344,8 +119,7 @@ public final class TestingUnnesterUtil
                     outputBlocks[outputChannel++] = buildExpectedUnnestedArrayBlock(inputBlock, ((ArrayType) unnestTypes.get(i)).getElementType(), maxCardinalities, totalEntries);
                 }
             }
-            else if (type instanceof MapType) {
-                MapType mapType = (MapType) unnestTypes.get(i);
+            else if (type instanceof MapType mapType) {
                 Block[] blocks = buildExpectedUnnestedMapBlocks(inputBlock, mapType.getKeyType(), mapType.getValueType(), maxCardinalities, totalEntries);
                 for (Block block : blocks) {
                     outputBlocks[outputChannel++] = block;
@@ -357,7 +131,7 @@ public final class TestingUnnesterUtil
         }
 
         if (withOrdinality) {
-            outputBlocks[outputChannel++] = buildExpectedOrdinalityBlock(unnestedLengths, totalEntries);
+            outputBlocks[outputChannel] = buildExpectedOrdinalityBlock(unnestedLengths, totalEntries);
         }
 
         return new Page(outputBlocks);
@@ -365,28 +139,20 @@ public final class TestingUnnesterUtil
 
     static List<Type> buildOutputTypes(List<Type> replicatedTypes, List<Type> unnestTypes, boolean withOrdinality)
     {
-        List<Type> outputTypes = new ArrayList<>();
-
-        for (Type replicatedType : replicatedTypes) {
-            outputTypes.add(replicatedType);
-        }
-
+        List<Type> outputTypes = new ArrayList<>(replicatedTypes);
         for (Type unnestType : unnestTypes) {
-            if (unnestType instanceof ArrayType) {
-                Type elementType = ((ArrayType) unnestType).getElementType();
-                if (elementType instanceof RowType) {
-                    List<Type> rowTypes = ((RowType) elementType).getTypeParameters();
-                    for (Type rowType : rowTypes) {
-                        outputTypes.add(rowType);
-                    }
+            if (unnestType instanceof ArrayType arrayType) {
+                Type elementType = arrayType.getElementType();
+                if (elementType instanceof RowType rowType) {
+                    outputTypes.addAll(rowType.getFieldTypes());
                 }
                 else {
                     outputTypes.add(elementType);
                 }
             }
-            else if (unnestType instanceof MapType) {
-                outputTypes.add(((MapType) unnestType).getKeyType());
-                outputTypes.add(((MapType) unnestType).getValueType());
+            else if (unnestType instanceof MapType mapType) {
+                outputTypes.add(mapType.getKeyType());
+                outputTypes.add(mapType.getValueType());
             }
         }
 
@@ -397,31 +163,6 @@ public final class TestingUnnesterUtil
         return outputTypes;
     }
 
-    static Page mergePages(List<Type> types, List<Page> pages)
-    {
-        PageBuilder pageBuilder = new PageBuilder(types);
-        int totalPositionCount = 0;
-        for (Page page : pages) {
-            verify(page.getChannelCount() == types.size(), format("Number of channels in page %d is not equal to number of types %d", page.getChannelCount(), types.size()));
-
-            for (int i = 0; i < types.size(); i++) {
-                BlockBuilder blockBuilder = pageBuilder.getBlockBuilder(i);
-                Block block = page.getBlock(i);
-                for (int position = 0; position < page.getPositionCount(); position++) {
-                    if (block.isNull(position)) {
-                        blockBuilder.appendNull();
-                    }
-                    else {
-                        types.get(i).appendTo(block, position, blockBuilder);
-                    }
-                }
-            }
-            totalPositionCount += page.getPositionCount();
-        }
-        pageBuilder.declarePositions(totalPositionCount);
-        return pageBuilder.build();
-    }
-
     private static Block buildExpectedReplicatedBlock(Block block, Type type, int[] maxCardinalities, int totalEntries)
     {
         BlockBuilder blockBuilder = type.createBlockBuilder(null, totalEntries);
@@ -429,7 +170,7 @@ public final class TestingUnnesterUtil
         for (int i = 0; i < positionCount; i++) {
             int cardinality = maxCardinalities[i];
             for (int j = 0; j < cardinality; j++) {
-                type.appendTo(block, i, blockBuilder);
+                blockBuilder.append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(i));
             }
         }
         return blockBuilder.build();
@@ -446,7 +187,7 @@ public final class TestingUnnesterUtil
         for (int i = 0; i < positionCount; i++) {
             int cardinality = columnarArray.getLength(i);
             for (int j = 0; j < cardinality; j++) {
-                type.appendTo(elementBlock, elementBlockPosition++, blockBuilder);
+                blockBuilder.append(elementBlock.getUnderlyingValueBlock(), elementBlock.getUnderlyingValuePosition(elementBlockPosition++));
             }
 
             int maxCardinality = maxCardinalities[i];
@@ -471,8 +212,8 @@ public final class TestingUnnesterUtil
         for (int i = 0; i < positionCount; i++) {
             int cardinality = columnarMap.getEntryCount(i);
             for (int j = 0; j < cardinality; j++) {
-                keyType.appendTo(keyBlock, blockPosition, keyBlockBuilder);
-                valueType.appendTo(valuesBlock, blockPosition, valueBlockBuilder);
+                keyBlockBuilder.append(keyBlock.getUnderlyingValueBlock(), keyBlock.getUnderlyingValuePosition(blockPosition));
+                valueBlockBuilder.append(valuesBlock.getUnderlyingValueBlock(), valuesBlock.getUnderlyingValuePosition(blockPosition));
                 blockPosition++;
             }
 
@@ -504,7 +245,8 @@ public final class TestingUnnesterUtil
                 int rowBlockIndex = columnarArray.getOffset(j);
                 int cardinality = columnarArray.getLength(j);
                 for (int k = 0; k < cardinality; k++) {
-                    rowTypes.get(i).appendTo(fields.get(i), rowBlockIndex + k, blockBuilder);
+                    Block rawBlock = fields.get(i);
+                    blockBuilder.append(rawBlock.getUnderlyingValueBlock(), rawBlock.getUnderlyingValuePosition(rowBlockIndex + k));
                 }
 
                 int maxCardinality = maxCardinalities[j];
@@ -522,7 +264,7 @@ public final class TestingUnnesterUtil
     private static Block buildExpectedOrdinalityBlock(UnnestedLengths unnestedLengths, int totalEntries)
     {
         int[] maxCardinalities = unnestedLengths.getMaxCardinalities();
-        BlockBuilder ordinalityBlockBuilder = BIGINT.createBlockBuilder(null, totalEntries);
+        BlockBuilder ordinalityBlockBuilder = BIGINT.createFixedSizeBlockBuilder(totalEntries);
         for (int i = 0; i < maxCardinalities.length; i++) {
             int maxCardinality = maxCardinalities[i];
             if (maxCardinality == 1 && unnestedLengths.isNullAppendForOuter(i)) {
@@ -546,10 +288,7 @@ public final class TestingUnnesterUtil
         {
             this.maxCardinalities = requireNonNull(maxCardinalities, "maxCardinalities is null");
             this.nullAppendForOuter = requireNonNull(nullAppendForOuter, "nullAppendForOuter is null");
-
-            if (nullAppendForOuter.isPresent()) {
-                checkArgument(maxCardinalities.length == nullAppendForOuter.get().length);
-            }
+            nullAppendForOuter.ifPresent(booleans -> checkArgument(maxCardinalities.length == booleans.length));
         }
 
         public int[] getMaxCardinalities()

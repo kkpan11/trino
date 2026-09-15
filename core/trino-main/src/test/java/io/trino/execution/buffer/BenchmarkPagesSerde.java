@@ -18,7 +18,6 @@ import io.airlift.slice.Slice;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -46,6 +45,7 @@ import java.util.Random;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.execution.buffer.CompressionCodec.LZ4;
 import static io.trino.execution.buffer.CompressionCodec.NONE;
+import static io.trino.execution.buffer.TestingPagesSerdes.createTestingPagesSerdeFactory;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -115,7 +115,7 @@ public class BenchmarkPagesSerde
         @Setup
         public void initialize()
         {
-            PagesSerdeFactory serdeFactory = new PagesSerdeFactory(new TestingBlockEncodingSerde(), compressionCodec);
+            PagesSerdeFactory serdeFactory = createTestingPagesSerdeFactory(compressionCodec);
             Optional<SecretKey> encryptionKey = encrypted ? Optional.of(createRandomAesEncryptionKey()) : Optional.empty();
             serializer = serdeFactory.createSerializer(encryptionKey);
             deserializer = serdeFactory.createDeserializer(encryptionKey);
@@ -163,8 +163,8 @@ public class BenchmarkPagesSerde
                 if (fieldValue == null) {
                     blockBuilder.appendNull();
                 }
-                else if (fieldValue instanceof String) {
-                    VARCHAR.writeSlice(blockBuilder, utf8Slice((String) fieldValue));
+                else if (fieldValue instanceof String string) {
+                    VARCHAR.writeSlice(blockBuilder, utf8Slice(string));
                 }
                 else {
                     throw new UnsupportedOperationException();
@@ -204,18 +204,17 @@ public class BenchmarkPagesSerde
         }
     }
 
-    public static void main(String[] args)
+    static void main()
             throws RunnerException
     {
         BenchmarkData data = new BenchmarkData();
         data.compressionCodec = LZ4; // Get usable stats on compressibility
         data.initialize();
-        System.out.println("Page Size Avg: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).average().getAsDouble());
-        System.out.println("Page Size Min: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).min().getAsLong());
-        System.out.println("Page Size Max: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).max().getAsLong());
+        System.out.println("Page Size Avg: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).average().orElseThrow());
+        System.out.println("Page Size Min: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).min().orElseThrow());
+        System.out.println("Page Size Max: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).max().orElseThrow());
         System.out.println("Page Size Sum: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).sum());
         System.out.println("Page count: " + data.dataPages.length);
-        System.out.println("Compressed: " + Arrays.stream(data.serializedPages).filter(PagesSerdeUtil::isSerializedPageCompressed).count());
 
         benchmark(BenchmarkPagesSerde.class)
                 .withOptions(optionsBuilder -> optionsBuilder.jvmArgs("-Xms4g", "-Xmx4g"))

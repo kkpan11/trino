@@ -23,7 +23,6 @@ import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.Type;
 
@@ -54,7 +53,7 @@ public final class RcFileFileWriter
     private final CountingOutputStream outputStream;
     private final AggregatedMemoryContext outputStreamMemoryContext;
     private final RcFileWriter rcFileWriter;
-    private final Closeable rollbackAction;
+    private final RollbackAction rollbackAction;
     private final int[] fileInputColumnIndexes;
     private final List<Block> nullBlocks;
     private final Optional<Supplier<TrinoInputFile>> validationInputFactory;
@@ -64,7 +63,7 @@ public final class RcFileFileWriter
     public RcFileFileWriter(
             OutputStream outputStream,
             AggregatedMemoryContext outputStreamMemoryContext,
-            Closeable rollbackAction,
+            RollbackAction rollbackAction,
             ColumnEncodingFactory columnEncodingFactory,
             List<Type> fileColumnTypes,
             Optional<CompressionKind> compressionKind,
@@ -88,9 +87,7 @@ public final class RcFileFileWriter
 
         ImmutableList.Builder<Block> nullBlocks = ImmutableList.builder();
         for (Type fileColumnType : fileColumnTypes) {
-            BlockBuilder blockBuilder = fileColumnType.createBlockBuilder(null, 1, 0);
-            blockBuilder.appendNull();
-            nullBlocks.add(blockBuilder.build());
+            nullBlocks.add(fileColumnType.createNullBlock());
         }
         this.nullBlocks = nullBlocks.build();
         this.validationInputFactory = validationInputFactory;
@@ -131,14 +128,14 @@ public final class RcFileFileWriter
     }
 
     @Override
-    public Closeable commit()
+    public RollbackAction commit()
     {
         try {
             rcFileWriter.close();
         }
         catch (IOException | UncheckedIOException e) {
             try {
-                rollbackAction.close();
+                rollbackAction.run();
             }
             catch (Exception _) {
                 // ignore
@@ -164,7 +161,7 @@ public final class RcFileFileWriter
     @Override
     public void rollback()
     {
-        try (rollbackAction) {
+        try (Closeable _ = rollbackAction::run) {
             rcFileWriter.close();
         }
         catch (Exception e) {

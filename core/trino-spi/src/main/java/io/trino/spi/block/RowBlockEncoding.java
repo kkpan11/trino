@@ -17,7 +17,11 @@ package io.trino.spi.block;
 import io.airlift.slice.SliceInput;
 import io.airlift.slice.SliceOutput;
 
+import java.util.List;
 import java.util.Optional;
+
+import static io.trino.spi.block.EncoderUtil.decodeValidityAsLongs;
+import static io.trino.spi.block.EncoderUtil.encodeValidityAsLongs;
 
 public class RowBlockEncoding
         implements BlockEncoding
@@ -31,19 +35,25 @@ public class RowBlockEncoding
     }
 
     @Override
+    public Class<? extends Block> getBlockClass()
+    {
+        return RowBlock.class;
+    }
+
+    @Override
     public void writeBlock(BlockEncodingSerde blockEncodingSerde, SliceOutput sliceOutput, Block block)
     {
         RowBlock rowBlock = (RowBlock) block;
 
         sliceOutput.appendInt(rowBlock.getPositionCount());
 
-        Block[] rawFieldBlocks = rowBlock.getRawFieldBlocks();
-        sliceOutput.appendInt(rawFieldBlocks.length);
-        for (Block rawFieldBlock : rawFieldBlocks) {
-            blockEncodingSerde.writeBlock(sliceOutput, rawFieldBlock);
+        List<Block> fieldBlocks = rowBlock.getFieldBlocks();
+        sliceOutput.appendInt(fieldBlocks.size());
+        for (Block fieldBlock : fieldBlocks) {
+            blockEncodingSerde.writeBlock(sliceOutput, fieldBlock);
         }
 
-        EncoderUtil.encodeNullsAsBits(sliceOutput, block);
+        encodeValidityAsLongs(sliceOutput, rowBlock.getRawValueIsValid(), rowBlock.getOffsetBase(), rowBlock.getPositionCount());
     }
 
     @Override
@@ -57,7 +67,7 @@ public class RowBlockEncoding
             fieldBlocks[i] = blockEncodingSerde.readBlock(sliceInput);
         }
 
-        Optional<boolean[]> rowIsNull = EncoderUtil.decodeNullBits(sliceInput, positionCount);
-        return RowBlock.fromNotNullSuppressedFieldBlocks(positionCount, rowIsNull, fieldBlocks);
+        long[] valueIsValid = decodeValidityAsLongs(sliceInput, positionCount);
+        return RowBlock.fromNotNullSuppressedFieldBlocks(positionCount, Optional.ofNullable(valueIsValid), fieldBlocks);
     }
 }

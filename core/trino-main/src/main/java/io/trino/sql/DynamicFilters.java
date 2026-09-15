@@ -32,13 +32,14 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.ir.Call;
 import io.trino.sql.ir.Cast;
-import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.ComparisonOperator;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.BuiltinFunctionCallBuilder;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.plan.DynamicFilterId;
+import io.trino.type.CharVarcharCoercion;
 
 import java.util.List;
 import java.util.Objects;
@@ -53,7 +54,7 @@ import static io.trino.spi.type.StandardTypes.BOOLEAN;
 import static io.trino.spi.type.StandardTypes.VARCHAR;
 import static io.trino.sql.ir.Booleans.FALSE;
 import static io.trino.sql.ir.Booleans.TRUE;
-import static io.trino.sql.ir.Comparison.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonOperator.EQUAL;
 import static io.trino.sql.ir.IrUtils.extractConjuncts;
 import static java.util.Objects.requireNonNull;
 
@@ -63,23 +64,25 @@ public final class DynamicFilters
 
     public static Expression createDynamicFilterExpression(
             Metadata metadata,
+            CharVarcharCoercion charVarcharCoercion,
             DynamicFilterId id,
             Type inputType,
             Expression input,
-            Comparison.Operator operator)
+            ComparisonOperator operator)
     {
-        return createDynamicFilterExpression(metadata, id, inputType, input, operator, false);
+        return createDynamicFilterExpression(metadata, charVarcharCoercion, id, inputType, input, operator, false);
     }
 
     public static Expression createDynamicFilterExpression(
             Metadata metadata,
+            CharVarcharCoercion charVarcharCoercion,
             DynamicFilterId id,
             Type inputType,
             Expression input,
-            Comparison.Operator operator,
+            ComparisonOperator operator,
             boolean nullAllowed)
     {
-        return BuiltinFunctionCallBuilder.resolve(metadata)
+        return BuiltinFunctionCallBuilder.resolve(metadata, charVarcharCoercion)
                 .setName(nullAllowed ? NullableFunction.NAME : Function.NAME)
                 .addArgument(inputType, input)
                 .addArgument(new Constant(VarcharType.VARCHAR, Slices.utf8Slice(operator.toString())))
@@ -89,9 +92,9 @@ public final class DynamicFilters
     }
 
     @VisibleForTesting
-    public static Expression createDynamicFilterExpression(Metadata metadata, DynamicFilterId id, Type inputType, Expression input)
+    public static Expression createDynamicFilterExpression(Metadata metadata, CharVarcharCoercion charVarcharCoercion, DynamicFilterId id, Type inputType, Expression input)
     {
-        return createDynamicFilterExpression(metadata, id, inputType, input, EQUAL);
+        return createDynamicFilterExpression(metadata, charVarcharCoercion, id, inputType, input, EQUAL);
     }
 
     public static ExtractResult extractDynamicFilters(Expression expression)
@@ -150,20 +153,16 @@ public final class DynamicFilters
 
     public static boolean isDynamicFilter(Expression expression)
     {
-        return getDescriptor(expression).isPresent();
+        return (expression instanceof Call call) && isDynamicFilterFunction(call);
     }
 
     public static Optional<Descriptor> getDescriptor(Expression expression)
     {
-        if (!(expression instanceof Call call)) {
+        if (!isDynamicFilter(expression)) {
             return Optional.empty();
         }
 
-        if (!isDynamicFilterFunction(call)) {
-            return Optional.empty();
-        }
-
-        List<Expression> arguments = call.arguments();
+        List<Expression> arguments = ((Call) expression).arguments();
         checkArgument(arguments.size() == 4, "invalid arguments count: %s", arguments.size());
 
         Expression probeSymbol = arguments.get(0);
@@ -171,7 +170,7 @@ public final class DynamicFilters
         Expression operatorExpression = arguments.get(1);
         checkArgument(operatorExpression instanceof Constant literal && literal.type().equals(VarcharType.VARCHAR), "operatorExpression is expected to be a varchar: %s", operatorExpression.getClass().getSimpleName());
         String operatorExpressionString = ((Slice) ((Constant) operatorExpression).value()).toStringUtf8();
-        Comparison.Operator operator = Comparison.Operator.valueOf(operatorExpressionString);
+        ComparisonOperator operator = ComparisonOperator.valueOf(operatorExpressionString);
 
         Expression idExpression = arguments.get(2);
         checkArgument(idExpression instanceof Constant literal && literal.type().equals(VarcharType.VARCHAR), "id is expected to be a varchar: %s", idExpression.getClass().getSimpleName());
@@ -219,10 +218,10 @@ public final class DynamicFilters
     {
         private final DynamicFilterId id;
         private final Expression input;
-        private final Comparison.Operator operator;
+        private final ComparisonOperator operator;
         private final boolean nullAllowed;
 
-        public Descriptor(DynamicFilterId id, Expression input, Comparison.Operator operator, boolean nullAllowed)
+        public Descriptor(DynamicFilterId id, Expression input, ComparisonOperator operator, boolean nullAllowed)
         {
             this.id = requireNonNull(id, "id is null");
             this.input = requireNonNull(input, "input is null");
@@ -231,7 +230,7 @@ public final class DynamicFilters
             this.nullAllowed = nullAllowed;
         }
 
-        public Descriptor(DynamicFilterId id, Expression input, Comparison.Operator operator)
+        public Descriptor(DynamicFilterId id, Expression input, ComparisonOperator operator)
         {
             this(id, input, operator, false);
         }
@@ -251,7 +250,7 @@ public final class DynamicFilters
             return input;
         }
 
-        public Comparison.Operator getOperator()
+        public ComparisonOperator getOperator()
         {
             return operator;
         }

@@ -26,23 +26,9 @@ public interface PagesHash
 
     int getAddressIndex(int rightPosition, Page hashChannelsPage, long rawHash);
 
-    default int[] getAddressIndex(int[] positions, Page hashChannelsPage)
-    {
-        int[] result = new int[positions.length];
-        for (int i = 0; i < positions.length; i++) {
-            result[i] = getAddressIndex(positions[i], hashChannelsPage);
-        }
-        return result;
-    }
+    int[] getAddressIndex(int[] positions, Page hashChannelsPage);
 
-    default int[] getAddressIndex(int[] positions, Page hashChannelsPage, long[] rawHashes)
-    {
-        int[] result = new int[positions.length];
-        for (int i = 0; i < positions.length; i++) {
-            result[i] = getAddressIndex(positions[i], hashChannelsPage, rawHashes[positions[i]]);
-        }
-        return result;
-    }
+    int[] getAddressIndex(int[] positions, Page hashChannelsPage, long[] rawHashes);
 
     void appendTo(long position, PageBuilder pageBuilder, int outputChannelOffset);
 
@@ -56,9 +42,9 @@ public interface PagesHash
         //
 
         rawHash ^= rawHash >>> 33;
-        rawHash *= 0xff51afd7ed558ccdL;
+        rawHash *= 0xFF51AFD7ED558CCDL;
         rawHash ^= rawHash >>> 33;
-        rawHash *= 0xc4ceb9fe1a85ec53L;
+        rawHash *= 0xC4CEB9FE1A85EC53L;
         rawHash ^= rawHash >>> 33;
 
         return (int) (rawHash & mask);

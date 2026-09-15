@@ -15,7 +15,6 @@ package io.trino.operator.output;
 
 import io.trino.spi.block.Block;
 import io.trino.spi.block.DictionaryBlock;
-import io.trino.spi.block.LazyBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.block.ValueBlock;
 import io.trino.type.BlockTypeOperators.BlockPositionIsIdentical;
@@ -24,6 +23,7 @@ import it.unimi.dsi.fastutil.ints.IntArrays;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import jakarta.annotation.Nullable;
 
+import java.util.Arrays;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -33,12 +33,13 @@ import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.operator.output.PositionsAppenderUtil.calculateBlockResetSize;
 import static io.trino.operator.output.PositionsAppenderUtil.calculateNewArraySize;
 import static java.lang.Math.max;
+import static java.util.Objects.checkFromIndexSize;
 import static java.util.Objects.requireNonNull;
 
 /**
  * Dispatches the {@link #append} and {@link #appendRle} methods to the {@link #delegate} depending on the input {@link Block} class.
  */
-public class UnnestingPositionsAppender
+public final class UnnestingPositionsAppender
 {
     private static final int INSTANCE_SIZE = instanceSize(UnnestingPositionsAppender.class);
 
@@ -56,6 +57,7 @@ public class UnnestingPositionsAppender
 
     @Nullable
     private ValueBlock dictionary;
+    private double averageDictionaryEntrySizeInBytes;
     private DictionaryIdsBuilder dictionaryIdsBuilder;
 
     @Nullable
@@ -67,6 +69,49 @@ public class UnnestingPositionsAppender
         this.delegate = requireNonNull(delegate, "delegate is null");
         this.dictionaryIdsBuilder = new DictionaryIdsBuilder(1024);
         this.identicalOperator = identicalOperator.orElse(null);
+    }
+
+    public void appendRange(Block source, int offset, int length)
+    {
+        if (length == 0) {
+            return;
+        }
+
+        switch (source) {
+            case RunLengthEncodedBlock rleBlock -> {
+                appendRle(rleBlock.getValue(), length);
+            }
+            case DictionaryBlock dictionaryBlock -> {
+                ValueBlock dictionary = dictionaryBlock.getDictionary();
+                if (state == State.UNINITIALIZED) {
+                    startDictionary(dictionary);
+                    dictionaryIdsBuilder.appendRange(dictionaryBlock, offset, length);
+                }
+                else if (state == State.DICTIONARY && this.dictionary == dictionary) {
+                    dictionaryIdsBuilder.appendRange(dictionaryBlock, offset, length);
+                }
+                else {
+                    transitionToDirect();
+
+                    int[] rawIds = dictionaryBlock.getRawIds();
+                    int rawOffset = dictionaryBlock.getRawIdsOffset();
+                    checkFromIndexSize(rawOffset + offset, length, rawIds.length);
+                    IntArrayList positionsList;
+                    if (rawOffset + offset == 0) {
+                        // Fast path, no copy necessary
+                        positionsList = IntArrayList.wrap(rawIds, length);
+                    }
+                    else {
+                        positionsList = IntArrayList.wrap(Arrays.copyOfRange(rawIds, rawOffset + offset, rawOffset + offset + length));
+                    }
+                    delegate.append(positionsList, dictionary);
+                }
+            }
+            case ValueBlock valueBlock -> {
+                transitionToDirect();
+                delegate.appendRange(valueBlock, offset, length);
+            }
+        }
     }
 
     public void append(IntArrayList positions, Block source)
@@ -82,8 +127,7 @@ public class UnnestingPositionsAppender
             case DictionaryBlock dictionaryBlock -> {
                 ValueBlock dictionary = dictionaryBlock.getDictionary();
                 if (state == State.UNINITIALIZED) {
-                    state = State.DICTIONARY;
-                    this.dictionary = dictionary;
+                    startDictionary(dictionary);
                     dictionaryIdsBuilder.appendPositions(positions, dictionaryBlock);
                 }
                 else if (state == State.DICTIONARY && this.dictionary == dictionary) {
@@ -103,7 +147,6 @@ public class UnnestingPositionsAppender
                 transitionToDirect();
                 delegate.append(positions, valueBlock);
             }
-            case LazyBlock ignore -> throw new IllegalArgumentException("Unsupported block type: " + source.getClass().getSimpleName());
         }
     }
 
@@ -149,8 +192,15 @@ public class UnnestingPositionsAppender
             case RunLengthEncodedBlock runLengthEncodedBlock -> delegate.append(0, runLengthEncodedBlock.getValue());
             case DictionaryBlock dictionaryBlock -> delegate.append(dictionaryBlock.getId(position), dictionaryBlock.getDictionary());
             case ValueBlock valueBlock -> delegate.append(position, valueBlock);
-            case LazyBlock ignore -> throw new IllegalArgumentException("Unsupported block type: " + source.getClass().getSimpleName());
         }
+    }
+
+    private void startDictionary(ValueBlock dictionary)
+    {
+        state = State.DICTIONARY;
+        this.dictionary = dictionary;
+        // computed once per dictionary because the flattened size is estimated on every fullness check
+        this.averageDictionaryEntrySizeInBytes = dictionary.getSizeInBytes() / (double) dictionary.getPositionCount();
     }
 
     private void transitionToDirect()
@@ -159,6 +209,7 @@ public class UnnestingPositionsAppender
             int[] dictionaryIds = dictionaryIdsBuilder.getDictionaryIds();
             delegate.append(IntArrayList.wrap(dictionaryIds, dictionaryIdsBuilder.size()), dictionary);
             dictionary = null;
+            averageDictionaryEntrySizeInBytes = 0;
             dictionaryIdsBuilder = dictionaryIdsBuilder.newBuilderLike();
         }
         else if (state == State.RLE) {
@@ -186,6 +237,7 @@ public class UnnestingPositionsAppender
     {
         state = State.UNINITIALIZED;
         dictionary = null;
+        averageDictionaryEntrySizeInBytes = 0;
         dictionaryIdsBuilder = dictionaryIdsBuilder.newBuilderLike();
         rleValue = null;
         rlePositionCount = 0;
@@ -211,8 +263,12 @@ public class UnnestingPositionsAppender
     void addSizesToAccumulator(PositionsAppenderSizeAccumulator accumulator)
     {
         long sizeInBytes = getSizeInBytes();
-        // dictionary size is not included due to the expense of the calculation, so this will under-report for dictionaries
-        long directSizeInBytes = (rleValue == null) ? sizeInBytes : (rleValue.getSizeInBytes() * rlePositionCount);
+        long directSizeInBytes = switch (state) {
+            case UNINITIALIZED, DIRECT -> sizeInBytes;
+            case RLE -> rleValue.getSizeInBytes() * rlePositionCount;
+            // buffered ids expand to the average dictionary entry size when flattened
+            case DICTIONARY -> (long) (averageDictionaryEntrySizeInBytes * dictionaryIdsBuilder.size());
+        };
         accumulator.accumulate(sizeInBytes, directSizeInBytes);
     }
 
@@ -221,6 +277,17 @@ public class UnnestingPositionsAppender
         if (state == State.DICTIONARY && dictionary != null) {
             transitionToDirect();
         }
+    }
+
+    /**
+     * True when appending positions from {@code source} flattens the buffered dictionary into the delegate.
+     */
+    public boolean appendFlattensDictionary(Block source)
+    {
+        if (state != State.DICTIONARY) {
+            return false;
+        }
+        return !(source instanceof DictionaryBlock dictionaryBlock) || dictionaryBlock.getDictionary() != dictionary;
     }
 
     public boolean shouldForceFlushBeforeRelease()
@@ -238,7 +305,7 @@ public class UnnestingPositionsAppender
         return false;
     }
 
-    private static class DictionaryIdsBuilder
+    private static final class DictionaryIdsBuilder
     {
         private static final int INSTANCE_SIZE = instanceSize(DictionaryIdsBuilder.class);
 
@@ -276,6 +343,17 @@ public class UnnestingPositionsAppender
                 dictionaryIds[size + i] = block.getId(positions.getInt(i));
             }
             size += positions.size();
+        }
+
+        public void appendRange(DictionaryBlock block, int offset, int length)
+        {
+            checkArgument(length > 0, "block has no positions");
+            checkFromIndexSize(offset, length, block.getPositionCount());
+            ensureCapacity(size + length);
+            int[] rawIds = block.getRawIds();
+            int rawIdsOffset = block.getRawIdsOffset();
+            System.arraycopy(rawIds, rawIdsOffset + offset, dictionaryIds, size, length);
+            size += length;
         }
 
         public DictionaryIdsBuilder newBuilderLike()

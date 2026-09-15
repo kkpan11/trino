@@ -64,10 +64,10 @@ are also available. They are discussed later in this topic.
     missing to prevent future metastore calls.
   - `false`
 * - `hive.metastore-cache-ttl`
-  - Duration of how long cached metastore data is considered valid.
+  - [Duration](prop-type-duration) of how long cached metastore data is considered valid.
   - `0s`
 * - `hive.metastore-stats-cache-ttl`
-  - Duration of how long cached metastore statistics are considered valid.
+  - [Duration](prop-type-duration) of how long cached metastore statistics are considered valid.
   - `5m`
 * - `hive.metastore-cache-maximum-size`
   - Maximum number of metastore data objects in the Hive metastore cache.
@@ -80,6 +80,14 @@ are also available. They are discussed later in this topic.
 * - `hive.metastore-refresh-max-threads`
   - Maximum threads used to refresh cached metastore data.
   - `10`
+* - `hive.user-metastore-cache-ttl`
+  - [Duration](prop-type-duration) of how long cached metastore statistics, which are user specific
+    in user impersonation scenarios, are considered valid.
+  - `0s`
+* - `hive.user-metastore-cache-maximum-size`
+  - Maximum number of metastore data objects in the Hive metastore cache,
+    which are user specific in user impersonation scenarios.
+  - `1000`
 * - `hive.hide-delta-lake-tables`
   - Controls whether to hide Delta Lake tables in table listings. Currently
     applies only when using the AWS Glue metastore.
@@ -149,9 +157,6 @@ properties:
 * - `hive.metastore.thrift.client.ssl.trust-certificate-password`
   - Password for the trust store.
   -
-* - `hive.metastore.thrift.batch-fetch.enabled`
-  - Enable fetching tables and views from all schemas in a single request.
-  - `true`
 * - `hive.metastore.service.principal`
   - The Kerberos principal of the Hive metastore service.
   -
@@ -198,37 +203,42 @@ properties:
   - The term "Hive metastore catalog name" refers to the abstraction concept
     within Hive, enabling various systems to connect to distinct, independent
     catalogs stored in the metastore. By default, the catalog name in Hive
-    metastore is set to "hive." When this configuration property is left empty,
+    metastore is set to "hive". When this configuration property is left empty,
     the default catalog of the Hive metastore will be accessed.
   -
 :::
 
-Use the following configuration properties for HTTP client transport mode, so
-when the `hive.metastore.uri` uses the `http://` or `https://` protocol.
+(iceberg-hive-catalog)=
+### Iceberg-specific Hive catalog configuration properties
 
-:::{list-table} Thrift metastore HTTP configuration properties
-:widths: 40, 60
+When using the Hive catalog, the Iceberg connector supports the same
+{ref}`general Thrift metastore configuration properties <hive-thrift-metastore>` 
+as previously described with the following additional property:
+
+:::{list-table} Iceberg Hive catalog configuration property
+:widths: 35, 50, 15
 :header-rows: 1
 
 * - Property name
   - Description
-* - `hive.metastore.http.client.authentication.type`
-  - The authentication type to use with the HTTP client transport mode. When set
-    to the only supported value of `BEARER`, the token configured in
-    `hive.metastore.http.client.bearer-token` is used to authenticate to the
-    metastore service.
-* - `hive.metastore.http.client.bearer-token`
-  - Bearer token to use for authentication with the metastore service when HTTPS
-    transport mode is used by using a `https://` protocol in
-    `hive.metastore.uri`. This must not be set with `http://`.
-* - `hive.metastore.http.client.additional-headers`
-  - Additional headers to send with metastore service requests. These headers
-    must be comma-separated and delimited using `:`. For example,
-    `header1:value1,header2:value2` sends two headers `header1` and `header2`
-    with the values as `value1` and `value2`. Escape comma (`,`) or colon(`:`)
-    characters in a header name or value with a backslash (`\`). Use
-    `X-Databricks-Catalog-Name:[catalog_name]` to configure the required
-    header values for Unity catalog.
+  - Default
+* - `iceberg.hive-catalog.locking-enabled`
+  - Commit to tables using Hive locks.
+  - `true`
+:::
+
+:::{warning}
+Setting `iceberg.hive-catalog.locking-enabled=false` will cause the catalog to
+commit to tables without using Hive locks. This should only be set to false if all
+following conditions are met:
+
+* [HIVE-26882](https://issues.apache.org/jira/browse/HIVE-26882) is available on
+  the Hive metastore server. Requires version 2.3.10, 4.0.0-beta-1 or later.
+* [HIVE-28121](https://issues.apache.org/jira/browse/HIVE-28121) is available on
+  the Hive metastore server, if it is backed by MySQL or MariaDB. Requires version
+  2.3.10, 4.1.0, 4.0.1 or later.
+* All other catalogs committing to tables that this catalogs commits to are also
+  on Iceberg 1.3 or later, and disabled Hive locks on commit.
 :::
 
 (hive-thrift-metastore-authentication)=
@@ -290,7 +300,7 @@ properties:
     metadata is removed, and the data continues to consume disk space. This
     occurs because the Hive metastore is responsible for deleting the internal
     table data. When the metastore is configured to use Kerberos authentication,
-    all of the HDFS operations performed by the metastore are impersonated.
+    all the HDFS operations performed by the metastore are impersonated.
     Errors deleting data are silently ignored.
   -
 * - `hive.metastore.client.keytab`
@@ -414,6 +424,12 @@ properties:
 * - `hive.metastore.glue.partitions-segments`
   - Number of segments for partitioned Glue tables.
   - `5`
+* - `hive.metastore.glue.skip-archive`
+  - AWS Glue has the ability to archive older table versions and a user can
+    roll back the table to any historical version if needed. By default, the
+    Hive Connector backed by Glue will not skip the archival of older table
+    versions.
+  - `false`
 :::
 
 (iceberg-glue-catalog)=
@@ -430,12 +446,12 @@ described with the following additional property:
 * - Property name
   - Description
   - Default
-* - `iceberg.glue.skip-archive`
-  - Skip archiving an old table version when creating a new version in a commit.
-    See [AWS Glue Skip
-    Archive](https://iceberg.apache.org/docs/latest/aws/#skip-archive).
+* - `iceberg.glue.cache-table-metadata`
+  - While updating the table in AWS Glue, store the table metadata with the
+    purpose of accelerating `information_schema.columns` and
+    `system.metadata.table_comments` queries.
   - `true`
-:::
+  :::
 
 ## Iceberg-specific metastores
 
@@ -471,11 +487,26 @@ following properties:
   - Warehouse identifier/location for the catalog (optional). Example:
     `s3://my_bucket/warehouse_location`
 * - `iceberg.rest-catalog.security`
-  - The type of security to use (default: `NONE`).  `OAUTH2` requires either a
-    `token` or `credential`. Example: `OAUTH2`
+  - The type of security to use (default: `NONE`). Possible values are `NONE`, 
+    `SIGV4`, `GOOGLE` or `OAUTH2`. `OAUTH2` requires either a `token` or a `credential`.
+    `SIGV4` signs requests with credentials from `s3.iam-role` if configured,
+    otherwise from `s3.aws-access-key` and `s3.aws-secret-key` if set,
+    and otherwise from the AWS default credentials provider chain.
 * - `iceberg.rest-catalog.session`
   - Session information included when communicating with the REST Catalog.
     Options are `NONE` or `USER` (default: `NONE`).
+* - `iceberg.rest-catalog.connection-timeout`
+  - Maximum time [Duration](prop-type-duration) allowed for socket connection
+    requests to complete before timing out.
+* - `iceberg.rest-catalog.socket-timeout`
+  - Maximum time [Duration](prop-type-duration) allowed socket read/write operations
+    before timing out.
+* - `iceberg.rest-catalog.max-retries`
+  - Maximum number of retry attempts for failed REST catalog HTTP requests
+    (default: `5`). Only idempotent requests, such as `GET`, are retried on
+    server errors; retries use exponential backoff.
+* - `iceberg.rest-catalog.session-timeout`
+  - [Duration](prop-type-duration) to keep authentication session in cache. Defaults to `1h`.
 * - `iceberg.rest-catalog.oauth2.token`
   - The bearer token used for interactions with the server. A `token` or
     `credential` is required for `OAUTH2` security. Example: `AbCdEf123456`
@@ -486,7 +517,48 @@ following properties:
 * - `iceberg.rest-catalog.oauth2.scope`
   - Scope to be used when communicating with the REST Catalog. Applicable only
     when using `credential`.
-:::
+* - `iceberg.rest-catalog.oauth2.server-uri`
+  - The endpoint to retrieve access token from OAuth2 Server.
+* - `iceberg.rest-catalog.oauth2.token-refresh-enabled`
+  - Controls whether a token should be refreshed if information about its expiration time is available.
+    Defaults to `true`
+* - `iceberg.rest-catalog.oauth2.token-exchange-enabled`
+  - Controls whether to use the token exchange flow to acquire new tokens.
+    Defaults to `true` 
+* - `iceberg.rest-catalog.vended-credentials-enabled`
+  - Use credentials provided by the REST backend for file system access.
+    Defaults to `false`.
+* - `iceberg.rest-catalog.nested-namespace-enabled`
+  - Support querying objects under nested namespace.
+    Defaults to `false`.
+* - `iceberg.rest-catalog.view-endpoints-enabled`
+  - Enable view endpoints. Defaults to `true`.
+* - `iceberg.rest-catalog.metrics-reporting-enabled`
+  - Report table scan and commit metrics to the REST catalog server. Defaults
+    to `true`.
+* - `iceberg.rest-catalog.server-assigned-table-location-enabled`
+  - Let the REST catalog server assign locations for created tables instead of
+    computing a default location from the namespace location. Must be enabled
+    for BigLake metastore, which assigns table locations with a random suffix
+    and rejects client-chosen locations. Defaults to `false`.
+* - `iceberg.rest-catalog.signing-name`
+  - AWS SigV4 signing service name. Defaults to `execute-api`.
+* - `iceberg.rest-catalog.google-project-id`
+  - Google Cloud project name. This property must be set when `iceberg.rest-catalog.security` 
+    config property is set to `GOOGLE`. Example: `development-123456`.
+* - `iceberg.rest-catalog.case-insensitive-name-matching`
+  - Match namespace, table, and view names case insensitively. Defaults to `false`.
+* - `iceberg.rest-catalog.case-insensitive-name-matching.cache-ttl`
+  - [Duration](prop-type-duration) for which case-insensitive namespace, table, 
+    and view names are cached. Defaults to `1m`.
+* - `iceberg.rest-catalog.case-insensitive-name-matching.cache-max-size`
+  - Maximum number of entries per case-insensitive name mapping cache. Applies
+    independently to the namespace cache and the table/view cache. Defaults to
+    `10000`.
+* - `iceberg.rest-catalog.http-headers`
+  - Additional *non-sensitive* HTTP headers to include with requests to the REST catalog.
+    Example: `Header-1: value 1, Header-2: value 2`.
+  :::
 
 The following example shows a minimal catalog configuration using an Iceberg
 REST metadata catalog:
@@ -496,6 +568,40 @@ connector.name=iceberg
 iceberg.catalog.type=rest
 iceberg.rest-catalog.uri=http://iceberg-with-rest:8181
 ```
+
+`iceberg.security` must be `read_only` when connecting to Databricks Unity catalog
+using an Iceberg REST catalog:
+
+```properties
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.rest-catalog.uri=https://dbc-12345678-9999.cloud.databricks.com/api/2.1/unity-catalog/iceberg
+iceberg.security=read_only
+iceberg.rest-catalog.security=OAUTH2
+iceberg.rest-catalog.oauth2.token=***
+```
+
+`iceberg.rest-catalog.security` must be `GOOGLE` when connecting to BigLake metastore
+using an Iceberg REST catalog.
+
+```properties
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.unique-table-location=false
+iceberg.rest-catalog.warehouse=gs://example-bucket
+iceberg.rest-catalog.uri=https://biglake.googleapis.com/iceberg/v1beta/restcatalog
+iceberg.rest-catalog.security=GOOGLE
+iceberg.rest-catalog.google-project-id=example-project-id
+iceberg.rest-catalog.view-endpoints-enabled=false
+iceberg.rest-catalog.server-assigned-table-location-enabled=true
+fs.gcs.enabled=true
+gcs.json-key-file-path=/path/to/gcs_keyfile.json
+```
+
+`gcs.json-key` and `gcs.json-key-file-path` are optional. When omitted, [Application Default
+Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
+(ADC) are used, which supports GKE Workload Identity and other
+environment-based credential sources.
 
 The REST catalog supports [view management](sql-view-management) 
 using the [Iceberg View specification](https://iceberg.apache.org/view-spec/).
@@ -511,6 +617,37 @@ The Iceberg JDBC catalog is supported for the Iceberg connector.  At a minimum,
 `iceberg.jdbc-catalog.catalog-name` must be configured. When using any
 database besides PostgreSQL, a JDBC driver jar file must be placed in the plugin
 directory.
+
+:::{list-table} JDBC catalog configuration properties
+:widths: 40, 60
+:header-rows: 1
+
+* - Property name
+  - Description
+* - `iceberg.jdbc-catalog.driver-class`
+  - JDBC driver class name.
+* - `iceberg.jdbc-catalog.connection-url`
+  - The URI to connect to the JDBC server.
+* - `iceberg.jdbc-catalog.connection-user`
+  - Username for JDBC client.
+* - `iceberg.jdbc-catalog.connection-password`
+  - Password for JDBC client.
+* - `iceberg.jdbc-catalog.catalog-name`
+  - Iceberg JDBC metastore catalog name.
+* - `iceberg.jdbc-catalog.default-warehouse-dir`
+  - The default warehouse directory to use for JDBC.
+* - `iceberg.jdbc-catalog.schema-version`
+  - JDBC catalog schema version.
+    Valid values are `V0` or `V1`. Defaults to `V1`.
+* - `iceberg.jdbc-catalog.retryable-status-codes`
+  - On connection error to JDBC metastore, retry if
+    it is one of these JDBC status codes.
+    Valid value is a comma-separated list of status codes.
+    Note: JDBC catalog always retries the following status
+    codes: `08000,08003,08006,08007,40001`. Specify only
+    additional codes (such as `57000,57P03,57P04` if using
+    PostgreSQL driver) here.
+:::
 
 :::{warning}
 The JDBC catalog may have compatibility issues if Iceberg introduces breaking

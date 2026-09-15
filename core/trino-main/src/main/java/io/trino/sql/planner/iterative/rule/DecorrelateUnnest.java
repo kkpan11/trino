@@ -21,7 +21,6 @@ import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
 import io.trino.metadata.Metadata;
 import io.trino.sql.ir.Cast;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.IsNull;
@@ -52,13 +51,15 @@ import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.matching.Pattern.nonEmpty;
 import static io.trino.spi.StandardErrorCode.SUBQUERY_MULTIPLE_ROWS;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.sql.ir.Booleans.TRUE;
-import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
-import static io.trino.sql.ir.Comparison.Operator.LESS_THAN_OR_EQUAL;
+import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonOperator.LESS_THAN_OR_EQUAL;
+import static io.trino.sql.ir.IrExpressions.comparison;
 import static io.trino.sql.ir.IrExpressions.ifExpression;
 import static io.trino.sql.planner.LogicalPlanner.failFunction;
 import static io.trino.sql.planner.iterative.rule.ImplementLimitWithTies.rewriteLimitWithTiesWithPartitioning;
@@ -174,7 +175,7 @@ public class DecorrelateUnnest
         // 1. find EnforceSingleRowNode in the subquery
         Optional<PlanNode> enforceSingleRow = PlanNodeSearcher.searchFrom(searchRoot, context.getLookup())
                 .where(EnforceSingleRowNode.class::isInstance)
-                .recurseOnlyWhen(planNode -> false)
+                .recurseOnlyWhen(_ -> false)
                 .findFirst();
 
         if (enforceSingleRow.isPresent()) {
@@ -296,7 +297,7 @@ public class DecorrelateUnnest
                 .collect(toImmutableList());
         PlanNode unnestSource = lookup.resolve(unnestNode.getSource());
         boolean basedOnCorrelation = ImmutableSet.copyOf(correlation).containsAll(unnestSymbols) ||
-                unnestSource instanceof ProjectNode && ImmutableSet.copyOf(correlation).containsAll(SymbolsExtractor.extractUnique(((ProjectNode) unnestSource).getAssignments().getExpressions()));
+                unnestSource instanceof ProjectNode projectNode && ImmutableSet.copyOf(correlation).containsAll(SymbolsExtractor.extractUnique(projectNode.getAssignments().expressions()));
 
         return isScalar(unnestNode.getSource(), lookup) &&
                 unnestNode.getReplicateSymbols().isEmpty() &&
@@ -400,16 +401,17 @@ public class DecorrelateUnnest
                         ImmutableList.of(uniqueSymbol),
                         false,
                         rowNumberSymbol,
-                        Optional.of(2),
-                        Optional.empty());
+                        Optional.of(2));
             }
             Expression predicate = ifExpression(
-                    new Comparison(
+                    comparison(
+                            metadata,
+                            getCharVarcharCoercion(session),
                             GREATER_THAN,
                             rowNumberSymbol.toSymbolReference(),
                             new Constant(BIGINT, 1L)),
                     new Cast(
-                            failFunction(metadata, SUBQUERY_MULTIPLE_ROWS, "Scalar sub-query has returned multiple rows"),
+                            failFunction(metadata, getCharVarcharCoercion(session), SUBQUERY_MULTIPLE_ROWS, "Scalar sub-query has returned multiple rows"),
                             BOOLEAN),
                     TRUE);
 
@@ -442,7 +444,6 @@ public class DecorrelateUnnest
                         ImmutableList.of(uniqueSymbol),
                         false,
                         rowNumberSymbol,
-                        Optional.empty(),
                         Optional.empty());
             }
 
@@ -450,7 +451,7 @@ public class DecorrelateUnnest
                     new FilterNode(
                             idAllocator.getNextId(),
                             sourceNode,
-                            new Comparison(LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new Constant(BIGINT, node.getCount()))),
+                            comparison(metadata, getCharVarcharCoercion(session), LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new Constant(BIGINT, node.getCount()))),
                     Optional.of(rowNumberSymbol));
         }
 
@@ -462,16 +463,17 @@ public class DecorrelateUnnest
             // Do not reuse source's rowNumberSymbol, because it might not follow the TopNNode's ordering.
             Symbol rowNumberSymbol = symbolAllocator.newSymbol("row_number", BIGINT);
             WindowNode.Function rowNumberFunction = new WindowNode.Function(
-                    metadata.resolveBuiltinFunction("row_number", ImmutableList.of()),
+                    metadata.resolveBuiltinFunction(getCharVarcharCoercion(session), "row_number", ImmutableList.of()),
                     ImmutableList.of(),
+                    Optional.empty(),
                     DEFAULT_FRAME,
+                    false,
                     false);
             WindowNode windowNode = new WindowNode(
                     idAllocator.getNextId(),
                     source.getPlan(),
                     new DataOrganizationSpecification(ImmutableList.of(uniqueSymbol), Optional.of(node.getOrderingScheme())),
                     ImmutableMap.of(rowNumberSymbol, rowNumberFunction),
-                    Optional.empty(),
                     ImmutableSet.of(),
                     0);
 
@@ -479,7 +481,7 @@ public class DecorrelateUnnest
                     new FilterNode(
                             idAllocator.getNextId(),
                             windowNode,
-                            new Comparison(LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new Constant(BIGINT, node.getCount()))),
+                            comparison(metadata, getCharVarcharCoercion(session), LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new Constant(BIGINT, node.getCount()))),
                     Optional.of(rowNumberSymbol));
         }
 

@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.openlineage;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.operator.RetryPolicy;
 import io.trino.spi.eventlistener.QueryCompletedEvent;
 import io.trino.spi.eventlistener.QueryContext;
@@ -51,47 +52,49 @@ public class TrinoEventData
         throw new UnsupportedOperationException("This is a utility class and cannot be instantiated");
     }
 
-    static
-    {
+    static {
         queryIOMetadata = new QueryIOMetadata(Collections.emptyList(), Optional.empty());
 
         queryContext = new QueryContext(
                 "user",
                 "originalUser",
+                Set.of(), // originalRoles
                 Optional.of("principal"),
                 Set.of(), // enabledRoles
                 Set.of(), // groups
-                Optional.empty(), // traceToken
-                Optional.empty(), // remoteClientAddress
-                Optional.empty(), // userAgent
-                Optional.empty(), // clientInfo
+                Optional.of("traceToken"),
+                Optional.of("127.0.0.1"),
+                Optional.of("Some-User-Agent"),
+                Optional.of("Some client info"),
                 new HashSet<>(), // clientTags
                 new HashSet<>(), // clientCapabilities
-                Optional.of("source"),
+                Optional.of("some-trino-client"),
                 UTC_KEY.getId(),
                 Optional.of("catalog"),
                 Optional.of("schema"),
                 Optional.of(new ResourceGroupId("name")),
                 new HashMap<>(), // sessionProperties
                 new ResourceEstimates(Optional.empty(), Optional.empty(), Optional.of(1000L)),
-                "serverAddress", "serverVersion", "environment",
+                "serverAddress",
+                "serverVersion",
+                "environment",
                 Optional.of(QueryType.INSERT),
                 RetryPolicy.QUERY.toString());
 
         queryMetadata = new QueryMetadata(
                 "queryId",
-                Optional.empty(),
-                Optional.empty(),
+                Optional.of("transactionId"),
+                Optional.empty(), // encoding
                 "create table b.c as select * from y.z",
                 Optional.of("updateType"),
                 Optional.of("preparedQuery"),
                 "COMPLETED",
-                List.of(),
-                List.of(),
+                List.of(), // tables
+                List.of(), // routines
                 URI.create("http://localhost"),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty());
+                Optional.of("queryPlan"),
+                Optional.empty(), // jsonPlan
+                Optional.empty()); // payload
 
         queryStatistics = new QueryStatistics(
                 ofSeconds(1),
@@ -111,8 +114,7 @@ public class TrinoEventData
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
-                0L,
-                0L,
+                Optional.empty(),
                 0L,
                 0L,
                 0L,
@@ -137,6 +139,10 @@ public class TrinoEventData
                 Collections.emptyList(),
                 Collections.emptyList(),
                 Collections.emptyList(),
+                Collections.emptyList(),
+                Collections.emptyList(),
+                ImmutableMap.of(),
+                ImmutableMap.of(),
                 Optional.empty());
 
         queryCompleteEvent = new QueryCompletedEvent(
@@ -145,13 +151,14 @@ public class TrinoEventData
                 queryContext,
                 queryIOMetadata,
                 Optional.empty(),
+                Optional.empty(),
                 Collections.emptyList(),
-                Instant.now(),
-                Instant.now(),
-                Instant.now());
+                Instant.parse("2025-04-28T11:23:55.384424Z"),
+                Instant.parse("2025-04-28T11:24:16.256207Z"),
+                Instant.parse("2025-04-28T11:24:26.993340Z"));
 
         queryCreatedEvent = new QueryCreatedEvent(
-                Instant.now(),
+                Instant.parse("2025-04-28T11:23:55.384424Z"),
                 queryContext,
                 queryMetadata);
     }

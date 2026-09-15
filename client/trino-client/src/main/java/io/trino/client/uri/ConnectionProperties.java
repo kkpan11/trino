@@ -16,6 +16,7 @@ package io.trino.client.uri;
 import com.google.common.base.CharMatcher;
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.net.HostAndPort;
 import io.airlift.units.Duration;
@@ -23,6 +24,7 @@ import io.trino.client.ClientSelectedRole;
 import io.trino.client.DnsResolver;
 import io.trino.client.auth.external.ExternalRedirectStrategy;
 import io.trino.client.spooling.encoding.QueryDataDecoders;
+import io.trino.client.uri.AbstractConnectionProperty.Validator;
 import org.ietf.jgss.GSSCredential;
 
 import java.io.File;
@@ -40,11 +42,10 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
-import static com.google.common.collect.Maps.immutableEntry;
 import static com.google.common.collect.Streams.stream;
 import static io.trino.client.ClientSelectedRole.Type.ALL;
 import static io.trino.client.ClientSelectedRole.Type.NONE;
-import static io.trino.client.uri.AbstractConnectionProperty.Validator;
+import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.client.uri.AbstractConnectionProperty.validator;
 import static io.trino.client.uri.ConnectionProperties.SslVerificationMode.FULL;
 import static java.lang.String.format;
@@ -99,6 +100,7 @@ final class ConnectionProperties
     public static final ConnectionProperty<String, Map<String, String>> EXTRA_CREDENTIALS = new ExtraCredentials();
     public static final ConnectionProperty<String, String> CLIENT_INFO = new ClientInfo();
     public static final ConnectionProperty<String, Set<String>> CLIENT_TAGS = new ClientTags();
+    public static final ConnectionProperty<String, Map<String, String>> EXTRA_HEADERS = new ExtraHeaders();
     public static final ConnectionProperty<String, String> TRACE_TOKEN = new TraceToken();
     public static final ConnectionProperty<String, Map<String, String>> SESSION_PROPERTIES = new SessionProperties();
     public static final ConnectionProperty<String, String> SOURCE = new Source();
@@ -115,6 +117,8 @@ final class ConnectionProperties
     public static final ConnectionProperty<String, LoggingLevel> HTTP_LOGGING_LEVEL = new HttpLoggingLevel();
     public static final ConnectionProperty<String, Map<String, String>> RESOURCE_ESTIMATES = new ResourceEstimates();
     public static final ConnectionProperty<String, List<String>> SQL_PATH = new SqlPath();
+    public static final ConnectionProperty<String, Boolean> VALIDATE_CONNECTION = new ValidateConnection();
+    public static final ConnectionProperty<String, Boolean> DISALLOW_LOCAL_REDIRECT = new LocalRedirectDisallowed();
 
     private static final Set<ConnectionProperty<?, ?>> ALL_PROPERTIES = ImmutableSet.<ConnectionProperty<?, ?>>builder()
             // Keep sorted
@@ -127,6 +131,7 @@ final class ConnectionProperties
             .add(CLIENT_INFO)
             .add(CLIENT_TAGS)
             .add(DISABLE_COMPRESSION)
+            .add(DISALLOW_LOCAL_REDIRECT)
             .add(DNS_RESOLVER)
             .add(DNS_RESOLVER_CONTEXT)
             .add(ENCODING)
@@ -136,6 +141,7 @@ final class ConnectionProperties
             .add(EXTERNAL_AUTHENTICATION_TIMEOUT)
             .add(EXTERNAL_AUTHENTICATION_TOKEN_CACHE)
             .add(EXTRA_CREDENTIALS)
+            .add(EXTRA_HEADERS)
             .add(HOSTNAME_IN_CERTIFICATE)
             .add(HTTP_LOGGING_LEVEL)
             .add(HTTP_PROXY)
@@ -172,6 +178,7 @@ final class ConnectionProperties
             .add(TIMEZONE)
             .add(TRACE_TOKEN)
             .add(USER)
+            .add(VALIDATE_CONNECTION)
             .build();
 
     private static final Map<String, ConnectionProperty<?, ?>> KEY_LOOKUP = unmodifiableMap(ALL_PROPERTIES.stream()
@@ -302,7 +309,7 @@ final class ConnectionProperties
             extends AbstractConnectionProperty<String, HostAndPort>
     {
         private static final Validator<Properties> NO_HTTP_PROXY = validator(
-                properties -> !HTTP_PROXY.getValue(properties).isPresent(),
+                properties -> HTTP_PROXY.getValue(properties).isEmpty(),
                 format("Connection property %s cannot be used when %s is set", PropertyName.SOCKS_PROXY, PropertyName.HTTP_PROXY));
 
         public SocksProxy()
@@ -315,7 +322,7 @@ final class ConnectionProperties
             extends AbstractConnectionProperty<String, HostAndPort>
     {
         private static final Validator<Properties> NO_SOCKS_PROXY = validator(
-                properties -> !SOCKS_PROXY.getValue(properties).isPresent(),
+                properties -> SOCKS_PROXY.getValue(properties).isEmpty(),
                 format("Connection property %s cannot be used when %s is set", PropertyName.HTTP_PROXY, PropertyName.SOCKS_PROXY));
 
         public HttpProxy()
@@ -413,8 +420,7 @@ final class ConnectionProperties
 
         public AssumeLiteralNamesInMetadataCallsForNonConformingClients()
         {
-            super(
-                    PropertyName.ASSUME_LITERAL_NAMES_IN_METADATA_CALLS_FOR_NON_CONFORMING_CLIENTS,
+            super(PropertyName.ASSUME_LITERAL_NAMES_IN_METADATA_CALLS_FOR_NON_CONFORMING_CLIENTS,
                     NOT_REQUIRED,
                     validator(
                             AssumeLiteralUnderscoreInMetadataCallsForNonConformingClients.IS_NOT_ENABLED.or(IS_NOT_ENABLED),
@@ -433,8 +439,7 @@ final class ConnectionProperties
 
         public AssumeLiteralUnderscoreInMetadataCallsForNonConformingClients()
         {
-            super(
-                    PropertyName.ASSUME_LITERAL_UNDERSCORE_IN_METADATA_CALLS_FOR_NON_CONFORMING_CLIENTS,
+            super(PropertyName.ASSUME_LITERAL_UNDERSCORE_IN_METADATA_CALLS_FOR_NON_CONFORMING_CLIENTS,
                     NOT_REQUIRED,
                     validator(
                             AssumeLiteralNamesInMetadataCallsForNonConformingClients.IS_NOT_ENABLED.or(IS_NOT_ENABLED),
@@ -476,8 +481,7 @@ final class ConnectionProperties
 
         public SslVerification()
         {
-            super(
-                    PropertyName.SSL_VERIFICATION,
+            super(PropertyName.SSL_VERIFICATION,
                     Optional.of(FULL),
                     NOT_REQUIRED,
                     validator(IF_SSL_ENABLED, format("Connection property %s requires TLS/SSL to be enabled", PropertyName.SSL_VERIFICATION)),
@@ -590,14 +594,23 @@ final class ConnectionProperties
         }
     }
 
-    private static Predicate<Properties> isKerberosEnabled()
+    private static class ValidateConnection
+            extends AbstractConnectionProperty<String, Boolean>
     {
-        return properties -> KERBEROS_REMOTE_SERVICE_NAME.getValue(properties).isPresent();
+        public ValidateConnection()
+        {
+            super(PropertyName.VALIDATE_CONNECTION, NOT_REQUIRED, ALLOWED, BOOLEAN_CONVERTER);
+        }
+    }
+
+    private static boolean isKerberosEnabled(Properties properties)
+    {
+        return KERBEROS_REMOTE_SERVICE_NAME.getValue(properties).isPresent();
     }
 
     private static Validator<Properties> validateKerberosWithoutDelegation(PropertyName propertyName)
     {
-        return validator(isKerberosEnabled(), format("Connection property %s requires %s to be set", propertyName, PropertyName.KERBEROS_REMOTE_SERVICE_NAME))
+        return validator(ConnectionProperties::isKerberosEnabled, format("Connection property %s requires %s to be set", propertyName, PropertyName.KERBEROS_REMOTE_SERVICE_NAME))
                 .and(validator(
                         properties -> !KERBEROS_DELEGATION.getValueOrDefault(properties, false),
                         format("Connection property %s cannot be set if %s is enabled", propertyName, PropertyName.KERBEROS_DELEGATION)));
@@ -605,7 +618,7 @@ final class ConnectionProperties
 
     private static Validator<Properties> validateKerberosWithDelegation(PropertyName propertyName)
     {
-        return validator(isKerberosEnabled(), format("Connection property %s requires %s to be set", propertyName, PropertyName.KERBEROS_REMOTE_SERVICE_NAME))
+        return validator(ConnectionProperties::isKerberosEnabled, format("Connection property %s requires %s to be set", propertyName, PropertyName.KERBEROS_REMOTE_SERVICE_NAME))
                 .and(validator(
                         properties -> KERBEROS_DELEGATION.getValueOrDefault(properties, false),
                         format("Connection property %s requires %s to be enabled", propertyName, PropertyName.KERBEROS_DELEGATION)));
@@ -616,7 +629,7 @@ final class ConnectionProperties
     {
         public KerberosServicePrincipalPattern()
         {
-            super(PropertyName.KERBEROS_SERVICE_PRINCIPAL_PATTERN, Optional.of("${SERVICE}@${HOST}"), isKerberosEnabled(), ALLOWED, STRING_CONVERTER);
+            super(PropertyName.KERBEROS_SERVICE_PRINCIPAL_PATTERN, Optional.of("${SERVICE}@${HOST}"), ConnectionProperties::isKerberosEnabled, ALLOWED, STRING_CONVERTER);
         }
     }
 
@@ -634,7 +647,7 @@ final class ConnectionProperties
     {
         public KerberosUseCanonicalHostname()
         {
-            super(PropertyName.KERBEROS_USE_CANONICAL_HOSTNAME, Optional.of(true), isKerberosEnabled(), ALLOWED, BOOLEAN_CONVERTER);
+            super(PropertyName.KERBEROS_USE_CANONICAL_HOSTNAME, Optional.of(true), ConnectionProperties::isKerberosEnabled, ALLOWED, BOOLEAN_CONVERTER);
         }
     }
 
@@ -670,7 +683,7 @@ final class ConnectionProperties
     {
         public KerberosDelegation()
         {
-            super(PropertyName.KERBEROS_DELEGATION, Optional.of(false), isKerberosEnabled(), ALLOWED, BOOLEAN_CONVERTER);
+            super(PropertyName.KERBEROS_DELEGATION, Optional.of(false), ConnectionProperties::isKerberosEnabled, ALLOWED, BOOLEAN_CONVERTER);
         }
     }
 
@@ -708,8 +721,7 @@ final class ConnectionProperties
 
         public ExternalAuthenticationRedirectHandlers()
         {
-            super(
-                    PropertyName.EXTERNAL_AUTHENTICATION_REDIRECT_HANDLERS,
+            super(PropertyName.EXTERNAL_AUTHENTICATION_REDIRECT_HANDLERS,
                     Optional.of(singletonList(ExternalRedirectStrategy.OPEN)),
                     NOT_REQUIRED,
                     ALLOWED,
@@ -773,6 +785,42 @@ final class ConnectionProperties
             return values.entrySet().stream()
                     .map(entry -> entry.getKey() + ":" + entry.getValue())
                     .collect(Collectors.joining(";"));
+        }
+    }
+
+    private static class ExtraHeaders
+            extends AbstractConnectionProperty<String, Map<String, String>>
+    {
+        private static final Validator<Properties> VALIDATE_EXTRA_HEADER = validator(
+                ExtraHeaders::isNotReservedHeader,
+                format("Connection property %s cannot override any of the Trino protocol headers", PropertyName.EXTRA_HEADERS));
+
+        public ExtraHeaders()
+        {
+            super(PropertyName.EXTRA_HEADERS, NOT_REQUIRED, VALIDATE_EXTRA_HEADER, converter(ExtraHeaders::parseExtraHeaders, ExtraHeaders::toString));
+        }
+
+        // Extra headers consists of a list of header name value pairs.
+        // E.g., `jdbc:trino://example.net:8080/?extraHeaders=X-Trino-Route:foo;X-Trino-Custom:bar` will send
+        // HTTP headers `X-Trino-Route=foo` and `X-Trino-Custom=bar`.
+        // These headers must not conflict with Trino protocol headers.
+        public static Map<String, String> parseExtraHeaders(String extraHeadersString)
+        {
+            return new MapPropertyParser(PropertyName.EXTRA_HEADERS.toString()).parse(extraHeadersString);
+        }
+
+        public static String toString(Map<String, String> values)
+        {
+            return values.entrySet().stream()
+                    .map(entry -> entry.getKey() + ":" + entry.getValue())
+                    .collect(Collectors.joining(";"));
+        }
+
+        private static boolean isNotReservedHeader(Properties properties)
+        {
+            Map<String, String> extraHeaders = EXTRA_HEADERS.getValueOrDefault(properties, ImmutableMap.of());
+            return extraHeaders.keySet().stream()
+                    .noneMatch(TRINO_HEADERS::isProtocolHeader);
         }
     }
 
@@ -947,6 +995,15 @@ final class ConnectionProperties
         }
     }
 
+    private static class LocalRedirectDisallowed
+            extends AbstractConnectionProperty<String, Boolean>
+    {
+        public LocalRedirectDisallowed()
+        {
+            super(PropertyName.DISALLOW_LOCAL_REDIRECT, Optional.of(false), NOT_REQUIRED, ALLOWED, BOOLEAN_CONVERTER);
+        }
+    }
+
     private static class MapPropertyParser
     {
         private static final CharMatcher PRINTABLE_ASCII = CharMatcher.inRange((char) 0x21, (char) 0x7E);
@@ -982,7 +1039,7 @@ final class ConnectionProperties
             checkArgument(PRINTABLE_ASCII.matchesAllOf(key), "%s key '%s' contains spaces or is not printable ASCII", mapName, key);
             // do not log value as it may contain sensitive information
             checkArgument(PRINTABLE_ASCII.matchesAllOf(value), "%s value for key '%s' contains spaces or is not printable ASCII", mapName, key);
-            return immutableEntry(key, value);
+            return Map.entry(key, value);
         }
     }
 }

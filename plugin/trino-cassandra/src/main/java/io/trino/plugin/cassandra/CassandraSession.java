@@ -17,7 +17,6 @@ import com.datastax.oss.driver.api.core.AllNodesFailedException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.ProtocolVersion;
-import com.datastax.oss.driver.api.core.Version;
 import com.datastax.oss.driver.api.core.connection.ReconnectionPolicy;
 import com.datastax.oss.driver.api.core.cql.PreparedStatement;
 import com.datastax.oss.driver.api.core.cql.ResultSet;
@@ -38,10 +37,8 @@ import com.datastax.oss.driver.api.core.type.MapType;
 import com.datastax.oss.driver.api.core.type.SetType;
 import com.datastax.oss.driver.api.core.type.TupleType;
 import com.datastax.oss.driver.api.core.type.UserDefinedType;
-import com.datastax.oss.driver.api.querybuilder.QueryBuilder;
 import com.datastax.oss.driver.api.querybuilder.relation.Relation;
 import com.datastax.oss.driver.api.querybuilder.select.Select;
-import com.datastax.oss.driver.api.querybuilder.term.Term;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Ordering;
@@ -81,7 +78,6 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Iterables.transform;
-import static io.trino.plugin.cassandra.CassandraErrorCode.CASSANDRA_VERSION_ERROR;
 import static io.trino.plugin.cassandra.CassandraMetadata.PRESTO_COMMENT_METADATA;
 import static io.trino.plugin.cassandra.util.CassandraCqlUtils.selectDistinctFrom;
 import static io.trino.plugin.cassandra.util.CassandraCqlUtils.validSchemaName;
@@ -101,7 +97,6 @@ public class CassandraSession
 
     private static final String SYSTEM = "system";
     private static final String SIZE_ESTIMATES = "size_estimates";
-    private static final Version PARTITION_FETCH_WITH_IN_PREDICATE_VERSION = Version.parse("2.2");
 
     private final CassandraTypeManager cassandraTypeManager;
     private final JsonCodec<List<ExtraColumnMetadata>> extraColumnMetadataCodec;
@@ -131,18 +126,6 @@ public class CassandraSession
             session = sessionSupplier.get();
         }
         return session;
-    }
-
-    public Version getCassandraVersion()
-    {
-        ResultSet result = executeWithSession(session -> session.execute("select release_version from system.local"));
-        Row versionRow = result.one();
-        if (versionRow == null) {
-            throw new TrinoException(CASSANDRA_VERSION_ERROR, "The cluster version is not available. " +
-                                                              "Please make sure that the Cassandra cluster is up and running, " +
-                                                              "and that the contact points are specified correctly.");
-        }
-        return Version.parse(versionRow.getString("release_version"));
     }
 
     public ProtocolVersion getProtocolVersion()
@@ -244,8 +227,8 @@ public class CassandraSession
         // check if there is a comment to establish column ordering
         Object comment = tableMeta.getOptions().get(CqlIdentifier.fromInternal("comment"));
         Set<String> hiddenColumns = ImmutableSet.of();
-        if (comment instanceof String && ((String) comment).startsWith(PRESTO_COMMENT_METADATA)) {
-            String columnOrderingString = ((String) comment).substring(PRESTO_COMMENT_METADATA.length());
+        if (comment instanceof String string && string.startsWith(PRESTO_COMMENT_METADATA)) {
+            String columnOrderingString = string.substring(PRESTO_COMMENT_METADATA.length());
 
             // column ordering
             List<ExtraColumnMetadata> extras = extraColumnMetadataCodec.fromJson(columnOrderingString);
@@ -317,7 +300,9 @@ public class CassandraSession
                     throw new TrinoException(
                             NOT_SUPPORTED,
                             format("More than one keyspace has been found for the case insensitive schema name: %s -> (%s, %s)",
-                                    caseInsensitiveSchemaName, result.getName(), keyspace.getName()));
+                                    caseInsensitiveSchemaName,
+                                    result.getName(),
+                                    keyspace.getName()));
                 }
                 result = keyspace;
             }
@@ -348,7 +333,8 @@ public class CassandraSession
         throw new TrinoException(
                 NOT_SUPPORTED,
                 format("More than one table has been found for the case insensitive table name: %s -> (%s)",
-                        caseInsensitiveTableName, tableNames));
+                        caseInsensitiveTableName,
+                        tableNames));
     }
 
     public boolean isMaterializedView(SchemaTableName schemaTableName)
@@ -366,7 +352,9 @@ public class CassandraSession
                 throw new TrinoException(
                         NOT_SUPPORTED,
                         format("More than one column has been found for the case insensitive column name: %s -> (%s, %s)",
-                                lowercaseName, lowercaseNameToColumnMap.get(lowercaseName).getName(), column.getName()));
+                                lowercaseName,
+                                lowercaseNameToColumnMap.get(lowercaseName).getName(),
+                                column.getName()));
             }
             lowercaseNameToColumnMap.put(lowercaseName, column);
         }
@@ -406,7 +394,7 @@ public class CassandraSession
      *
      * @param table the table to get partitions from
      * @param filterPrefixes the list of possible values for each partition key.
-     * Order of values should match {@link CassandraTable#partitionKeyColumns()}
+     *         Order of values should match {@link CassandraTable#partitionKeyColumns()}
      * @return list of {@link CassandraPartition}
      */
     public List<CassandraPartition> getPartitions(CassandraTable table, List<Set<Object>> filterPrefixes)
@@ -417,15 +405,7 @@ public class CassandraSession
             return ImmutableList.of(CassandraPartition.UNPARTITIONED);
         }
 
-        Iterable<Row> rows;
-        if (getCassandraVersion().compareTo(PARTITION_FETCH_WITH_IN_PREDICATE_VERSION) > 0) {
-            log.debug("Using IN predicate to fetch partitions.");
-            rows = queryPartitionKeysWithInClauses(table, filterPrefixes);
-        }
-        else {
-            log.debug("Using combination of partition values to fetch partitions.");
-            rows = queryPartitionKeysLegacyWithMultipleQueries(table, filterPrefixes);
-        }
+        Iterable<Row> rows = queryPartitionKeysLegacyWithMultipleQueries(table, filterPrefixes);
 
         ByteBuffer buffer = ByteBuffer.allocate(1000);
         HashMap<ColumnHandle, NullableValue> map = new HashMap<>();
@@ -490,18 +470,6 @@ public class CassandraSession
         return executeWithSession(session -> session.execute(statement));
     }
 
-    private Iterable<Row> queryPartitionKeysWithInClauses(CassandraTable table, List<Set<Object>> filterPrefixes)
-    {
-        CassandraNamedRelationHandle tableHandle = table.tableHandle();
-        List<CassandraColumnHandle> partitionKeyColumns = table.partitionKeyColumns();
-
-        Select partitionKeys = selectDistinctFrom(tableHandle, partitionKeyColumns)
-                .where(getInRelations(partitionKeyColumns, filterPrefixes));
-
-        log.debug("Execute cql for partition keys with IN clauses: %s", partitionKeys);
-        return execute(partitionKeys.build()).all();
-    }
-
     private Iterable<Row> queryPartitionKeysLegacyWithMultipleQueries(CassandraTable table, List<Set<Object>> filterPrefixes)
     {
         CassandraNamedRelationHandle tableHandle = table.tableHandle();
@@ -522,25 +490,6 @@ public class CassandraSession
         }
 
         return rowList.build();
-    }
-
-    private List<Relation> getInRelations(List<CassandraColumnHandle> partitionKeyColumns, List<Set<Object>> filterPrefixes)
-    {
-        return IntStream
-                .range(0, Math.min(partitionKeyColumns.size(), filterPrefixes.size()))
-                .mapToObj(i -> getInRelation(partitionKeyColumns.get(i), filterPrefixes.get(i)))
-                .collect(toImmutableList());
-    }
-
-    private Relation getInRelation(CassandraColumnHandle column, Set<Object> filterPrefixes)
-    {
-        List<Term> values = filterPrefixes
-                .stream()
-                .map(value -> cassandraTypeManager.getJavaValue(column.cassandraType().kind(), value))
-                .map(QueryBuilder::literal)
-                .collect(toList());
-
-        return Relation.column(CassandraCqlUtils.validColumnName(column.name())).in(values);
     }
 
     private List<Relation> getEqualityRelations(List<CassandraColumnHandle> partitionKeyColumns, List<Object> filterPrefix)

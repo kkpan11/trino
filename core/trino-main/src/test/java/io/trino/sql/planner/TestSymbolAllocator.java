@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
+import static io.trino.sql.planner.TestingSymbolAllocator.emptySymbolAllocator;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestSymbolAllocator
@@ -26,7 +27,7 @@ public class TestSymbolAllocator
     @Test
     public void testUnique()
     {
-        SymbolAllocator allocator = new SymbolAllocator();
+        SymbolAllocator allocator = emptySymbolAllocator();
         Set<Symbol> symbols = ImmutableSet.<Symbol>builder()
                 .add(allocator.newSymbol("foo_1_0", BigintType.BIGINT))
                 .add(allocator.newSymbol("foo", BigintType.BIGINT))
@@ -34,13 +35,13 @@ public class TestSymbolAllocator
                 .add(allocator.newSymbol("foo", BigintType.BIGINT))
                 .build();
 
-        assertThat(symbols.size()).isEqualTo(4);
+        assertThat(symbols).hasSize(4);
     }
 
     @Test
     public void testNonAscii()
     {
-        SymbolAllocator allocator = new SymbolAllocator();
+        SymbolAllocator allocator = emptySymbolAllocator();
         Set<Symbol> symbols = ImmutableSet.<Symbol>builder()
                 .add(allocator.newSymbol("カラム", BigintType.BIGINT))
                 .add(allocator.newSymbol("col", BigintType.BIGINT))

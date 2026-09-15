@@ -25,11 +25,14 @@ import io.trino.spi.function.AggregationState;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
+import it.unimi.dsi.fastutil.Arrays;
 
 import java.util.List;
 
+import static io.trino.operator.scalar.TDigestFunctions.verifyValue;
 import static io.trino.operator.scalar.TDigestFunctions.verifyWeight;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -43,6 +46,8 @@ public final class ApproximateDoublePercentileArrayAggregations
     @InputFunction
     public static void input(@AggregationState TDigestAndPercentileArrayState state, @SqlType(StandardTypes.DOUBLE) double value, @SqlType("array(double)") Block percentilesArrayBlock)
     {
+        verifyValue(value);
+
         initializePercentilesArray(state, percentilesArrayBlock);
         initializeDigest(state);
 
@@ -55,6 +60,7 @@ public final class ApproximateDoublePercentileArrayAggregations
     @InputFunction
     public static void weightedInput(@AggregationState TDigestAndPercentileArrayState state, @SqlType(StandardTypes.DOUBLE) double value, @SqlType(StandardTypes.DOUBLE) double weight, @SqlType("array(double)") Block percentilesArrayBlock)
     {
+        verifyValue(value);
         verifyWeight(weight);
 
         initializePercentilesArray(state, percentilesArrayBlock);
@@ -85,6 +91,7 @@ public final class ApproximateDoublePercentileArrayAggregations
         state.setPercentiles(otherState.getPercentiles());
     }
 
+    @SqlNullable
     @OutputFunction("array(double)")
     public static void output(@AggregationState TDigestAndPercentileArrayState state, BlockBuilder out)
     {
@@ -113,7 +120,7 @@ public final class ApproximateDoublePercentileArrayAggregations
             sortedPercentiles[i] = percentiles.get(i);
         }
 
-        it.unimi.dsi.fastutil.Arrays.quickSort(0, percentiles.size(), (a, b) -> Doubles.compare(sortedPercentiles[a], sortedPercentiles[b]), (a, b) -> {
+        Arrays.quickSort(0, percentiles.size(), (a, b) -> Double.compare(sortedPercentiles[a], sortedPercentiles[b]), (a, b) -> {
             double tempPercentile = sortedPercentiles[a];
             sortedPercentiles[a] = sortedPercentiles[b];
             sortedPercentiles[b] = tempPercentile;

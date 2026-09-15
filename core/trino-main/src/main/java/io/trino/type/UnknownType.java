@@ -19,16 +19,16 @@ import io.trino.spi.block.BlockBuilderStatus;
 import io.trino.spi.block.ByteArrayBlock;
 import io.trino.spi.block.ByteArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 import io.trino.spi.type.AbstractType;
 import io.trino.spi.type.FixedWidthType;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeOperatorDeclaration;
 import io.trino.spi.type.TypeOperators;
-import io.trino.spi.type.TypeSignature;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
@@ -52,7 +52,7 @@ public final class UnknownType
         // We never access the native container for UNKNOWN because its null check is always true.
         // The actual native container type does not matter here.
         // We choose boolean to represent UNKNOWN because it's the smallest primitive type.
-        super(new TypeSignature(NAME), boolean.class, ByteArrayBlock.class);
+        super(new TypeDescriptor(NAME), boolean.class, ByteArrayBlock.class);
     }
 
     @Override
@@ -62,7 +62,7 @@ public final class UnknownType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -77,15 +77,15 @@ public final class UnknownType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, getFixedSize());
-    }
-
-    @Override
     public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
         return new ByteArrayBlockBuilder(null, positionCount);
+    }
+
+    @Override
+    public String getDisplayName()
+    {
+        return NAME;
     }
 
     @Override
@@ -107,17 +107,11 @@ public final class UnknownType
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public Object getObjectValue(Block block, int position)
     {
         // call is null in case position is out of bounds
         checkArgument(block.isNull(position), "Expected NULL value for UnknownType");
         return null;
-    }
-
-    @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        blockBuilder.appendNull();
     }
 
     @Override
@@ -149,7 +143,8 @@ public final class UnknownType
     private static boolean readFlat(
             @FlatFixed byte[] unusedFixedSizeSlice,
             @FlatFixedOffset int unusedFixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         throw new AssertionError("value of unknown type should all be NULL");
     }

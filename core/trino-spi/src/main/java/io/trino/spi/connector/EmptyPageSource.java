@@ -13,8 +13,6 @@
  */
 package io.trino.spi.connector;
 
-import io.trino.spi.Page;
-
 public class EmptyPageSource
         implements ConnectorPageSource
 {
@@ -37,15 +35,9 @@ public class EmptyPageSource
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         return null;
-    }
-
-    @Override
-    public long getMemoryUsage()
-    {
-        return 0;
     }
 
     @Override

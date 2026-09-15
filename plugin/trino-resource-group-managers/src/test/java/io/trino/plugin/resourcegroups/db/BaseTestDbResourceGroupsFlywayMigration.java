@@ -38,6 +38,8 @@ public abstract class BaseTestDbResourceGroupsFlywayMigration
 
     protected abstract JdbcDatabaseContainer<?> startContainer();
 
+    protected abstract boolean tableExists(String tableName);
+
     @AfterAll
     public final void close()
     {
@@ -51,7 +53,7 @@ public abstract class BaseTestDbResourceGroupsFlywayMigration
                 .setConfigDbUrl(container.getJdbcUrl())
                 .setConfigDbUser(container.getUsername())
                 .setConfigDbPassword(container.getPassword());
-        FlywayMigration.migrate(config);
+        new FlywayMigration(config).migrate();
         verifyResourceGroupsSchema(0);
 
         dropAllTables();
@@ -69,7 +71,7 @@ public abstract class BaseTestDbResourceGroupsFlywayMigration
                 .setConfigDbUrl(container.getJdbcUrl())
                 .setConfigDbUser(container.getUsername())
                 .setConfigDbPassword(container.getPassword());
-        FlywayMigration.migrate(config);
+        new FlywayMigration(config).migrate();
         verifyResourceGroupsSchema(0);
         String t1Drop = "DROP TABLE t1";
         String t2Drop = "DROP TABLE t2";
@@ -80,7 +82,39 @@ public abstract class BaseTestDbResourceGroupsFlywayMigration
         dropAllTables();
     }
 
-    protected void verifyResourceGroupsSchema(long expectedPropertiesCount)
+    @Test
+    public void testMigrationDisabled()
+    {
+        DbResourceGroupConfig config = new DbResourceGroupConfig()
+                .setConfigDbUrl(container.getJdbcUrl())
+                .setConfigDbUser(container.getUsername())
+                .setConfigDbPassword(container.getPassword())
+                .setRunMigrationsEnabled(false);
+        new FlywayMigration(config).migrate();
+        assertThat(tableExists("resource_groups")).isFalse();
+        assertThat(tableExists("resource_groups_global_properties")).isFalse();
+    }
+
+    @Test
+    public void testMigrationForConstraints()
+    {
+        DbResourceGroupConfig config = new DbResourceGroupConfig()
+                .setConfigDbUrl(container.getJdbcUrl())
+                .setConfigDbUser(container.getUsername())
+                .setConfigDbPassword(container.getPassword());
+        new FlywayMigration(config).migrate();
+        String cpuInsert = "INSERT INTO resource_groups_global_properties VALUES ('cpu_quota_period', '1h')";
+        String dataInsert = "INSERT INTO resource_groups_global_properties VALUES ('physical_data_scan_quota_period', '1h')";
+        Handle handle = jdbi.open();
+        handle.execute(cpuInsert);
+        handle.execute(dataInsert);
+        handle.close();
+        verifyResourceGroupsSchema(2);
+
+        dropAllTables();
+    }
+
+    protected void verifyResourceGroupsSchema(int expectedPropertiesCount)
     {
         verifyResultSetCount("SELECT name FROM resource_groups_global_properties", expectedPropertiesCount);
         verifyResultSetCount("SELECT name FROM resource_groups", 0);
@@ -88,11 +122,11 @@ public abstract class BaseTestDbResourceGroupsFlywayMigration
         verifyResultSetCount("SELECT environment FROM exact_match_source_selectors", 0);
     }
 
-    private void verifyResultSetCount(String sql, long expectedCount)
+    private void verifyResultSetCount(String sql, int expectedCount)
     {
         List<String> results = jdbi.withHandle(handle ->
                 handle.createQuery(sql).mapTo(String.class).list());
-        assertThat(results.size()).isEqualTo(expectedCount);
+        assertThat(results).hasSize(expectedCount);
     }
 
     protected void dropAllTables()

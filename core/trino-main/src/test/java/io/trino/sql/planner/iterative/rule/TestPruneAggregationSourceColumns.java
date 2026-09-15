@@ -50,8 +50,7 @@ public class TestPruneAggregationSourceColumns
                         aggregation(
                                 singleGroupingSet("key"),
                                 ImmutableMap.of(
-                                        Optional.of("avg"),
-                                        aggregationFunction("avg", ImmutableList.of("input"))),
+                                        Optional.of("avg"), aggregationFunction("avg", ImmutableList.of("input"))),
                                 ImmutableList.of(),
                                 ImmutableList.of("mask"),
                                 Optional.empty(),
@@ -60,9 +59,8 @@ public class TestPruneAggregationSourceColumns
                                         ImmutableMap.of(
                                                 "input", expression(new Reference(BIGINT, "input")),
                                                 "key", expression(new Reference(BIGINT, "key")),
-                                                "keyHash", expression(new Reference(BIGINT, "keyHash")),
                                                 "mask", expression(new Reference(BOOLEAN, "mask"))),
-                                        values("input", "key", "keyHash", "mask", "unused"))));
+                                        values("input", "key", "mask", "unused"))));
     }
 
     @Test
@@ -78,14 +76,12 @@ public class TestPruneAggregationSourceColumns
         Symbol avg = planBuilder.symbol("avg");
         Symbol input = planBuilder.symbol("input");
         Symbol key = planBuilder.symbol("key");
-        Symbol keyHash = planBuilder.symbol("keyHash");
         Symbol mask = planBuilder.symbol("mask");
         Symbol unused = planBuilder.symbol("unused");
-        List<Symbol> sourceSymbols = ImmutableList.of(input, key, keyHash, mask, unused);
+        List<Symbol> sourceSymbols = ImmutableList.of(input, key, mask, unused);
         return planBuilder.aggregation(aggregationBuilder -> aggregationBuilder
                 .singleGroupingSet(key)
                 .addAggregation(avg, PlanBuilder.aggregation("avg", ImmutableList.of(new Reference(BIGINT, "input"))), ImmutableList.of(BIGINT), mask)
-                .hashSymbol(keyHash)
                 .source(
                         planBuilder.values(
                                 sourceSymbols.stream()

@@ -18,56 +18,56 @@ import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
+import com.google.common.collect.Iterators;
+import com.google.common.io.Closeables;
 import com.google.errorprone.annotations.ThreadSafe;
 import io.airlift.units.Duration;
-import io.trino.client.spooling.DataAttributes;
-import io.trino.client.spooling.EncodedQueryData;
-import io.trino.client.spooling.SegmentLoader;
-import io.trino.client.spooling.encoding.QueryDataDecoders;
 import jakarta.annotation.Nullable;
 import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.Headers;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.Request;
 import okhttp3.RequestBody;
+import okhttp3.Response;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.io.UnsupportedEncodingException;
+import java.io.UncheckedIOException;
 import java.net.ProtocolException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.ZoneId;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
-import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Throwables.getCausalChain;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.net.HttpHeaders.ACCEPT_ENCODING;
-import static com.google.common.net.HttpHeaders.USER_AGENT;
 import static io.trino.client.HttpStatusCodes.shouldRetry;
-import static io.trino.client.JsonCodec.jsonCodec;
 import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
+import static io.trino.client.TrinoJsonCodec.singlePassQueryResultsCodec;
 import static java.lang.String.format;
+import static java.net.HttpURLConnection.HTTP_BAD_METHOD;
+import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
 import static java.net.HttpURLConnection.HTTP_OK;
 import static java.net.HttpURLConnection.HTTP_UNAUTHORIZED;
-import static java.util.Arrays.stream;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
@@ -76,41 +76,42 @@ class StatementClientV1
         implements StatementClient
 {
     private static final MediaType MEDIA_TYPE_TEXT = MediaType.parse("text/plain; charset=utf-8");
-    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
+    private static final TrinoJsonCodec<QueryResults> QUERY_RESULTS_CODEC = singlePassQueryResultsCodec(false);
+    private static final TrinoJsonCodec<QueryResults> QUERY_RESULTS_VARIANT_BINARY_CODEC = singlePassQueryResultsCodec(true);
 
     private static final Splitter COLLECTION_HEADER_SPLITTER = Splitter.on('=').limit(2).trimResults();
-    private static final String USER_AGENT_VALUE = StatementClientV1.class.getSimpleName() +
-            "/" +
-            firstNonNull(StatementClientV1.class.getPackage().getImplementationVersion(), "unknown");
-    private static final long MAX_MATERIALIZED_JSON_RESPONSE_SIZE = 128 * 1024;
-
+    private final TrinoJsonCodec<QueryResults> queryResultsCodec;
     private final Call.Factory httpCallFactory;
     private final String query;
     private final AtomicReference<QueryResults> currentResults = new AtomicReference<>();
+    private final AtomicReference<ResultRows> currentRows = new AtomicReference<>();
     private final AtomicReference<String> setCatalog = new AtomicReference<>();
     private final AtomicReference<String> setSchema = new AtomicReference<>();
     private final AtomicReference<List<String>> setPath = new AtomicReference<>();
     private final AtomicReference<String> setAuthorizationUser = new AtomicReference<>();
     private final AtomicBoolean resetAuthorizationUser = new AtomicBoolean();
+    private final Set<ClientSelectedRole> setOriginalRoles = ConcurrentHashMap.newKeySet();
     private final Map<String, String> setSessionProperties = new ConcurrentHashMap<>();
-    private final Set<String> resetSessionProperties = Sets.newConcurrentHashSet();
+    private final Set<String> resetSessionProperties = ConcurrentHashMap.newKeySet();
     private final Map<String, ClientSelectedRole> setRoles = new ConcurrentHashMap<>();
     private final Map<String, String> addedPreparedStatements = new ConcurrentHashMap<>();
-    private final Set<String> deallocatedPreparedStatements = Sets.newConcurrentHashSet();
+    private final Set<String> deallocatedPreparedStatements = ConcurrentHashMap.newKeySet();
     private final AtomicReference<String> startedTransactionId = new AtomicReference<>();
     private final AtomicBoolean clearTransactionId = new AtomicBoolean();
+    private final AtomicLong nextHeartbeat = new AtomicLong();
+    private final AtomicLong failedHeartbeats = new AtomicLong();
     private final ZoneId timeZone;
     private final Duration requestTimeoutNanos;
     private final Optional<String> user;
     private final Optional<String> originalUser;
     private final String clientCapabilities;
     private final boolean compressionDisabled;
+    private final long heartbeatInterval;
 
     private final AtomicReference<State> state = new AtomicReference<>(State.RUNNING);
 
-    // Encoded data
-    private final SegmentLoader segmentLoader;
-    private final AtomicReference<QueryDataDecoder> decoder = new AtomicReference<>();
+    // Data accessor for raw and encoded data
+    private final ResultRowsDecoder resultRowsDecoder;
 
     public StatementClientV1(Call.Factory httpCallFactory, Call.Factory segmentHttpCallFactory, ClientSession session, String query, Optional<Set<String>> clientCapabilities)
     {
@@ -122,24 +123,32 @@ class StatementClientV1
         this.timeZone = session.getTimeZone();
         this.query = query;
         this.requestTimeoutNanos = session.getClientRequestTimeout();
-        this.user = Stream.of(session.getAuthorizationUser(), session.getUser(), session.getPrincipal())
+        this.user = Stream.of(session.getAuthorizationUser(), session.getSessionUser(), session.getUser())
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .findFirst();
-        this.originalUser = Stream.of(session.getUser(), session.getPrincipal())
+        this.originalUser = Stream.of(session.getSessionUser(), session.getUser())
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .findFirst();
-        this.clientCapabilities = Joiner.on(",").join(clientCapabilities.orElseGet(() -> stream(ClientCapabilities.values())
+        this.setOriginalRoles.addAll(session.getOriginalRoles());
+        Set<String> effectiveClientCapabilities = clientCapabilities.orElseGet(() -> Stream.of(ClientCapabilities.values())
                 .map(Enum::name)
-                .collect(toImmutableSet())));
+                .collect(toImmutableSet()));
+        this.clientCapabilities = Joiner.on(",").join(effectiveClientCapabilities);
         this.compressionDisabled = session.isCompressionDisabled();
-        this.segmentLoader = new SegmentLoader(requireNonNull(segmentHttpCallFactory, "segmentHttpCallFactory is null"));
+        this.heartbeatInterval = session.getHeartbeatInterval().toMillis() * 1_000_000;
+
+        boolean supportsVariantBinary = effectiveClientCapabilities.contains(ClientCapabilities.VARIANT_BINARY.toString());
+        this.queryResultsCodec = supportsVariantBinary ? QUERY_RESULTS_VARIANT_BINARY_CODEC : QUERY_RESULTS_CODEC;
+        this.resultRowsDecoder = new ResultRowsDecoder(
+                new OkHttpSegmentLoader(requireNonNull(segmentHttpCallFactory, "segmentHttpCallFactory is null")),
+                supportsVariantBinary);
 
         Request request = buildQueryRequest(session, query, session.getEncoding());
         // Pass empty as materializedJsonSizeLimit to always materialize the first response
         // to avoid losing the response body if the initial response parsing fails
-        executeRequest(request, "starting query", OptionalLong.empty(), this::isTransient);
+        executeRequest(request, "starting query", this::isTransient);
     }
 
     private Request buildQueryRequest(ClientSession session, String query, Optional<String> requestedEncoding)
@@ -183,6 +192,10 @@ class StatementClientV1
         Map<String, String> resourceEstimates = session.getResourceEstimates();
         for (Entry<String, String> entry : resourceEstimates.entrySet()) {
             builder.addHeader(TRINO_HEADERS.requestResourceEstimate(), entry.getKey() + "=" + urlEncode(entry.getValue()));
+        }
+
+        for (ClientSelectedRole selectedRole : session.getOriginalRoles()) {
+            builder.addHeader(TRINO_HEADERS.requestOriginalRole(), selectedRole.toString());
         }
 
         Map<String, ClientSelectedRole> roles = session.getRoles();
@@ -258,23 +271,23 @@ class StatementClientV1
     }
 
     @Override
-    public QueryData currentData()
+    public ResultRows currentRows()
+    {
+        checkState(isRunning(), "current position is not valid (cursor past end)");
+        return currentRows.get();
+    }
+
+    @Override
+    public QueryData currentData() // Raw over the wire representation
     {
         checkState(isRunning(), "current position is not valid (cursor past end)");
         QueryResults queryResults = currentResults.get();
 
         if (queryResults == null || queryResults.getData() == null) {
-            return RawQueryData.of(null);
+            return null;
         }
 
-        if (queryResults.getData() instanceof RawQueryData) {
-            // We need to reinterpret JSON values to have correct types
-            return ((RawQueryData) queryResults.getData())
-                    .fixTypes(queryResults.getColumns());
-        }
-
-        EncodedQueryData queryData = (EncodedQueryData) queryResults.getData();
-        return queryData.toRawData(decoder.get(), segmentLoader);
+        return queryResults.getData();
     }
 
     @Override
@@ -282,6 +295,12 @@ class StatementClientV1
     {
         checkState(!isRunning(), "current position is still valid");
         return currentResults.get();
+    }
+
+    @Override
+    public Optional<String> getEncoding()
+    {
+        return resultRowsDecoder.getEncoding();
     }
 
     @Override
@@ -312,6 +331,12 @@ class StatementClientV1
     public boolean isResetAuthorizationUser()
     {
         return resetAuthorizationUser.get();
+    }
+
+    @Override
+    public Set<ClientSelectedRole> getSetOriginalRoles()
+    {
+        return ImmutableSet.copyOf(setOriginalRoles);
     }
 
     @Override
@@ -359,9 +384,7 @@ class StatementClientV1
 
     private Request.Builder prepareRequest(HttpUrl url)
     {
-        Request.Builder builder = new Request.Builder()
-                .addHeader(USER_AGENT, USER_AGENT_VALUE)
-                .url(url);
+        Request.Builder builder = new Request.Builder().url(url);
         user.ifPresent(requestUser -> builder.addHeader(TRINO_HEADERS.requestUser(), requestUser));
         originalUser.ifPresent(originalUser -> builder.addHeader(TRINO_HEADERS.requestOriginalUser(), originalUser));
         if (compressionDisabled) {
@@ -384,10 +407,62 @@ class StatementClientV1
         }
 
         Request request = prepareRequest(HttpUrl.get(nextUri)).build();
-        return executeRequest(request, "fetching next", OptionalLong.of(MAX_MATERIALIZED_JSON_RESPONSE_SIZE), (e) -> true);
+        return executeRequest(request, "fetching next", e -> true);
     }
 
-    private boolean executeRequest(Request request, String taskName, OptionalLong materializedJsonSizeLimit, Function<Exception, Boolean> isRetryable)
+    public void heartbeat()
+    {
+        if (System.nanoTime() < nextHeartbeat.get()) {
+            return;
+        }
+
+        if (!isRunning()) {
+            return;
+        }
+
+        // Disable heartbeats if there are 3 consecutive failures during 3 * heartbeat interval window
+        if (failedHeartbeats.get() >= 3) {
+            nextHeartbeat.set(Long.MAX_VALUE);
+            return;
+        }
+
+        URI nextUri = currentStatusInfo().getNextUri();
+        if (nextUri == null) {
+            return;
+        }
+
+        Request request = prepareRequest(HttpUrl.get(nextUri))
+                .head()
+                .build();
+
+        nextHeartbeat.set(System.nanoTime() + heartbeatInterval);
+        httpCallFactory.newCall(request).enqueue(new Callback()
+        {
+            @Override
+            public void onFailure(Call call, IOException e)
+            {
+                failedHeartbeats.incrementAndGet();
+                if (isTransient(e)) {
+                    nextHeartbeat.set(System.nanoTime()); // retry sending heartbeat immediately
+                }
+            }
+
+            @Override
+            public void onResponse(Call call, Response response)
+            {
+                failedHeartbeats.set(0);
+                if (response.code() == HTTP_OK) {
+                    // Heartbeat acknowledged, move even further
+                    nextHeartbeat.set(System.nanoTime() + heartbeatInterval);
+                }
+                if (response.code() == HTTP_NOT_FOUND || response.code() == HTTP_BAD_METHOD) {
+                    nextHeartbeat.set(Long.MAX_VALUE); // No server-side support for heartbeats
+                }
+            }
+        });
+    }
+
+    private boolean executeRequest(Request request, String taskName, Function<Exception, Boolean> isRetryable)
     {
         Exception cause = null;
         long start = System.nanoTime();
@@ -401,6 +476,7 @@ class StatementClientV1
             if (attempts > 0) {
                 Duration sinceStart = Duration.nanosSince(start);
                 if (sinceStart.compareTo(requestTimeoutNanos) > 0) {
+                    close();
                     state.compareAndSet(State.RUNNING, State.CLIENT_ERROR);
                     throw new RuntimeException(format("Error fetching next (attempts: %s, duration: %s)", attempts, sinceStart), cause);
                 }
@@ -423,7 +499,8 @@ class StatementClientV1
 
             JsonResponse<QueryResults> response;
             try {
-                response = JsonResponse.execute(QUERY_RESULTS_CODEC, httpCallFactory, request, materializedJsonSizeLimit);
+                response = JsonResponse.execute(queryResultsCodec, httpCallFactory, request);
+                nextHeartbeat.set(System.nanoTime() + heartbeatInterval);
             }
             catch (RuntimeException e) {
                 if (!isRetryable.apply(e)) {
@@ -441,6 +518,9 @@ class StatementClientV1
                     state.compareAndSet(State.RUNNING, State.CLIENT_ERROR);
                     throw requestFailedException(taskName, request, response);
                 }
+                cause = new ClientException(format("Expected http code %d but got %d%s", HTTP_OK, response.getStatusCode(), response.getResponseBody()
+                        .map(message -> "\nResponse body was: " + message)
+                        .orElse("")));
                 continue;
             }
 
@@ -462,7 +542,6 @@ class StatementClientV1
         setCatalog.set(headers.get(TRINO_HEADERS.responseSetCatalog()));
         setSchema.set(headers.get(TRINO_HEADERS.responseSetSchema()));
         setPath.set(safeSplitToList(headers.get(TRINO_HEADERS.responseSetPath())));
-
         String setAuthorizationUser = headers.get(TRINO_HEADERS.responseSetAuthorizationUser());
         if (setAuthorizationUser != null) {
             this.setAuthorizationUser.set(setAuthorizationUser);
@@ -472,6 +551,11 @@ class StatementClientV1
         if (resetAuthorizationUser != null) {
             this.resetAuthorizationUser.set(Boolean.parseBoolean(resetAuthorizationUser));
         }
+
+        setOriginalRoles.addAll(headers.values(TRINO_HEADERS.responseOriginalRole())
+                .stream()
+                .map(role -> ClientSelectedRole.valueOf(urlDecode(role)))
+                .collect(toImmutableSet()));
 
         for (String setSession : headers.values(TRINO_HEADERS.responseSetSession())) {
             List<String> keyValue = COLLECTION_HEADER_SPLITTER.splitToList(setSession);
@@ -509,22 +593,16 @@ class StatementClientV1
             clearTransactionId.set(true);
         }
 
-        // Make sure that decoder and dataAttributes are set before currentResults
-        if (results.getData() instanceof EncodedQueryData) {
-            EncodedQueryData encodedData = (EncodedQueryData) results.getData();
-            DataAttributes queryAttributed = encodedData.getMetadata();
-            if (decoder.get() == null) {
-                verify(QueryDataDecoders.exists(encodedData.getEncoding()), "Received encoded data format but there is no decoder matching %s", encodedData.getEncoding());
-                QueryDataDecoder queryDataDecoder = QueryDataDecoders
-                        .get(encodedData.getEncoding())
-                        .create(results.getColumns(), queryAttributed);
-                decoder.set(queryDataDecoder);
-            }
-
-            verify(decoder.get().encoding().equals(encodedData.getEncoding()), "Decoder has wrong encoding id, expected %s, got %s", encodedData.getEncoding(), decoder.get().encoding());
-        }
-
         currentResults.set(results);
+        ResultRows previous = currentRows.getAndSet(new HeartbeatingResultRows(resultRowsDecoder.toRows(results), this::heartbeat));
+        if (previous != null) {
+            try {
+                previous.close();
+            }
+            catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
     }
 
     private List<String> safeSplitToList(String value)
@@ -567,10 +645,21 @@ class StatementClientV1
     {
         // If the query is not done, abort the query.
         if (state.compareAndSet(State.RUNNING, State.CLIENT_ABORTED)) {
-            URI uri = currentResults.get().getNextUri();
-            if (uri != null) {
-                httpDelete(uri);
+            if (currentStatusInfo() != null) {
+                URI uri = currentStatusInfo().getNextUri();
+                if (uri != null) {
+                    httpDelete(uri);
+                }
             }
+        }
+
+        // Close rows - this will close the underlying iterators,
+        // releasing all resources and pruning remote segments
+        try {
+            Closeables.close(currentRows.get(), false);
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -591,28 +680,18 @@ class StatementClientV1
 
     private static String urlEncode(String value)
     {
-        try {
-            return URLEncoder.encode(value, "UTF-8");
-        }
-        catch (UnsupportedEncodingException e) {
-            throw new AssertionError(e);
-        }
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     private static String urlDecode(String value)
     {
-        try {
-            return URLDecoder.decode(value, "UTF-8");
-        }
-        catch (UnsupportedEncodingException e) {
-            throw new AssertionError(e);
-        }
+        return URLDecoder.decode(value, StandardCharsets.UTF_8);
     }
 
     private enum State
     {
         /**
-         * submitted to server, not in terminal state (including planning, queued, running, etc)
+         * submitted to server, not in terminal state (including planning, queued, running, etc.)
          */
         RUNNING,
         CLIENT_ERROR,
@@ -621,5 +700,43 @@ class StatementClientV1
          * finished on remote Trino server (including failed and successfully completed)
          */
         FINISHED,
+    }
+
+    private static class HeartbeatingResultRows
+            implements ResultRows
+    {
+        private final ResultRows delegate;
+        private final Runnable heartbeat;
+        private boolean iterated;
+
+        public HeartbeatingResultRows(ResultRows delegate, Runnable heartbeat)
+        {
+            this.delegate = requireNonNull(delegate, "delegate is null");
+            this.heartbeat = requireNonNull(heartbeat, "heartbeat is null");
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            delegate.close();
+        }
+
+        @Override
+        public boolean isNull()
+        {
+            return delegate.isNull();
+        }
+
+        @Override
+        public Iterator<List<Object>> iterator()
+        {
+            verify(!iterated, "Iterator already fetched");
+            iterated = true;
+            return Iterators.transform(delegate.iterator(), row -> {
+                heartbeat.run();
+                return row;
+            });
+        }
     }
 }

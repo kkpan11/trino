@@ -16,21 +16,19 @@ package io.trino.spi.block;
 import jakarta.annotation.Nullable;
 
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.function.ObjLongConsumer;
 
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
+import static io.trino.spi.block.Bitmap.checkBitRange;
+import static io.trino.spi.block.Bitmap.compactBitmap;
+import static io.trino.spi.block.Bitmap.copyBitmapAndAppendUnset;
+import static io.trino.spi.block.Bitmap.set;
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
-import static io.trino.spi.block.BlockUtil.checkReadablePosition;
-import static io.trino.spi.block.BlockUtil.checkValidPositions;
+import static io.trino.spi.block.BlockUtil.checkValidPosition;
 import static io.trino.spi.block.BlockUtil.checkValidRegion;
-import static io.trino.spi.block.BlockUtil.compactArray;
 import static io.trino.spi.block.BlockUtil.compactOffsets;
-import static io.trino.spi.block.BlockUtil.copyIsNullAndAppendNull;
 import static io.trino.spi.block.BlockUtil.copyOffsetsAndAppendNull;
-import static io.trino.spi.block.BlockUtil.countAndMarkSelectedPositionsFromOffsets;
-import static io.trino.spi.block.BlockUtil.countSelectedPositionsFromOffsets;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -41,7 +39,8 @@ public final class ArrayBlock
 
     private final int arrayOffset;
     private final int positionCount;
-    private final boolean[] valueIsNull;
+    @Nullable
+    private final long[] valueIsValid;
     private final Block values;
     private final int[] offsets;
 
@@ -52,10 +51,10 @@ public final class ArrayBlock
      * Create an array block directly from columnar nulls, values, and offsets into the values.
      * A null array must have no entries.
      */
-    public static ArrayBlock fromElementBlock(int positionCount, Optional<boolean[]> valueIsNullOptional, int[] arrayOffset, Block values)
+    public static ArrayBlock fromElementBlock(int positionCount, Optional<long[]> valueIsValidOptional, int[] arrayOffset, Block values)
     {
-        boolean[] valueIsNull = valueIsNullOptional.orElse(null);
-        validateConstructorArguments(0, positionCount, valueIsNull, arrayOffset, values);
+        long[] valueIsValid = valueIsValidOptional.orElse(null);
+        validateConstructorArguments(0, positionCount, valueIsValid, arrayOffset, values);
         // for performance reasons per element checks are only performed on the public construction
         for (int i = 0; i < positionCount; i++) {
             int offset = arrayOffset[i];
@@ -63,23 +62,23 @@ public final class ArrayBlock
             if (length < 0) {
                 throw new IllegalArgumentException(format("Offset is not monotonically ascending. offsets[%s]=%s, offsets[%s]=%s", i, arrayOffset[i], i + 1, arrayOffset[i + 1]));
             }
-            if (valueIsNull != null && valueIsNull[i] && length != 0) {
+            if (valueIsValid != null && !Bitmap.isSet(valueIsValid, 0, i) && length != 0) {
                 throw new IllegalArgumentException("A null array must have zero entries");
             }
         }
-        return new ArrayBlock(0, positionCount, valueIsNull, arrayOffset, values);
+        return new ArrayBlock(0, positionCount, valueIsValid, arrayOffset, values);
     }
 
     /**
      * Create an array block directly without per-element validations.
      */
-    static ArrayBlock createArrayBlockInternal(int arrayOffset, int positionCount, @Nullable boolean[] valueIsNull, int[] offsets, Block values)
+    static ArrayBlock createArrayBlockInternal(int arrayOffset, int positionCount, @Nullable long[] valueIsValid, int[] offsets, Block values)
     {
-        validateConstructorArguments(arrayOffset, positionCount, valueIsNull, offsets, values);
-        return new ArrayBlock(arrayOffset, positionCount, valueIsNull, offsets, values);
+        validateConstructorArguments(arrayOffset, positionCount, valueIsValid, offsets, values);
+        return new ArrayBlock(arrayOffset, positionCount, valueIsValid, offsets, values);
     }
 
-    private static void validateConstructorArguments(int arrayOffset, int positionCount, @Nullable boolean[] valueIsNull, int[] offsets, Block values)
+    private static void validateConstructorArguments(int arrayOffset, int positionCount, @Nullable long[] valueIsValid, int[] offsets, Block values)
     {
         if (arrayOffset < 0) {
             throw new IllegalArgumentException("arrayOffset is negative");
@@ -89,9 +88,7 @@ public final class ArrayBlock
             throw new IllegalArgumentException("positionCount is negative");
         }
 
-        if (valueIsNull != null && valueIsNull.length - arrayOffset < positionCount) {
-            throw new IllegalArgumentException("isNull length is less than positionCount");
-        }
+        checkBitRange(valueIsValid, arrayOffset, positionCount);
 
         requireNonNull(offsets, "offsets is null");
         if (offsets.length - arrayOffset < positionCount + 1) {
@@ -105,17 +102,17 @@ public final class ArrayBlock
      * Use createArrayBlockInternal or fromElementBlock instead of this method.  The caller of this method is assumed to have
      * validated the arguments with validateConstructorArguments.
      */
-    private ArrayBlock(int arrayOffset, int positionCount, @Nullable boolean[] valueIsNull, int[] offsets, Block values)
+    private ArrayBlock(int arrayOffset, int positionCount, @Nullable long[] valueIsValid, int[] offsets, Block values)
     {
         // caller must check arguments with validateConstructorArguments
         this.arrayOffset = arrayOffset;
         this.positionCount = positionCount;
-        this.valueIsNull = valueIsNull;
+        this.valueIsValid = valueIsValid;
         this.offsets = offsets;
         this.values = requireNonNull(values);
 
         sizeInBytes = -1;
-        retainedSizeInBytes = INSTANCE_SIZE + sizeOf(offsets) + sizeOf(valueIsNull);
+        retainedSizeInBytes = INSTANCE_SIZE + sizeOf(offsets) + sizeOf(valueIsValid);
     }
 
     @Override
@@ -128,9 +125,6 @@ public final class ArrayBlock
     public long getSizeInBytes()
     {
         if (sizeInBytes < 0) {
-            if (!values.isLoaded()) {
-                return getBaseSizeInBytes();
-            }
             calculateSize();
         }
         return sizeInBytes;
@@ -159,42 +153,81 @@ public final class ArrayBlock
     {
         consumer.accept(values, values.getRetainedSizeInBytes());
         consumer.accept(offsets, sizeOf(offsets));
-        if (valueIsNull != null) {
-            consumer.accept(valueIsNull, sizeOf(valueIsNull));
+        if (valueIsValid != null) {
+            consumer.accept(valueIsValid, sizeOf(valueIsValid));
         }
         consumer.accept(this, INSTANCE_SIZE);
     }
 
-    Block getRawElementBlock()
+    public Block getElementsBlock()
+    {
+        int start = offsets[arrayOffset];
+        int end = offsets[arrayOffset + positionCount];
+        return values.getRegion(start, end - start);
+    }
+
+    public Block getRawElementBlock()
     {
         return values;
     }
 
-    int[] getOffsets()
+    public int[] getRawOffsets()
     {
         return offsets;
     }
 
-    boolean[] getRawValueIsNull()
+    /// Returns raw validity bitmap words using the [Bitmap] encoding, or null if all positions are valid.
+    ///
+    /// The returned array is raw block storage. Use [getValidityBitmap()] unless the caller already has the matching
+    /// raw bit offset.
+    @Nullable
+    public long[] getRawValueIsValid()
     {
-        return valueIsNull;
+        return valueIsValid;
     }
 
-    int getOffsetBase()
+    public int getOffsetBase()
     {
         return arrayOffset;
     }
 
-    @Override
-    public String getEncodingName()
+    /**
+     * Creates a projection by replacing the visible elements for this array block.
+     * The replacement elements must correspond to {@link #getElementsBlock()}, not {@link #getRawElementBlock()}.
+     * If this block is zero-aligned, the existing offsets and validity bitmap are reused.
+     * Otherwise, the visible offsets and validity bits are normalized and the returned block has an offset base of zero.
+     */
+    public ArrayBlock createProjection(Block newVisibleElements)
     {
-        return ArrayBlockEncoding.NAME;
+        requireNonNull(newVisibleElements, "newVisibleElements is null");
+
+        int visibleElementCount = offsets[arrayOffset + positionCount] - offsets[arrayOffset];
+        if (newVisibleElements.getPositionCount() != visibleElementCount) {
+            throw new IllegalArgumentException(format("newVisibleElements must have the same position count as getElementsBlock(); expected %s but got %s", visibleElementCount, newVisibleElements.getPositionCount()));
+        }
+
+        if (arrayOffset == 0 && offsets[0] == 0) {
+            return new ArrayBlock(0, positionCount, valueIsValid, offsets, newVisibleElements);
+        }
+
+        int[] newOffsets = new int[positionCount + 1];
+        for (int i = 1; i <= positionCount; i++) {
+            newOffsets[i] = offsets[arrayOffset + i] - offsets[arrayOffset];
+        }
+        long[] newValueIsValid = compactBitmap(valueIsValid, arrayOffset, positionCount);
+        return new ArrayBlock(0, positionCount, newValueIsValid, newOffsets, newVisibleElements);
     }
 
     @Override
     public boolean mayHaveNull()
     {
-        return valueIsNull != null;
+        return valueIsValid != null;
+    }
+
+    @Override
+    public boolean hasNull()
+    {
+        return Bitmap.hasUnsetBit(valueIsValid, arrayOffset, positionCount);
     }
 
     @Override
@@ -204,37 +237,15 @@ public final class ArrayBlock
     }
 
     @Override
-    public boolean isLoaded()
-    {
-        return values.isLoaded();
-    }
-
-    @Override
-    public ArrayBlock getLoadedBlock()
-    {
-        Block loadedValuesBlock = values.getLoadedBlock();
-
-        if (loadedValuesBlock == values) {
-            return this;
-        }
-        return createArrayBlockInternal(
-                arrayOffset,
-                positionCount,
-                valueIsNull,
-                offsets,
-                loadedValuesBlock);
-    }
-
-    @Override
     public ArrayBlock copyWithAppendedNull()
     {
-        boolean[] newValueIsNull = copyIsNullAndAppendNull(valueIsNull, arrayOffset, getPositionCount());
+        long[] newValueIsValid = copyBitmapAndAppendUnset(valueIsValid, arrayOffset, getPositionCount());
         int[] newOffsets = copyOffsetsAndAppendNull(offsets, arrayOffset, getPositionCount());
 
         return createArrayBlockInternal(
                 arrayOffset,
                 getPositionCount() + 1,
-                newValueIsNull,
+                newValueIsValid,
                 newOffsets,
                 values);
     }
@@ -246,16 +257,19 @@ public final class ArrayBlock
 
         int[] newOffsets = new int[length + 1];
         newOffsets[0] = 0;
-        boolean[] newValueIsNull = valueIsNull == null ? null : new boolean[length];
+        long[] newValueIsValid = valueIsValid == null ? null : new long[Bitmap.wordsForBits(length)];
 
         IntArrayList valuesPositions = new IntArrayList();
         for (int i = 0; i < length; i++) {
             int position = positions[offset + i];
-            if (newValueIsNull != null && isNull(position)) {
-                newValueIsNull[i] = true;
+            checkValidPosition(position, positionCount);
+            if (valueIsValid != null && !Bitmap.isSet(valueIsValid, arrayOffset, position)) {
                 newOffsets[i + 1] = newOffsets[i];
             }
             else {
+                if (newValueIsValid != null) {
+                    set(newValueIsValid, 0, i);
+                }
                 int valuesStartOffset = offsets[position + arrayOffset];
                 int valuesEndOffset = offsets[position + 1 + arrayOffset];
                 int valuesLength = valuesEndOffset - valuesStartOffset;
@@ -268,7 +282,7 @@ public final class ArrayBlock
             }
         }
         Block newValues = values.copyPositions(valuesPositions.elements(), 0, valuesPositions.size());
-        return createArrayBlockInternal(0, length, newValueIsNull, newOffsets, newValues);
+        return createArrayBlockInternal(0, length, Bitmap.hasUnsetBit(newValueIsValid, 0, length) ? newValueIsValid : null, newOffsets, newValues);
     }
 
     @Override
@@ -280,15 +294,9 @@ public final class ArrayBlock
         return createArrayBlockInternal(
                 position + arrayOffset,
                 length,
-                valueIsNull,
+                valueIsValid,
                 offsets,
                 values);
-    }
-
-    @Override
-    public OptionalInt fixedSizeInBytesPerPosition()
-    {
-        return OptionalInt.empty(); // size per position varies based on the number of entries in each array
     }
 
     @Override
@@ -304,39 +312,6 @@ public final class ArrayBlock
     }
 
     @Override
-    public long getPositionsSizeInBytes(boolean[] positions, int selectedArrayPositions)
-    {
-        int positionCount = getPositionCount();
-        checkValidPositions(positions, positionCount);
-        if (selectedArrayPositions == 0) {
-            return 0;
-        }
-        if (selectedArrayPositions == positionCount) {
-            return getSizeInBytes();
-        }
-
-        Block rawElementBlock = values;
-        OptionalInt fixedPerElementSizeInBytes = rawElementBlock.fixedSizeInBytesPerPosition();
-        int[] offsets = this.offsets;
-        int offsetBase = arrayOffset;
-        long sizeInBytes;
-
-        if (fixedPerElementSizeInBytes.isPresent()) {
-            sizeInBytes = fixedPerElementSizeInBytes.getAsInt() * (long) countSelectedPositionsFromOffsets(positions, offsets, offsetBase);
-        }
-        else if (rawElementBlock instanceof RunLengthEncodedBlock) {
-            // RLE blocks don't have a fixed-size per position, but accept null for the position array
-            sizeInBytes = rawElementBlock.getPositionsSizeInBytes(null, countSelectedPositionsFromOffsets(positions, offsets, offsetBase));
-        }
-        else {
-            boolean[] selectedElements = new boolean[rawElementBlock.getPositionCount()];
-            int selectedElementCount = countAndMarkSelectedPositionsFromOffsets(positions, offsets, offsetBase, selectedElements);
-            sizeInBytes = rawElementBlock.getPositionsSizeInBytes(selectedElements, selectedElementCount);
-        }
-        return sizeInBytes + ((Integer.BYTES + Byte.BYTES) * (long) selectedArrayPositions);
-    }
-
-    @Override
     public ArrayBlock copyRegion(int position, int length)
     {
         int positionCount = getPositionCount();
@@ -347,19 +322,17 @@ public final class ArrayBlock
         Block newValues = values.copyRegion(startValueOffset, endValueOffset - startValueOffset);
 
         int[] newOffsets = compactOffsets(offsets, position + arrayOffset, length);
-        boolean[] valueIsNull = this.valueIsNull;
-        boolean[] newValueIsNull;
-        newValueIsNull = valueIsNull == null ? null : compactArray(valueIsNull, position + arrayOffset, length);
+        long[] newValueIsValid = compactBitmap(valueIsValid, position + arrayOffset, length);
 
-        if (newValues == values && newOffsets == offsets && newValueIsNull == valueIsNull) {
+        if (newValues == values && newOffsets == offsets && newValueIsValid == valueIsValid) {
             return this;
         }
-        return createArrayBlockInternal(0, length, newValueIsNull, newOffsets, newValues);
+        return createArrayBlockInternal(0, length, newValueIsValid, newOffsets, newValues);
     }
 
     public Block getArray(int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
         int startValueOffset = offsets[position + arrayOffset];
         int endValueOffset = offsets[position + 1 + arrayOffset];
         return values.getRegion(startValueOffset, endValueOffset - startValueOffset);
@@ -368,7 +341,7 @@ public final class ArrayBlock
     @Override
     public ArrayBlock getSingleValueBlock(int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
 
         int startValueOffset = offsets[position + arrayOffset];
         int valueLength = offsets[position + 1 + arrayOffset] - startValueOffset;
@@ -377,7 +350,7 @@ public final class ArrayBlock
         return createArrayBlockInternal(
                 0,
                 1,
-                isNull(position) ? new boolean[] {true} : null,
+                isNull(position) ? new long[] {0} : null,
                 new int[] {0, valueLength},
                 newValues);
     }
@@ -385,7 +358,7 @@ public final class ArrayBlock
     @Override
     public long getEstimatedDataSizeForStats(int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
 
         if (isNull(position)) {
             return 0;
@@ -405,9 +378,11 @@ public final class ArrayBlock
     @Override
     public boolean isNull(int position)
     {
-        checkReadablePosition(this, position);
-        boolean[] valueIsNull = this.valueIsNull;
-        return valueIsNull != null && valueIsNull[position + arrayOffset];
+        if (!mayHaveNull()) {
+            return false;
+        }
+        checkValidPosition(position, positionCount);
+        return !Bitmap.isSet(valueIsValid, arrayOffset, position);
     }
 
     @Override
@@ -417,14 +392,17 @@ public final class ArrayBlock
     }
 
     @Override
-    public Optional<ByteArrayBlock> getNulls()
+    public Optional<Bitmap> getValidityBitmap()
     {
-        return BlockUtil.getNulls(valueIsNull, arrayOffset, positionCount);
+        if (valueIsValid == null) {
+            return Optional.empty();
+        }
+        return Optional.of(new Bitmap(valueIsValid, arrayOffset, positionCount));
     }
 
     public <T> T apply(ArrayBlockFunction<T> function, int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
 
         int startValueOffset = offsets[position + arrayOffset];
         int endValueOffset = offsets[position + 1 + arrayOffset];

@@ -21,10 +21,12 @@ import io.trino.spi.function.AggregationState;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
 
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.operator.scalar.TDigestFunctions.verifyValue;
 import static io.trino.operator.scalar.TDigestFunctions.verifyWeight;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -38,6 +40,7 @@ public final class ApproximateDoublePercentileAggregations
     @InputFunction
     public static void input(@AggregationState TDigestAndPercentileState state, @SqlType(StandardTypes.DOUBLE) double value, @SqlType(StandardTypes.DOUBLE) double percentile)
     {
+        verifyValue(value);
         TDigest digest = state.getDigest();
 
         if (digest == null) {
@@ -57,6 +60,7 @@ public final class ApproximateDoublePercentileAggregations
     @InputFunction
     public static void weightedInput(@AggregationState TDigestAndPercentileState state, @SqlType(StandardTypes.DOUBLE) double value, @SqlType(StandardTypes.DOUBLE) double weight, @SqlType(StandardTypes.DOUBLE) double percentile)
     {
+        verifyValue(value);
         verifyWeight(weight);
 
         TDigest digest = state.getDigest();
@@ -93,6 +97,7 @@ public final class ApproximateDoublePercentileAggregations
         state.setPercentile(otherState.getPercentile());
     }
 
+    @SqlNullable
     @OutputFunction(StandardTypes.DOUBLE)
     public static void output(@AggregationState TDigestAndPercentileState state, BlockBuilder out)
     {

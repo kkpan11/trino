@@ -59,12 +59,12 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.orc.OrcReader.validateFile;
@@ -72,6 +72,7 @@ import static io.trino.orc.OrcWriterStats.FlushReason.CLOSED;
 import static io.trino.orc.OrcWriterStats.FlushReason.DICTIONARY_FULL;
 import static io.trino.orc.OrcWriterStats.FlushReason.MAX_BYTES;
 import static io.trino.orc.OrcWriterStats.FlushReason.MAX_ROWS;
+import static io.trino.orc.metadata.CalendarKind.PROLEPTIC_GREGORIAN;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT;
 import static io.trino.orc.metadata.OrcColumnId.ROOT_COLUMN;
 import static io.trino.orc.metadata.PostScript.MAGIC;
@@ -100,7 +101,7 @@ public final class OrcWriter
     private final List<Type> types;
     private final CompressionKind compression;
     private final int stripeMaxBytes;
-    private final int chunkMaxLogicalBytes;
+    private final int chunkMaxBytes;
     private final int stripeMaxRowCount;
     private final int rowGroupMaxRowCount;
     private final int maxCompressionBufferSize;
@@ -141,7 +142,7 @@ public final class OrcWriter
             OrcWriterStats stats)
     {
         this.validationBuilder = validate ? new OrcWriteValidationBuilder(validationMode, types)
-                .setStringStatisticsLimitInBytes(toIntExact(options.getMaxStringStatisticsLimit().toBytes())) : null;
+                                            .setStringStatisticsLimitInBytes(toIntExact(options.getMaxStringStatisticsLimit().toBytes())) : null;
 
         this.orcDataSink = requireNonNull(orcDataSink, "orcDataSink is null");
         this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
@@ -153,7 +154,7 @@ public final class OrcWriter
         checkArgument(options.getStripeMaxSize().compareTo(options.getStripeMinSize()) >= 0, "stripeMaxSize must be greater than or equal to stripeMinSize");
         int stripeMinBytes = toIntExact(requireNonNull(options.getStripeMinSize(), "stripeMinSize is null").toBytes());
         this.stripeMaxBytes = toIntExact(requireNonNull(options.getStripeMaxSize(), "stripeMaxSize is null").toBytes());
-        this.chunkMaxLogicalBytes = Math.max(1, stripeMaxBytes / 2);
+        this.chunkMaxBytes = Math.max(1, stripeMaxBytes / 2);
         this.stripeMaxRowCount = options.getStripeMaxRowCount();
         this.rowGroupMaxRowCount = options.getRowGroupMaxRowCount();
         recordValidation(validation -> validation.setRowGroupMaxRowCount(rowGroupMaxRowCount));
@@ -171,7 +172,7 @@ public final class OrcWriter
         // create column writers
         OrcType rootType = orcTypes.get(ROOT_COLUMN);
         checkArgument(rootType.getFieldCount() == types.size());
-        ImmutableList.Builder<ColumnWriter> columnWriters = ImmutableList.builder();
+        ImmutableList.Builder<ColumnWriter> columnWriters = ImmutableList.builderWithExpectedSize(types.size());
         ImmutableSet.Builder<SliceDictionaryColumnWriter> sliceColumnWriters = ImmutableSet.builder();
         for (int fieldId = 0; fieldId < types.size(); fieldId++) {
             OrcColumnId fieldColumnIndex = rootType.getFieldTypeIndex(fieldId);
@@ -187,18 +188,19 @@ public final class OrcWriter
                     options.isShouldCompactMinMax());
             columnWriters.add(columnWriter);
 
-            if (columnWriter instanceof SliceDictionaryColumnWriter) {
-                sliceColumnWriters.add((SliceDictionaryColumnWriter) columnWriter);
+            if (columnWriter instanceof SliceDictionaryColumnWriter sliceDictionaryColumnWriter) {
+                sliceColumnWriters.add(sliceDictionaryColumnWriter);
             }
             else {
                 for (ColumnWriter nestedColumnWriter : columnWriter.getNestedColumnWriters()) {
-                    if (nestedColumnWriter instanceof SliceDictionaryColumnWriter) {
-                        sliceColumnWriters.add((SliceDictionaryColumnWriter) nestedColumnWriter);
+                    if (nestedColumnWriter instanceof SliceDictionaryColumnWriter sliceDictionaryColumnWriter) {
+                        sliceColumnWriters.add(sliceDictionaryColumnWriter);
                     }
                 }
             }
         }
         this.columnWriters = columnWriters.build();
+        this.columnWritersRetainedBytes = this.columnWriters.stream().mapToLong(ColumnWriter::getRetainedBytes).sum();
         this.dictionaryCompressionOptimizer = new DictionaryCompressionOptimizer(
                 sliceColumnWriters.build(),
                 stripeMinBytes,
@@ -264,8 +266,8 @@ public final class OrcWriter
             // align page to row group boundaries
             Page chunk = page.getRegion(writeOffset, min(page.getPositionCount() - writeOffset, min(rowGroupMaxRowCount - rowGroupRowCount, stripeMaxRowCount - stripeRowCount)));
 
-            // avoid chunk with huge logical size
-            while (chunk.getPositionCount() > 1 && chunk.getLogicalSizeInBytes() > chunkMaxLogicalBytes) {
+            // avoid chunk with huge size
+            while (chunk.getPositionCount() > 1 && chunk.getSizeInBytes() > chunkMaxBytes) {
                 chunk = page.getRegion(writeOffset, chunk.getPositionCount() / 2);
             }
 
@@ -518,7 +520,7 @@ public final class OrcWriter
         recordValidation(validation -> validation.setFileStatistics(fileStats));
 
         Map<String, Slice> userMetadata = this.userMetadata.entrySet().stream()
-                .collect(Collectors.toMap(Entry::getKey, entry -> utf8Slice(entry.getValue())));
+                .collect(toImmutableMap(Entry::getKey, entry -> utf8Slice(entry.getValue())));
 
         Footer footer = new Footer(
                 fileRowCount,
@@ -529,7 +531,8 @@ public final class OrcWriter
                 orcTypes,
                 fileStats,
                 userMetadata,
-                Optional.empty()); // writer id will be set by MetadataWriter
+                Optional.empty(), // writer id will be set by MetadataWriter
+                PROLEPTIC_GREGORIAN);
 
         closedStripes.clear();
         closedStripesRetainedBytes = 0;

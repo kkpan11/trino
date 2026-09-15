@@ -13,12 +13,14 @@
  */
 package io.trino.tests;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.base.Splitter;
 import com.google.common.collect.AbstractSequentialIterator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Streams;
 import io.airlift.http.client.FullJsonResponseHandler.JsonResponse;
+import io.airlift.http.client.HeaderName;
 import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.HttpUriBuilder;
 import io.airlift.http.client.Request;
@@ -26,11 +28,13 @@ import io.airlift.http.client.StatusResponseHandler.StatusResponse;
 import io.airlift.http.client.jetty.JettyHttpClient;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
-import io.airlift.json.ObjectMapperProvider;
-import io.trino.client.QueryDataClientJacksonModule;
+import io.airlift.json.JsonMapperProvider;
+import io.trino.client.QueryDataJacksonModule;
 import io.trino.client.QueryError;
 import io.trino.client.QueryResults;
+import io.trino.client.ResultRowsDecoder;
 import io.trino.plugin.memory.MemoryPlugin;
+import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.QueryId;
@@ -58,11 +62,12 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Throwables.getStackTraceAsString;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
-import static com.google.common.net.HttpHeaders.X_FORWARDED_HOST;
-import static com.google.common.net.HttpHeaders.X_FORWARDED_PORT;
-import static com.google.common.net.HttpHeaders.X_FORWARDED_PROTO;
 import static io.airlift.http.client.FullJsonResponseHandler.createFullJsonResponseHandler;
+import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
+import static io.airlift.http.client.HeaderNames.LOCATION;
+import static io.airlift.http.client.HeaderNames.X_FORWARDED_HOST;
+import static io.airlift.http.client.HeaderNames.X_FORWARDED_PORT;
+import static io.airlift.http.client.HeaderNames.X_FORWARDED_PROTO;
 import static io.airlift.http.client.Request.Builder.prepareGet;
 import static io.airlift.http.client.Request.Builder.prepareHead;
 import static io.airlift.http.client.Request.Builder.preparePost;
@@ -94,8 +99,11 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 @Execution(CONCURRENT)
 public class TestServer
 {
-    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = new JsonCodecFactory(new ObjectMapperProvider()
-            .withModules(Set.of(new QueryDataClientJacksonModule())))
+    private static final JsonMapper JSON_MAPPER = new JsonMapperProvider()
+            .withModules(Set.of(new QueryDataJacksonModule()))
+            .get();
+
+    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = new JsonCodecFactory(JSON_MAPPER)
             .jsonCodec(QueryResults.class);
 
     private TestingTrinoServer server;
@@ -109,7 +117,9 @@ public class TestServer
                 .build();
 
         server.installPlugin(new MemoryPlugin());
+        server.installPlugin(new TpchPlugin());
         server.createCatalog("memory", "memory");
+        server.createCatalog("tpch", "tpch");
 
         client = new JettyHttpClient();
     }
@@ -129,10 +139,10 @@ public class TestServer
         String invalidTimeZone = "this_is_an_invalid_time_zone";
         QueryResults queryResults = postQuery(request -> request
                 .setBodyGenerator(createStaticBodyGenerator("show catalogs", UTF_8))
-                .setHeader(TRINO_HEADERS.requestCatalog(), "catalog")
-                .setHeader(TRINO_HEADERS.requestSchema(), "schema")
-                .setHeader(TRINO_HEADERS.requestPath(), "path")
-                .setHeader(TRINO_HEADERS.requestTimeZone(), invalidTimeZone))
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestCatalog()), "catalog")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestSchema()), "schema")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestPath()), "path")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestTimeZone()), invalidTimeZone))
                 .map(JsonResponse::getValue)
                 .peek(result -> checkState((result.getError() == null) != (result.getNextUri() == null)))
                 .collect(last());
@@ -148,12 +158,13 @@ public class TestServer
 
     @Test
     public void testFirstResponseColumns()
+            throws Exception
     {
         List<QueryResults> queryResults = postQuery(request -> request
                 .setBodyGenerator(createStaticBodyGenerator("show catalogs", UTF_8))
-                .setHeader(TRINO_HEADERS.requestCatalog(), "catalog")
-                .setHeader(TRINO_HEADERS.requestSchema(), "schema")
-                .setHeader(TRINO_HEADERS.requestPath(), "path"))
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestCatalog()), "catalog")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestSchema()), "schema")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestPath()), "path"))
                 .map(JsonResponse::getValue)
                 .collect(toImmutableList());
 
@@ -174,7 +185,10 @@ public class TestServer
         assertThat(data).isPresent();
 
         QueryResults results = data.orElseThrow();
-        assertThat(results.getData().getData()).containsOnly(ImmutableList.of("memory"), ImmutableList.of("system"));
+
+        try (ResultRowsDecoder decoder = new ResultRowsDecoder()) {
+            assertThat(decoder.toRows(results)).containsOnly(ImmutableList.of("memory"), ImmutableList.of("system"), ImmutableList.of("tpch"));
+        }
     }
 
     @Test
@@ -193,18 +207,23 @@ public class TestServer
         ImmutableList.Builder<List<Object>> data = ImmutableList.builder();
         QueryResults queryResults = postQuery(request -> request
                 .setBodyGenerator(createStaticBodyGenerator("show catalogs", UTF_8))
-                .setHeader(TRINO_HEADERS.requestCatalog(), "catalog")
-                .setHeader(TRINO_HEADERS.requestSchema(), "schema")
-                .setHeader(TRINO_HEADERS.requestPath(), "path")
-                .setHeader(TRINO_HEADERS.requestClientInfo(), "{\"clientVersion\":\"testVersion\"}")
-                .addHeader(TRINO_HEADERS.requestSession(), QUERY_MAX_MEMORY + "=1GB")
-                .addHeader(TRINO_HEADERS.requestSession(), JOIN_DISTRIBUTION_TYPE + "=partitioned," + MAX_HASH_PARTITION_COUNT + " = 43")
-                .addHeader(TRINO_HEADERS.requestPreparedStatement(), "foo=select * from bar"))
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestCatalog()), "catalog")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestSchema()), "schema")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestPath()), "path")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestClientInfo()), "{\"clientVersion\":\"testVersion\"}")
+                .addHeader(HeaderName.of(TRINO_HEADERS.requestSession()), QUERY_MAX_MEMORY + "=1GB")
+                .addHeader(HeaderName.of(TRINO_HEADERS.requestSession()), JOIN_DISTRIBUTION_TYPE + "=partitioned," + MAX_HASH_PARTITION_COUNT + " = 43")
+                .addHeader(HeaderName.of(TRINO_HEADERS.requestPreparedStatement()), "foo=select * from bar"))
                 .map(JsonResponse::getValue)
                 .peek(result -> assertThat(result.getError()).isNull())
                 .peek(results -> {
                     if (results.getData() != null) {
-                        data.addAll(results.getData().getData());
+                        try (ResultRowsDecoder decoder = new ResultRowsDecoder()) {
+                            data.addAll(decoder.toRows(results));
+                        }
+                        catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
                     }
                 })
                 .collect(last());
@@ -226,7 +245,7 @@ public class TestServer
         assertThat(queryInfo.getSession().getPreparedStatements()).isEqualTo(ImmutableMap.of("foo", "select * from bar"));
 
         List<List<Object>> rows = data.build();
-        assertThat(rows).isEqualTo(ImmutableList.of(ImmutableList.of("memory"), ImmutableList.of("system")));
+        assertThat(rows).isEqualTo(ImmutableList.of(ImmutableList.of("memory"), ImmutableList.of("system"), ImmutableList.of("tpch")));
     }
 
     @Test
@@ -234,10 +253,10 @@ public class TestServer
     {
         JsonResponse<QueryResults> queryResults = postQuery(request -> request
                 .setBodyGenerator(createStaticBodyGenerator("start transaction", UTF_8))
-                .setHeader(TRINO_HEADERS.requestTransactionId(), "none"))
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestTransactionId()), "none"))
                 .peek(result -> assertThat(result.getValue().getError()).isNull())
                 .collect(last());
-        assertThat(queryResults.getHeader(TRINO_HEADERS.responseStartedTransactionId())).isNotNull();
+        assertThat(queryResults.getHeader(HeaderName.of(TRINO_HEADERS.responseStartedTransactionId()))).isNotNull();
     }
 
     @Test
@@ -278,13 +297,13 @@ public class TestServer
             // This query is designed to cause a compile failure, and hopefully not run too long.
             // The exact query is not important, just that it causes a failure.
             String array = IntStream.range(0, 254)
-                    .mapToObj(columnNumber -> "foo")
+                    .mapToObj(_ -> "foo")
                     .collect(joining(", ", "ARRAY[", "]"));
             String query = "SELECT " +
                     String.join(" || ", Collections.nCopies(10, array)) +
                     "FROM " + tableName;
 
-            checkVersionOnError(query, "TrinoException: Query exceeded maximum columns(?s:.*)at io.trino.sql.gen.PageFunctionCompiler.compileProjectionInternal");
+            checkVersionOnError(query, "TrinoException: Failed to execute query; (?s:.*)at io.trino.sql.gen.PageFunctionCompiler.compileProjectionClass");
         }
     }
 
@@ -343,7 +362,7 @@ public class TestServer
         String stackTrace = getStackTraceAsString(queryError.getFailureInfo().toException());
         assertThat(stackTrace).containsPattern(proofOfOrigin);
         long versionLines = Splitter.on("\n").splitToStream(stackTrace)
-                .filter(line -> line.contains("at io.trino.$gen.Trino_testversion____"))
+                .filter(line -> line.contains("at io.trino.$gen.Trino_testversion___"))
                 .count();
         if (versionLines != 1) {
             fail(format("Expected version embedded in the stacktrace exactly once, but was %s: %s", versionLines, stackTrace));
@@ -355,7 +374,7 @@ public class TestServer
     {
         Request request = prepareHead()
                 .setUri(uriFor("/v1/status"))
-                .setHeader(TRINO_HEADERS.requestUser(), "unknown")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestUser()), "unknown")
                 .setFollowRedirects(false)
                 .build();
         StatusResponse response = client.execute(request, createStatusResponseHandler());
@@ -364,7 +383,7 @@ public class TestServer
                 .isEqualTo(OK.getStatusCode());
         assertThat(response.getHeader(CONTENT_TYPE))
                 .describedAs("Content Type")
-                .isEqualTo(APPLICATION_JSON);
+                .hasValue(APPLICATION_JSON);
     }
 
     @Test
@@ -378,9 +397,9 @@ public class TestServer
         assertThat(response.getStatusCode())
                 .describedAs("Status code")
                 .isEqualTo(SEE_OTHER.getStatusCode());
-        assertThat(response.getHeader("Location"))
+        assertThat(response.getHeader(LOCATION))
                 .describedAs("Location")
-                .isEqualTo(server.getBaseUrl() + "/ui/");
+                .hasValue(server.getBaseUrl() + "/ui/");
 
         // behind a proxy
         request = prepareGet()
@@ -394,17 +413,17 @@ public class TestServer
         assertThat(response.getStatusCode())
                 .describedAs("Status code")
                 .isEqualTo(SEE_OTHER.getStatusCode());
-        assertThat(response.getHeader("Location"))
+        assertThat(response.getHeader(LOCATION))
                 .describedAs("Location")
-                .isEqualTo("https://my-load-balancer.local/ui/");
+                .hasValue("https://my-load-balancer.local/ui/");
     }
 
     private Stream<JsonResponse<QueryResults>> postQuery(Function<Request.Builder, Request.Builder> requestConfigurer)
     {
         Request.Builder request = preparePost()
                 .setUri(uriFor("/v1/statement"))
-                .setHeader(TRINO_HEADERS.requestUser(), "user")
-                .setHeader(TRINO_HEADERS.requestSource(), "source");
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestUser()), "user")
+                .setHeader(HeaderName.of(TRINO_HEADERS.requestSource()), "source");
         request = requestConfigurer.apply(request);
         JsonResponse<QueryResults> queryResults = client.execute(request.build(), createFullJsonResponseHandler(QUERY_RESULTS_CODEC));
         return Streams.stream(new QueryResultsIterator(client, queryResults));
@@ -420,7 +439,7 @@ public class TestServer
      */
     private static <T> Collector<T, ?, T> last()
     {
-        return Collectors.collectingAndThen(Collectors.reducing((a, b) -> b), Optional::get);
+        return Collectors.collectingAndThen(Collectors.reducing((_, b) -> b), Optional::get);
     }
 
     private static class QueryResultsIterator

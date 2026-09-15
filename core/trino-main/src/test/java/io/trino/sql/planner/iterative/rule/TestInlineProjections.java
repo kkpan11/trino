@@ -19,10 +19,12 @@ import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.TestingFunctionResolution;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Decimals;
+import io.trino.spi.type.FunctionType;
 import io.trino.spi.type.RowType;
 import io.trino.sql.ir.Call;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.FieldReference;
+import io.trino.sql.ir.Lambda;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.assertions.ExpressionMatcher;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
@@ -141,6 +143,25 @@ public class TestInlineProjections
                         project(
                                 ImmutableMap.of("out1", PlanMatchPattern.expression(new Call(ADD_INTEGER, ImmutableList.of(new Call(SUBTRACT_INTEGER, ImmutableList.of(new Reference(INTEGER, "x"), new Constant(INTEGER, 1L))), new Constant(INTEGER, 2L))))),
                                 values("x")));
+    }
+
+    @Test
+    public void testInlineLambda()
+    {
+        tester().assertThat(new InlineProjections())
+                .on(p -> p.project(
+                        Assignments.of(
+                                p.symbol("complex", INTEGER),
+                                new Reference(INTEGER, "complex"),
+                                p.symbol("output", new FunctionType(ImmutableList.of(BIGINT), INTEGER)),
+                                new Lambda(
+                                        ImmutableList.of(p.symbol("arg")),
+                                        new Call(ADD_INTEGER, ImmutableList.of(new Reference(INTEGER, "arg"), new Reference(INTEGER, "complex"))))),
+                        p.project(Assignments.builder()
+                                        .put(p.symbol("complex", INTEGER), new Call(SUBTRACT_INTEGER, ImmutableList.of(new Reference(INTEGER, "x"), new Constant(INTEGER, 1L))))
+                                        .build(),
+                                p.values(p.symbol("x", INTEGER)))))
+                .doesNotFire();
     }
 
     @Test

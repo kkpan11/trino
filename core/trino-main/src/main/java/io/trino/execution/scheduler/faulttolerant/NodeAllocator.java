@@ -16,7 +16,7 @@ package io.trino.execution.scheduler.faulttolerant;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.trino.execution.TaskId;
-import io.trino.metadata.InternalNode;
+import io.trino.node.InternalNode;
 
 import java.io.Closeable;
 
@@ -26,6 +26,8 @@ public interface NodeAllocator
     /**
      * Requests acquisition of node. Obtained node can be obtained via {@link NodeLease#getNode()} method.
      * The node may not be available immediately. Calling party needs to wait until future returned is done.
+     * Requests from different queries (as denoted by session argument passed to {@link NodeAllocatorService#getNodeAllocator})
+     * will be served in fair manner.
      *
      * It is obligatory for the calling party to release all the leases they obtained via {@link NodeLease#release()}.
      */

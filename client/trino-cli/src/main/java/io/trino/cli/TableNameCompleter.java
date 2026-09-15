@@ -18,7 +18,6 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import io.trino.client.QueryData;
 import io.trino.client.StatementClient;
 import org.gaul.modernizer_maven_annotations.SuppressModernizer;
 import org.jline.reader.Candidate;
@@ -30,10 +29,10 @@ import java.io.Closeable;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import static com.google.common.cache.CacheLoader.asyncReloading;
 import static java.lang.String.format;
+import static java.time.Duration.ofMinutes;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 
@@ -55,7 +54,7 @@ public class TableNameCompleter
 
         tableCache = buildUnsafeCache(
                 CacheBuilder.newBuilder()
-                        .refreshAfterWrite(RELOAD_TIME_MINUTES, TimeUnit.MINUTES),
+                        .refreshAfterWrite(ofMinutes(RELOAD_TIME_MINUTES)),
                 asyncReloading(CacheLoader.from(this::listTables), executor));
 
         functionCache = buildUnsafeCache(
@@ -86,11 +85,8 @@ public class TableNameCompleter
         ImmutableList.Builder<String> cache = ImmutableList.builder();
         try (StatementClient client = queryRunner.startInternalQuery(query)) {
             while (client.isRunning() && !Thread.currentThread().isInterrupted()) {
-                QueryData results = client.currentData();
-                if (results.getData() != null) {
-                    for (List<Object> row : results.getData()) {
-                        cache.add((String) row.get(0));
-                    }
+                for (List<Object> row : client.currentRows()) {
+                    cache.add((String) row.get(0));
                 }
                 client.advance();
             }
@@ -114,7 +110,7 @@ public class TableNameCompleter
         String prefix = buffer.substring(blankPos + 1);
         Optional<String> schemaName = queryRunner.getSession().getSchema();
 
-        if (!schemaName.isPresent()) {
+        if (schemaName.isEmpty()) {
             return;
         }
         List<String> functionNames = functionCache.getIfPresent(schemaName.get());

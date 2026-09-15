@@ -39,8 +39,8 @@ public class TestKafkaFilterManager
         assertThat(KafkaFilterManager.filterValuesByDomain(testDomain, source)).isEqualTo(Set.of(3L));
 
         testDomain = Domain.create(SortedRangeSet.copyOf(BIGINT,
-                ImmutableList.of(
-                        Range.range(BIGINT, 2L, true, 4L, true))),
+                        ImmutableList.of(
+                                Range.range(BIGINT, 2L, true, 4L, true))),
                 false);
 
         assertThat(KafkaFilterManager.filterValuesByDomain(testDomain, source)).isEqualTo(Set.of(2L, 3L, 4L));
@@ -50,21 +50,21 @@ public class TestKafkaFilterManager
     public void testFilterRangeByDomain()
     {
         Domain testDomain = Domain.singleValue(BIGINT, 1L);
-        assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).isPresent()).isTrue();
+        assertThat(KafkaFilterManager.filterRangeByDomain(testDomain)).isPresent();
         assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).get().begin()).isEqualTo(1L);
         assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).get().end()).isEqualTo(2L);
 
         testDomain = multipleValues(BIGINT, ImmutableList.of(3L, 8L));
-        assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).isPresent()).isTrue();
+        assertThat(KafkaFilterManager.filterRangeByDomain(testDomain)).isPresent();
         assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).get().begin()).isEqualTo(3L);
         assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).get().end()).isEqualTo(9L);
 
         testDomain = Domain.create(SortedRangeSet.copyOf(BIGINT,
-                ImmutableList.of(
-                        Range.range(BIGINT, 2L, true, 4L, true))),
+                        ImmutableList.of(
+                                Range.range(BIGINT, 2L, true, 4L, true))),
                 false);
 
-        assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).isPresent()).isTrue();
+        assertThat(KafkaFilterManager.filterRangeByDomain(testDomain)).isPresent();
         assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).get().begin()).isEqualTo(2L);
         assertThat(KafkaFilterManager.filterRangeByDomain(testDomain).get().end()).isEqualTo(5L);
     }

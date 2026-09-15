@@ -16,17 +16,18 @@ package io.trino.server.remotetask;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.errorprone.annotations.ThreadSafe;
-import io.airlift.event.client.ServiceUnavailableException;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.execution.TaskId;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoTransportException;
+import jakarta.ws.rs.ServiceUnavailableException;
 
 import java.io.EOFException;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.nio.channels.ClosedChannelException;
 import java.util.Queue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -34,6 +35,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 
+import static com.google.common.base.Throwables.getCausalChain;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.spi.HostAddress.fromUri;
 import static io.trino.spi.StandardErrorCode.REMOTE_TASK_ERROR;
@@ -122,7 +124,8 @@ class RequestErrorTracker
         // fail the task, if we have more than X failures in a row and more than Y seconds have passed since the last request
         if (backoff.failure()) {
             // it is weird to mark the task failed locally and then cancel the remote task, but there is no way to tell a remote task that it is failed
-            TrinoException exception = new TrinoTransportException(TOO_MANY_REQUESTS_FAILED,
+            TrinoException exception = new TrinoTransportException(
+                    TOO_MANY_REQUESTS_FAILED,
                     fromUri(taskUri),
                     format("%s (%s %s - %s failures, failure duration %s, total failed request time %s)",
                             WORKER_NODE_ERROR,
@@ -149,16 +152,13 @@ class RequestErrorTracker
 
     private static boolean isExpectedError(Throwable t)
     {
-        while (t != null) {
-            if ((t instanceof SocketException) ||
-                    (t instanceof SocketTimeoutException) ||
-                    (t instanceof EOFException) ||
-                    (t instanceof TimeoutException) ||
-                    (t instanceof ServiceUnavailableException)) {
-                return true;
-            }
-            t = t.getCause();
-        }
-        return false;
+        return getCausalChain(t).stream().anyMatch(failure ->
+                failure instanceof SocketException ||
+                        failure instanceof SocketTimeoutException ||
+                        failure instanceof EOFException ||
+                        failure instanceof TimeoutException ||
+                        failure instanceof CancellationException ||
+                        failure instanceof ClosedChannelException ||
+                        failure instanceof ServiceUnavailableException);
     }
 }

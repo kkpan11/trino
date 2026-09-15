@@ -20,7 +20,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestScope
@@ -30,12 +32,12 @@ public class TestScope
     {
         Scope root = Scope.create();
 
-        Field outerColumn1 = Field.newQualified(QualifiedName.of("outer", "column1"), Optional.of("c1"), BIGINT, false, Optional.empty(), Optional.empty(), false);
-        Field outerColumn2 = Field.newQualified(QualifiedName.of("outer", "column2"), Optional.of("c2"), BIGINT, false, Optional.empty(), Optional.empty(), false);
+        Field outerColumn1 = Field.newQualified(QualifiedName.of("outer", "column1"), Optional.of("c1"), BIGINT, false, Optional.empty(), Optional.empty(), Optional.empty(), false);
+        Field outerColumn2 = Field.newQualified(QualifiedName.of("outer", "column2"), Optional.of("c2"), BIGINT, false, Optional.empty(), Optional.empty(), Optional.empty(), false);
         Scope outer = Scope.builder().withParent(root).withRelationType(RelationId.anonymous(), new RelationType(outerColumn1, outerColumn2)).build();
 
-        Field innerColumn2 = Field.newQualified(QualifiedName.of("inner", "column2"), Optional.of("c2"), BIGINT, false, Optional.empty(), Optional.empty(), false);
-        Field innerColumn3 = Field.newQualified(QualifiedName.of("inner", "column3"), Optional.of("c3"), BIGINT, false, Optional.empty(), Optional.empty(), false);
+        Field innerColumn2 = Field.newQualified(QualifiedName.of("inner", "column2"), Optional.of("c2"), BIGINT, false, Optional.empty(), Optional.empty(), Optional.empty(), false);
+        Field innerColumn3 = Field.newQualified(QualifiedName.of("inner", "column3"), Optional.of("c3"), BIGINT, false, Optional.empty(), Optional.empty(), Optional.empty(), false);
         Scope inner = Scope.builder().withOuterQueryParent(outer).withRelationType(RelationId.anonymous(), new RelationType(innerColumn2, innerColumn3)).build();
 
         Expression c1 = name("c1");
@@ -43,35 +45,48 @@ public class TestScope
         Expression c3 = name("c3");
         Expression c4 = name("c4");
 
-        assertThat(root.tryResolveField(c1).isPresent()).isFalse();
+        assertThat(root.tryResolveField(c1)).isEmpty();
 
-        assertThat(outer.tryResolveField(c1).isPresent()).isTrue();
+        assertThat(outer.tryResolveField(c1)).isPresent();
         assertThat(outer.tryResolveField(c1).get().getField()).isEqualTo(outerColumn1);
         assertThat(outer.tryResolveField(c1).get().isLocal()).isEqualTo(true);
         assertThat(outer.tryResolveField(c1).get().getHierarchyFieldIndex()).isEqualTo(0);
-        assertThat(outer.tryResolveField(c2).isPresent()).isTrue();
+        assertThat(outer.tryResolveField(c2)).isPresent();
         assertThat(outer.tryResolveField(c2).get().getField()).isEqualTo(outerColumn2);
         assertThat(outer.tryResolveField(c2).get().isLocal()).isEqualTo(true);
         assertThat(outer.tryResolveField(c2).get().getHierarchyFieldIndex()).isEqualTo(1);
-        assertThat(outer.tryResolveField(c3).isPresent()).isFalse();
-        assertThat(outer.tryResolveField(c4).isPresent()).isFalse();
+        assertThat(outer.tryResolveField(c3)).isEmpty();
+        assertThat(outer.tryResolveField(c4)).isEmpty();
 
-        assertThat(inner.tryResolveField(c1).isPresent()).isTrue();
+        assertThat(inner.tryResolveField(c1)).isPresent();
         assertThat(inner.tryResolveField(c1).get().getField()).isEqualTo(outerColumn1);
         assertThat(inner.tryResolveField(c1).get().isLocal()).isEqualTo(false);
         assertThat(inner.tryResolveField(c1).get().getHierarchyFieldIndex()).isEqualTo(0);
         assertThat(inner.tryResolveField(c1).get().getRelationFieldIndex()).isEqualTo(0);
-        assertThat(inner.tryResolveField(c2).isPresent()).isTrue();
+        assertThat(inner.tryResolveField(c2)).isPresent();
         assertThat(inner.tryResolveField(c2).get().getField()).isEqualTo(innerColumn2);
         assertThat(inner.tryResolveField(c2).get().isLocal()).isEqualTo(true);
         assertThat(inner.tryResolveField(c2).get().getHierarchyFieldIndex()).isEqualTo(0);
-        assertThat(inner.tryResolveField(c2).isPresent()).isTrue();
+        assertThat(inner.tryResolveField(c2)).isPresent();
         assertThat(inner.tryResolveField(c3).get().getField()).isEqualTo(innerColumn3);
         assertThat(inner.tryResolveField(c3).get().isLocal()).isEqualTo(true);
         assertThat(inner.tryResolveField(c3).get().getHierarchyFieldIndex()).isEqualTo(1);
-        assertThat(inner.tryResolveField(c4).isPresent()).isFalse();
+        assertThat(inner.tryResolveField(c4)).isEmpty();
 
         assertThat(inner.getOuterQueryParent()).isEqualTo(Optional.of(outer));
+    }
+
+    @Test
+    public void testSuggestionFailureDoesNotMaskColumnNotFound()
+    {
+        Field firstName = Field.newQualified(QualifiedName.of("table", "first_name"), Optional.of("first_name"), BIGINT, false, Optional.empty(), Optional.empty(), Optional.empty(), false);
+        Scope scope = Scope.builder().withRelationType(RelationId.anonymous(), new RelationType(firstName)).build();
+
+        assertTrinoExceptionThrownBy(() -> scope.resolveField(name("firs_name"), QualifiedName.of("firs_name"), () -> {
+            throw new RuntimeException("access control failure");
+        }))
+                .hasErrorCode(COLUMN_NOT_FOUND)
+                .hasMessage("Column 'firs_name' cannot be resolved");
     }
 
     private static Expression name(String first, String... parts)

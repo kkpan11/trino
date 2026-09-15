@@ -18,6 +18,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.SizeOf;
 import io.trino.metastore.HiveTypeName;
 import io.trino.plugin.hive.util.HiveBucketing.BucketingVersion;
 import io.trino.spi.HostAddress;
@@ -34,7 +35,6 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
-import static io.trino.plugin.hive.util.HiveUtil.getDeserializerClassName;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
@@ -49,9 +49,10 @@ public class HiveSplit
     private final long length;
     private final long estimatedFileSize;
     private final long fileModifiedTime;
-    private final Map<String, String> schema;
+    private final Schema schema;
     private final List<HivePartitionKey> partitionKeys;
     private final List<HostAddress> addresses;
+    private final Optional<String> affinityKey;
     private final String partitionName;
     private final OptionalInt readBucketNumber;
     private final OptionalInt tableBucketNumber;
@@ -70,7 +71,7 @@ public class HiveSplit
             @JsonProperty("length") long length,
             @JsonProperty("estimatedFileSize") long estimatedFileSize,
             @JsonProperty("fileModifiedTime") long fileModifiedTime,
-            @JsonProperty("schema") Map<String, String> schema,
+            @JsonProperty("schema") Schema schema,
             @JsonProperty("partitionKeys") List<HivePartitionKey> partitionKeys,
             @JsonProperty("readBucketNumber") OptionalInt readBucketNumber,
             @JsonProperty("tableBucketNumber") OptionalInt tableBucketNumber,
@@ -81,8 +82,7 @@ public class HiveSplit
             @JsonProperty("acidInfo") Optional<AcidInfo> acidInfo,
             @JsonProperty("splitWeight") SplitWeight splitWeight)
     {
-        this(
-                partitionName,
+        this(partitionName,
                 path,
                 start,
                 length,
@@ -91,6 +91,7 @@ public class HiveSplit
                 schema,
                 partitionKeys,
                 ImmutableList.of(),
+                Optional.empty(),
                 readBucketNumber,
                 tableBucketNumber,
                 forceLocalScheduling,
@@ -108,9 +109,10 @@ public class HiveSplit
             long length,
             long estimatedFileSize,
             long fileModifiedTime,
-            Map<String, String> schema,
+            Schema schema,
             List<HivePartitionKey> partitionKeys,
             List<HostAddress> addresses,
+            Optional<String> affinityKey,
             OptionalInt readBucketNumber,
             OptionalInt tableBucketNumber,
             boolean forceLocalScheduling,
@@ -128,6 +130,7 @@ public class HiveSplit
         requireNonNull(schema, "schema is null");
         requireNonNull(partitionKeys, "partitionKeys is null");
         requireNonNull(addresses, "addresses is null");
+        requireNonNull(affinityKey, "affinityKey is null");
         requireNonNull(readBucketNumber, "readBucketNumber is null");
         requireNonNull(tableBucketNumber, "tableBucketNumber is null");
         requireNonNull(hiveColumnCoercions, "hiveColumnCoercions is null");
@@ -144,6 +147,7 @@ public class HiveSplit
         this.schema = schema;
         this.partitionKeys = ImmutableList.copyOf(partitionKeys);
         this.addresses = ImmutableList.copyOf(addresses);
+        this.affinityKey = affinityKey;
         this.readBucketNumber = readBucketNumber;
         this.tableBucketNumber = tableBucketNumber;
         this.forceLocalScheduling = forceLocalScheduling;
@@ -191,7 +195,7 @@ public class HiveSplit
     }
 
     @JsonProperty
-    public Map<String, String> getSchema()
+    public Schema getSchema()
     {
         return schema;
     }
@@ -208,6 +212,14 @@ public class HiveSplit
     public List<HostAddress> getAddresses()
     {
         return addresses;
+    }
+
+    // do not serialize affinity key as it is only used by the scheduler on the coordinator
+    @JsonIgnore
+    @Override
+    public Optional<String> getAffinityKey()
+    {
+        return affinityKey;
     }
 
     @JsonProperty
@@ -270,42 +282,32 @@ public class HiveSplit
     {
         return INSTANCE_SIZE
                 + estimatedSizeOf(path)
-                + estimatedSizeOf(schema, key -> estimatedSizeOf((String) key), value -> estimatedSizeOf((String) value))
+                + schema.getRetainedSizeInBytes()
                 + estimatedSizeOf(partitionKeys, HivePartitionKey::estimatedSizeInBytes)
                 + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes)
+                + sizeOf(affinityKey, SizeOf::estimatedSizeOf)
                 + estimatedSizeOf(partitionName)
                 + sizeOf(readBucketNumber)
                 + sizeOf(tableBucketNumber)
-                + estimatedSizeOf(hiveColumnCoercions, (Integer key) -> INTEGER_INSTANCE_SIZE, HiveTypeName::getEstimatedSizeInBytes)
+                + estimatedSizeOf(hiveColumnCoercions, (Integer _) -> INTEGER_INSTANCE_SIZE, HiveTypeName::getEstimatedSizeInBytes)
                 + sizeOf(bucketConversion, BucketConversion::getRetainedSizeInBytes)
                 + sizeOf(bucketValidation, BucketValidation::getRetainedSizeInBytes)
-                + sizeOf(acidInfo, AcidInfo::getRetainedSizeInBytes)
+                + sizeOf(acidInfo, AcidInfo::retainedSizeInBytes)
                 + splitWeight.getRetainedSizeInBytes();
-    }
-
-    @Override
-    public Map<String, String> getSplitInfo()
-    {
-        return ImmutableMap.<String, String>builder()
-                .put("path", path)
-                .put("start", String.valueOf(start))
-                .put("length", String.valueOf(length))
-                .put("estimatedFileSize", String.valueOf(estimatedFileSize))
-                .put("hosts", addresses.stream().map(HostAddress::toString).collect(joining(",")))
-                .put("forceLocalScheduling", String.valueOf(forceLocalScheduling))
-                .put("partitionName", partitionName)
-                .put("deserializerClassName", getDeserializerClassName(schema))
-                .buildOrThrow();
     }
 
     @Override
     public String toString()
     {
         return toStringHelper(this)
-                .addValue(path)
-                .addValue(start)
-                .addValue(length)
-                .addValue(estimatedFileSize)
+                .add("path", path)
+                .add("start", String.valueOf(start))
+                .add("length", String.valueOf(length))
+                .add("estimatedFileSize", String.valueOf(estimatedFileSize))
+                .add("hosts", addresses.stream().map(HostAddress::toString).collect(joining(",")))
+                .add("forceLocalScheduling", String.valueOf(forceLocalScheduling))
+                .add("partitionName", partitionName)
+                .add("serializationLibraryName", schema.serializationLibraryName())
                 .toString();
     }
 

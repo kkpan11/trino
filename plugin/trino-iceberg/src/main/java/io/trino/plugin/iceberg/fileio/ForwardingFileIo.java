@@ -13,45 +13,85 @@
  */
 package io.trino.plugin.iceberg.fileio;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Streams;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
+import io.trino.plugin.iceberg.IcebergStorageCredentials;
+import io.trino.plugin.iceberg.catalog.rest.IcebergRestCatalogFileSystem;
+import io.trino.spi.TrinoException;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.ManifestListFile;
 import org.apache.iceberg.io.BulkDeletionFailureException;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsBulkOperations;
+import org.apache.iceberg.io.SupportsStorageCredentials;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.stream.Stream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
+import static io.trino.plugin.base.util.ExecutorUtil.processWithAdditionalThreads;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_FILESYSTEM_ERROR;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
 public class ForwardingFileIo
-        implements SupportsBulkOperations
+        implements SupportsBulkOperations, SupportsStorageCredentials
 {
     private static final int DELETE_BATCH_SIZE = 1000;
     private static final int BATCH_DELETE_PATHS_MESSAGE_LIMIT = 5;
 
     private final TrinoFileSystem fileSystem;
     private final Map<String, String> properties;
+    private final boolean useFileSizeFromMetadata;
+    private final ExecutorService deleteExecutor;
 
-    public ForwardingFileIo(TrinoFileSystem fileSystem)
+    private List<StorageCredential> credentials = ImmutableList.of();
+
+    @VisibleForTesting
+    public ForwardingFileIo(TrinoFileSystem fileSystem, boolean useFileSizeFromMetadata)
     {
-        this(fileSystem, ImmutableMap.of());
+        this(fileSystem, ImmutableMap.of(), useFileSizeFromMetadata, newDirectExecutorService());
     }
 
-    public ForwardingFileIo(TrinoFileSystem fileSystem, Map<String, String> properties)
+    public ForwardingFileIo(TrinoFileSystem fileSystem, Map<String, String> properties, boolean useFileSizeFromMetadata, ExecutorService deleteExecutor)
     {
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
+        this.deleteExecutor = requireNonNull(deleteExecutor, "executorService is null");
         this.properties = ImmutableMap.copyOf(requireNonNull(properties, "properties is null"));
+        this.useFileSizeFromMetadata = useFileSizeFromMetadata;
+    }
+
+    @Override
+    public void setCredentials(List<StorageCredential> credentials)
+    {
+        this.credentials = ImmutableList.copyOf(credentials);
+        if (fileSystem instanceof IcebergRestCatalogFileSystem icebergRestCatalogFileSystem) {
+            icebergRestCatalogFileSystem.setCredentials(credentials.stream()
+                    .map(credential -> new IcebergStorageCredentials(credential.prefix(), credential.config()))
+                    .collect(toImmutableList()));
+        }
+    }
+
+    @Override
+    public List<StorageCredential> credentials()
+    {
+        return ImmutableList.copyOf(credentials);
     }
 
     @Override
@@ -63,6 +103,10 @@ public class ForwardingFileIo
     @Override
     public InputFile newInputFile(String path, long length)
     {
+        if (!useFileSizeFromMetadata) {
+            return new ForwardingInputFile(fileSystem.newInputFile(Location.of(path)));
+        }
+
         return new ForwardingInputFile(fileSystem.newInputFile(Location.of(path), length));
     }
 
@@ -99,8 +143,17 @@ public class ForwardingFileIo
     public void deleteFiles(Iterable<String> pathsToDelete)
             throws BulkDeletionFailureException
     {
-        Iterable<List<String>> partitions = Iterables.partition(pathsToDelete, DELETE_BATCH_SIZE);
-        partitions.forEach(this::deleteBatch);
+        List<Callable<Void>> tasks = Streams.stream(Iterables.partition(pathsToDelete, DELETE_BATCH_SIZE))
+                .map(batch -> (Callable<Void>) () -> {
+                    deleteBatch(batch);
+                    return null;
+                }).collect(toImmutableList());
+        try {
+            processWithAdditionalThreads(tasks, deleteExecutor);
+        }
+        catch (ExecutionException e) {
+            throw new TrinoException(ICEBERG_FILESYSTEM_ERROR, "Failed to delete files", e.getCause());
+        }
     }
 
     @Override
@@ -119,6 +172,12 @@ public class ForwardingFileIo
     public InputFile newInputFile(DeleteFile file)
     {
         return SupportsBulkOperations.super.newInputFile(file);
+    }
+
+    @Override
+    public InputFile newInputFile(ManifestListFile manifestList)
+    {
+        return SupportsBulkOperations.super.newInputFile(manifestList);
     }
 
     private void deleteBatch(List<String> filesToDelete)

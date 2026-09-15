@@ -14,7 +14,7 @@
 package io.trino.plugin.hive;
 
 import io.airlift.units.Duration;
-import io.trino.plugin.hive.containers.HiveMinioDataLake;
+import io.trino.plugin.hive.containers.Hive3FlociDataLake;
 import io.trino.plugin.hive.s3.S3HiveQueryRunner;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
@@ -28,16 +28,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestHiveAnalyzeCorruptStatistics
         extends AbstractTestQueryFramework
 {
-    private HiveMinioDataLake hiveMinioDataLake;
+    private Hive3FlociDataLake hiveFlociDataLake;
 
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        hiveMinioDataLake = closeAfterClass(new HiveMinioDataLake("test-analyze"));
-        hiveMinioDataLake.start();
+        hiveFlociDataLake = closeAfterClass(new Hive3FlociDataLake("test-analyze"));
+        hiveFlociDataLake.start();
 
-        return S3HiveQueryRunner.builder(hiveMinioDataLake)
+        return S3HiveQueryRunner.builder(hiveFlociDataLake)
                 // Increase timeout because drop_stats doesn't finish with in the default timeout
                 .setThriftMetastoreTimeout(new Duration(5, MINUTES))
                 .build();
@@ -72,7 +72,8 @@ public class TestHiveAnalyzeCorruptStatistics
 
         // Insert duplicated row to simulate broken column statistics status https://github.com/trinodb/trino/issues/13787
         assertThat(onMetastore("SELECT COUNT(1) FROM TAB_COL_STATS WHERE db_name = 'tpch' AND table_name = '" + tableName + "'")).isEqualTo("1");
-        onMetastore("""
+        onMetastore(
+                """
                 INSERT INTO TAB_COL_STATS
                 SELECT
                   cs_id + 1,
@@ -127,7 +128,8 @@ public class TestHiveAnalyzeCorruptStatistics
 
         // Insert duplicated row to simulate broken partition statistics status https://github.com/trinodb/trino/issues/13787
         assertThat(onMetastore("SELECT COUNT(1) FROM PART_COL_STATS WHERE db_name = 'tpch' AND table_name = '" + tableName + "'")).isEqualTo("1");
-        onMetastore("""
+        onMetastore(
+                """
                 INSERT INTO PART_COL_STATS
                 SELECT
                   cs_id + 1,
@@ -160,6 +162,6 @@ public class TestHiveAnalyzeCorruptStatistics
 
     private String onMetastore(@Language("SQL") String sql)
     {
-        return hiveMinioDataLake.getHiveHadoop().runOnMetastore(sql);
+        return hiveFlociDataLake.getHiveHadoop().runOnMetastore(sql);
     }
 }

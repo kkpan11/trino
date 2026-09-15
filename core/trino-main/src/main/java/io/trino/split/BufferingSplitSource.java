@@ -19,8 +19,9 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.opentelemetry.context.Context;
+import io.trino.connector.CatalogHandle;
 import io.trino.metadata.Split;
-import io.trino.spi.connector.CatalogHandle;
+import io.trino.spi.metrics.Metrics;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -77,6 +78,12 @@ public class BufferingSplitSource
     public Optional<List<Object>> getTableExecuteSplitsInfo()
     {
         return source.getTableExecuteSplitsInfo();
+    }
+
+    @Override
+    public Metrics getMetrics()
+    {
+        return source.getMetrics();
     }
 
     @Override
@@ -163,10 +170,15 @@ public class BufferingSplitSource
                         public void onSuccess(SplitBatch splitBatch)
                         {
                             synchronized (GetNextBatch.this) {
-                                if (processBatch(splitBatch)) {
-                                    return;
+                                try {
+                                    if (processBatch(splitBatch)) {
+                                        return;
+                                    }
+                                    fetchSplits();
                                 }
-                                fetchSplits();
+                                catch (Exception e) {
+                                    setException(e);
+                                }
                             }
                         }
 

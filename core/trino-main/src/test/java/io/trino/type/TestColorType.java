@@ -35,7 +35,7 @@ public class TestColorType
     @Test
     public void testGetObjectValue()
     {
-        int[] valuesOfInterest = new int[] {0, 1, 15, 16, 127, 128, 255};
+        int[] valuesOfInterest = {0, 1, 15, 16, 127, 128, 255};
         BlockBuilder builder = COLOR.createFixedSizeBlockBuilder(valuesOfInterest.length * valuesOfInterest.length * valuesOfInterest.length);
         for (int r : valuesOfInterest) {
             for (int g : valuesOfInterest) {
@@ -48,13 +48,13 @@ public class TestColorType
         Block block = builder.build();
         for (int position = 0; position < block.getPositionCount(); position++) {
             int value = COLOR.getInt(block, position);
-            assertThat(COLOR.getObjectValue(null, block, position)).isEqualTo(format("#%02x%02x%02x", (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF));
+            assertThat(COLOR.getObjectValue(block, position)).isEqualTo(format("#%02x%02x%02x", (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF));
         }
     }
 
     public static ValueBlock createTestBlock()
     {
-        BlockBuilder blockBuilder = COLOR.createBlockBuilder(null, 15);
+        BlockBuilder blockBuilder = COLOR.createFixedSizeBlockBuilder(15);
         COLOR.writeLong(blockBuilder, rgb(1, 1, 1));
         COLOR.writeLong(blockBuilder, rgb(1, 1, 1));
         COLOR.writeLong(blockBuilder, rgb(1, 1, 1));

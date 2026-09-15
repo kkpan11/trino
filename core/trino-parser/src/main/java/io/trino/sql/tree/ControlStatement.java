@@ -13,16 +13,22 @@
  */
 package io.trino.sql.tree;
 
-import java.util.Optional;
-
 public abstract sealed class ControlStatement
         extends Node
-        permits AssignmentStatement, CaseStatement, CompoundStatement,
-        IfStatement, IterateStatement, LeaveStatement, LoopStatement,
-        RepeatStatement, ReturnStatement, VariableDeclaration, WhileStatement
+        permits AssignmentStatement,
+                CaseStatement,
+                CompoundStatement,
+                IfStatement,
+                IterateStatement,
+                LeaveStatement,
+                LoopStatement,
+                RepeatStatement,
+                ReturnStatement,
+                VariableDeclaration,
+                WhileStatement
 {
     protected ControlStatement(NodeLocation location)
     {
-        super(Optional.of(location));
+        super(location);
     }
 }

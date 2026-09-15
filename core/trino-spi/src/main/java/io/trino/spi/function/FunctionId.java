@@ -15,13 +15,13 @@ package io.trino.spi.function;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
-import io.trino.spi.Experimental;
+import io.trino.spi.type.TypeTemplate;
 
 import java.util.Locale;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-@Experimental(eta = "2022-10-31")
 public class FunctionId
 {
     private final String id;
@@ -70,6 +70,12 @@ public class FunctionId
 
     public static FunctionId toFunctionId(String canonicalName, Signature signature)
     {
-        return new FunctionId((canonicalName + signature).toLowerCase(Locale.US));
+        return toFunctionId(canonicalName, signature, Optional.empty());
+    }
+
+    public static FunctionId toFunctionId(String canonicalName, Signature signature, Optional<TypeTemplate> receiverType)
+    {
+        String prefix = receiverType.map(type -> type.render() + "::").orElse("");
+        return new FunctionId((prefix + canonicalName + signature).toLowerCase(Locale.US));
     }
 }

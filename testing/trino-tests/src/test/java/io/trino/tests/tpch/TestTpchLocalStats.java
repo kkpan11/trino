@@ -27,8 +27,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.parallel.Execution;
 
 import static io.trino.SystemSessionProperties.COLLECT_PLAN_STATISTICS_FOR_ALL_QUERIES;
-import static io.trino.plugin.tpch.TpchConnectorFactory.TPCH_COLUMN_NAMING_PROPERTY;
-import static io.trino.plugin.tpch.TpchConnectorFactory.TPCH_SPLITS_PER_NODE;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.statistics.MetricComparisonStrategies.absoluteError;
@@ -62,8 +60,8 @@ public class TestTpchLocalStats
         QueryRunner queryRunner = new StandaloneQueryRunner(defaultSession);
         queryRunner.installPlugin(new TpchPlugin());
         queryRunner.createCatalog("tpch", "tpch", ImmutableMap.<String, String>builder()
-                .put(TPCH_SPLITS_PER_NODE, "1")
-                .put(TPCH_COLUMN_NAMING_PROPERTY, ColumnNaming.STANDARD.name())
+                .put("tpch.splits-per-node", "1")
+                .put("tpch.column-naming", ColumnNaming.STANDARD.name())
                 .buildOrThrow());
         statisticsAssertion = new StatisticsAssertion(queryRunner);
     }
@@ -89,19 +87,24 @@ public class TestTpchLocalStats
     @Test
     public void testDateComparisons()
     {
-        statisticsAssertion.check("SELECT * FROM orders WHERE o_orderdate >= DATE '1993-10-01'",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE o_orderdate >= DATE '1993-10-01'",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, defaultTolerance()));
 
-        statisticsAssertion.check("SELECT * FROM orders WHERE o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, defaultTolerance()));
 
-        statisticsAssertion.check("SELECT * FROM orders WHERE o_orderdate >= DATE '1993-10-01' AND o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE o_orderdate >= DATE '1993-10-01' AND o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, defaultTolerance()));
 
-        statisticsAssertion.check("SELECT * FROM orders WHERE o_orderdate >= DATE '1993-10-01' OR o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE o_orderdate >= DATE '1993-10-01' OR o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, defaultTolerance()));
 
-        statisticsAssertion.check("SELECT * FROM orders WHERE NOT (o_orderdate >= DATE '1993-10-01' AND o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH)",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE NOT (o_orderdate >= DATE '1993-10-01' AND o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH)",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, defaultTolerance()));
     }
 
@@ -110,7 +113,8 @@ public class TestTpchLocalStats
     {
         // TODO merge with TestTpchDistributedStats.testLimit once that class tests new calculator
 
-        statisticsAssertion.check("SELECT * FROM nation LIMIT 10",
+        statisticsAssertion.check(
+                "SELECT * FROM nation LIMIT 10",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, noError()));
     }
 
@@ -128,10 +132,12 @@ public class TestTpchLocalStats
     @Test
     public void testVarcharComparisons()
     {
-        statisticsAssertion.check("SELECT * FROM orders WHERE o_comment = 'requests above the furiously even instructions use alw'",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE o_comment = 'requests above the furiously even instructions use alw'",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, defaultTolerance()));
 
-        statisticsAssertion.check("SELECT * FROM orders WHERE 'this is always ...' = '... false'",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE 'this is always ...' = '... false'",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, noError()));
     }
 
@@ -166,7 +172,8 @@ public class TestTpchLocalStats
                         .verifyColumnStatistics("n_nationkey", relativeError(0.15)));
 
         // simple equi join, different ranges
-        statisticsAssertion.check("SELECT n1.n_nationkey FROM nation n1, nation n2 WHERE n1.n_nationkey + 1 = n2.n_nationkey - 1 AND n1.n_nationkey > 5 AND n2.n_nationkey < 20",
+        statisticsAssertion.check(
+                "SELECT n1.n_nationkey FROM nation n1, nation n2 WHERE n1.n_nationkey + 1 = n2.n_nationkey - 1 AND n1.n_nationkey > 5 AND n2.n_nationkey < 20",
                 // Join is over expressions so that predicate push down doesn't unify ranges of n_nationkey coming from n1 and n2. This, however, makes symbols
                 // stats inaccurate (rules can't update them), so we don't verify them.
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, absoluteError(8)));
@@ -455,10 +462,12 @@ public class TestTpchLocalStats
     public void testIntersect()
     {
         // Estimates are significantly off as they are generated by NON_ESTIMATABLE_PREDICATE_APPROXIMATION_ENABLED
-        statisticsAssertion.check("SELECT * FROM nation INTERSECT SELECT * FROM nation",
+        statisticsAssertion.check(
+                "SELECT * FROM nation INTERSECT SELECT * FROM nation",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, absoluteError(45)));
 
-        statisticsAssertion.check("SELECT * FROM orders WHERE o_custkey < 900 INTERSECT SELECT * FROM orders WHERE o_custkey > 600",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE o_custkey < 900 INTERSECT SELECT * FROM orders WHERE o_custkey > 600",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, relativeError(4.3, 4.4)));
     }
 
@@ -466,24 +475,28 @@ public class TestTpchLocalStats
     public void testExcept()
     {
         // Estimates are significantly off as they are generated by NON_ESTIMATABLE_PREDICATE_APPROXIMATION_ENABLED
-        statisticsAssertion.check("SELECT * FROM nation EXCEPT SELECT * FROM nation",
+        statisticsAssertion.check(
+                "SELECT * FROM nation EXCEPT SELECT * FROM nation",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, absoluteError(45)));
 
-        statisticsAssertion.check("SELECT * FROM orders WHERE o_custkey < 900 EXCEPT SELECT * FROM orders WHERE o_custkey > 600",
+        statisticsAssertion.check(
+                "SELECT * FROM orders WHERE o_custkey < 900 EXCEPT SELECT * FROM orders WHERE o_custkey > 600",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, relativeError(1.7, 1.8)));
     }
 
     @Test
     public void testInSubquery()
     {
-        statisticsAssertion.check("select * from lineitem where l_orderkey in (select o_orderkey from orders where o_orderdate >= DATE '1993-10-01')",
+        statisticsAssertion.check(
+                "select * from lineitem where l_orderkey in (select o_orderkey from orders where o_orderdate >= DATE '1993-10-01')",
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, defaultTolerance()));
     }
 
     @Test
     public void testNotInSubquery()
     {
-        statisticsAssertion.check("select * from lineitem where l_orderkey not in (select o_orderkey from orders where o_orderdate >= DATE '1993-10-01')",
+        statisticsAssertion.check(
+                "select * from lineitem where l_orderkey not in (select o_orderkey from orders where o_orderdate >= DATE '1993-10-01')",
                 // we allow overestimating here. That is because safety heuristic for antijoin which enforces that not more that 50%
                 // of values are filtered out.
                 checks -> checks.estimate(OUTPUT_ROW_COUNT, relativeError(0.0, 1.0)));

@@ -19,11 +19,11 @@ import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Context;
 import io.trino.Session;
+import io.trino.connector.CatalogHandle;
 import io.trino.connector.CatalogServiceProvider;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.metadata.TableFunctionHandle;
 import io.trino.metadata.TableHandle;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
@@ -90,11 +90,11 @@ public class SplitManager
                     table.transaction(),
                     connectorSession,
                     table.connectorHandle(),
-                    dynamicFilter,
+                    dynamicFilter.getColumnsCovered(),
                     constraint);
         }
 
-        SplitSource splitSource = new ConnectorAwareSplitSource(catalogHandle, source);
+        SplitSource splitSource = new ConnectorAwareSplitSource(catalogHandle, source, dynamicFilter);
 
         Span span = splitSourceSpan(parentSpan, catalogHandle);
 
@@ -126,7 +126,7 @@ public class SplitManager
                     function.functionHandle());
         }
 
-        SplitSource splitSource = new ConnectorAwareSplitSource(catalogHandle, source);
+        SplitSource splitSource = new ConnectorAwareSplitSource(catalogHandle, source, DynamicFilter.EMPTY);
 
         Span span = splitSourceSpan(parentSpan, catalogHandle);
         return new TracingSplitSource(splitSource, tracer, Optional.of(span), "split-buffer");

@@ -147,7 +147,7 @@ public class NestedLoopJoinOperator
 
     private static <T> ListenableFuture<Void> asVoid(ListenableFuture<T> future)
     {
-        return Futures.transform(future, v -> null, directExecutor());
+        return Futures.transform(future, _ -> null, directExecutor());
     }
 
     @Override
@@ -262,10 +262,10 @@ public class NestedLoopJoinOperator
                 }
             }
             catch (ArithmeticException overflow) {
+                // Repeat larger position count a smaller position count number of times
+                Page outputPage = new Page(max(probePositions, buildPositions));
+                return new PageRepeatingIterator(outputPage, min(probePositions, buildPositions));
             }
-            // Repeat larger position count a smaller position count number of times
-            Page outputPage = new Page(max(probePositions, buildPositions));
-            return new PageRepeatingIterator(outputPage, min(probePositions, buildPositions));
         }
         if (probeChannels.length == 0 && probePage.getPositionCount() <= buildPage.getPositionCount()) {
             return new PageRepeatingIterator(buildPage.getColumns(buildChannels), probePage.getPositionCount());

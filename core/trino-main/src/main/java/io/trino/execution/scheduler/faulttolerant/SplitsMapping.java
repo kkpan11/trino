@@ -13,6 +13,8 @@
  */
 package io.trino.execution.scheduler.faulttolerant;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -28,6 +30,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 
@@ -50,11 +53,24 @@ public final class SplitsMapping
     // not using Multimap to avoid extensive data structure copying when building updated SplitsMapping
     private final Map<PlanNodeId, Map<Integer, List<Split>>> splits; // plan-node -> hash-partition -> Split
 
-    private SplitsMapping(ImmutableMap<PlanNodeId, Map<Integer, List<Split>>> splits)
+    private SplitsMapping(Map<PlanNodeId, Map<Integer, List<Split>>> splits)
     {
         // Builder implementations ensure that external map as well as Maps/Lists used in values
         // are immutable.
         this.splits = splits;
+    }
+
+    @JsonCreator
+    public static SplitsMapping fromSplitsMap(@JsonProperty("splits") Map<PlanNodeId, Map<Integer, List<Split>>> splits)
+    {
+        // ensure we use Immutable* collections everywhere
+        return new SplitsMapping(splits.entrySet().stream()
+                .collect(toImmutableMap(
+                        Entry::getKey,
+                        entry -> entry.getValue().entrySet().stream()
+                                .collect(toImmutableMap(
+                                        Entry::getKey,
+                                        innerEntry -> ImmutableList.copyOf(innerEntry.getValue()))))));
     }
 
     public Set<PlanNodeId> getPlanNodeIds()
@@ -65,7 +81,7 @@ public final class SplitsMapping
     public ListMultimap<PlanNodeId, Split> getSplitsFlat()
     {
         ImmutableListMultimap.Builder<PlanNodeId, Split> splitsFlat = ImmutableListMultimap.builder();
-        for (Map.Entry<PlanNodeId, Map<Integer, List<Split>>> entry : splits.entrySet()) {
+        for (Entry<PlanNodeId, Map<Integer, List<Split>>> entry : splits.entrySet()) {
             // TODO can we do less copying?
             splitsFlat.putAll(entry.getKey(), entry.getValue().values().stream().flatMap(Collection::stream).collect(toImmutableList()));
         }
@@ -102,10 +118,16 @@ public final class SplitsMapping
         verify(!splits.isEmpty(), "expected not empty splits list %s", splits);
 
         ImmutableListMultimap.Builder<Integer, Split> result = ImmutableListMultimap.builder();
-        for (Map.Entry<Integer, List<Split>> entry : splits.entrySet()) {
+        for (Entry<Integer, List<Split>> entry : splits.entrySet()) {
             result.putAll(entry.getKey(), entry.getValue());
         }
         return result.build();
+    }
+
+    @JsonProperty("splits")
+    public Map<PlanNodeId, Map<Integer, List<Split>>> getSplitsMap()
+    {
+        return splits;
     }
 
     public long getRetainedSizeInBytes()
@@ -116,7 +138,7 @@ public final class SplitsMapping
                         PlanNodeId::getRetainedSizeInBytes,
                         planNodeSplits -> estimatedSizeOf(
                                 planNodeSplits,
-                                partitionId -> INTEGER_INSTANCE_SIZE,
+                                _ -> INTEGER_INSTANCE_SIZE,
                                 splitList -> estimatedSizeOf(splitList, Split::getRetainedSizeInBytes)));
     }
 
@@ -182,7 +204,7 @@ public final class SplitsMapping
 
         public Builder addMapping(SplitsMapping updatingMapping)
         {
-            for (Map.Entry<PlanNodeId, Map<Integer, List<Split>>> entry : updatingMapping.splits.entrySet()) {
+            for (Entry<PlanNodeId, Map<Integer, List<Split>>> entry : updatingMapping.splits.entrySet()) {
                 PlanNodeId planNodeId = entry.getKey();
                 entry.getValue().forEach((partitionId, partitionSplits) -> addSplits(planNodeId, partitionId, partitionSplits));
             }
@@ -213,7 +235,7 @@ public final class SplitsMapping
                 return this;
             }
             updates.computeIfAbsent(planNodeId, _ -> new HashMap<>())
-                    .computeIfAbsent(partitionId, key -> ImmutableList.builder())
+                    .computeIfAbsent(partitionId, _ -> ImmutableList.builder())
                     .addAll(splits);
             return this;
         }
@@ -281,10 +303,10 @@ public final class SplitsMapping
         {
             return new SplitsMapping(splitsBuilder.entrySet().stream()
                     .collect(toImmutableMap(
-                            Map.Entry::getKey,
+                            Entry::getKey,
                             planNodeMapping -> planNodeMapping.getValue().entrySet().stream()
                                     .collect(toImmutableMap(
-                                            Map.Entry::getKey,
+                                            Entry::getKey,
                                             sourcePartitionMapping -> sourcePartitionMapping.getValue().build())))));
         }
     }

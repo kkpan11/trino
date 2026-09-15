@@ -15,6 +15,7 @@ package io.trino.plugin.hive.util;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.metastore.HiveTypeName;
 import io.trino.plugin.hive.AcidInfo;
@@ -25,13 +26,20 @@ import io.trino.plugin.hive.HiveSplit.BucketConversion;
 import io.trino.plugin.hive.HiveStorageFormat;
 import io.trino.plugin.hive.InternalHiveSplit;
 import io.trino.plugin.hive.InternalHiveSplit.InternalHiveBlock;
+import io.trino.plugin.hive.Schema;
 import io.trino.plugin.hive.fs.BlockLocation;
 import io.trino.plugin.hive.fs.TrinoFileStatus;
 import io.trino.plugin.hive.orc.OrcPageSourceFactory;
 import io.trino.plugin.hive.parquet.ParquetPageSourceFactory;
 import io.trino.plugin.hive.rcfile.RcFilePageSourceFactory;
 import io.trino.spi.HostAddress;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorExpressionEvaluator;
+import io.trino.spi.connector.ConnectorExpressionEvaluator.EvaluationResult;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
 
 import java.util.Collection;
@@ -44,14 +52,18 @@ import java.util.function.BooleanSupplier;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.hive.HiveColumnHandle.PATH_TYPE;
 import static io.trino.plugin.hive.HiveColumnHandle.isPathColumnHandle;
+import static io.trino.plugin.hive.HiveColumnHandle.pathColumnHandle;
+import static io.trino.plugin.hive.util.AcidTables.isFullAcidTable;
+import static io.trino.plugin.hive.util.HiveUtil.getSerializationLibraryName;
 import static java.util.Objects.requireNonNull;
 
 public class InternalHiveSplitFactory
 {
     private final String partitionName;
     private final HiveStorageFormat storageFormat;
-    private final Map<String, String> strippedSchema;
+    private final Schema strippedSchema;
     private final List<HivePartitionKey> partitionKeys;
     private final Optional<Domain> pathDomain;
     private final Map<Integer, HiveTypeName> hiveColumnCoercions;
@@ -61,6 +73,8 @@ public class InternalHiveSplitFactory
     private final long minimumTargetSplitSizeInBytes;
     private final Optional<Long> maxSplitFileSize;
     private final boolean forceLocalScheduling;
+    private final ConnectorExpressionEvaluator.Prepared prepared;
+    private final Map<String, ColumnHandle> assignments;
 
     public InternalHiveSplitFactory(
             String partitionName,
@@ -68,19 +82,23 @@ public class InternalHiveSplitFactory
             Map<String, String> schema,
             List<HivePartitionKey> partitionKeys,
             TupleDomain<HiveColumnHandle> effectivePredicate,
+            Constraint constraint,
             BooleanSupplier partitionMatchSupplier,
             Map<Integer, HiveTypeName> hiveColumnCoercions,
             Optional<BucketConversion> bucketConversion,
             Optional<HiveSplit.BucketValidation> bucketValidation,
             DataSize minimumTargetSplitSize,
             boolean forceLocalScheduling,
-            Optional<Long> maxSplitFileSize)
+            Optional<Long> maxSplitFileSize,
+            ConnectorSession session,
+            ConnectorExpressionEvaluator evaluator)
     {
         this.partitionName = requireNonNull(partitionName, "partitionName is null");
         this.storageFormat = requireNonNull(storageFormat, "storageFormat is null");
         this.strippedSchema = stripUnnecessaryProperties(requireNonNull(schema, "schema is null"));
         this.partitionKeys = requireNonNull(partitionKeys, "partitionKeys is null");
         pathDomain = getPathDomain(requireNonNull(effectivePredicate, "effectivePredicate is null"));
+        requireNonNull(constraint, "constraint is null");
         this.partitionMatchSupplier = requireNonNull(partitionMatchSupplier, "partitionMatchSupplier is null");
         this.hiveColumnCoercions = ImmutableMap.copyOf(requireNonNull(hiveColumnCoercions, "hiveColumnCoercions is null"));
         this.bucketConversion = requireNonNull(bucketConversion, "bucketConversion is null");
@@ -89,15 +107,24 @@ public class InternalHiveSplitFactory
         this.minimumTargetSplitSizeInBytes = minimumTargetSplitSize.toBytes();
         this.maxSplitFileSize = requireNonNull(maxSplitFileSize, "maxSplitFileSize is null");
         checkArgument(minimumTargetSplitSizeInBytes > 0, "minimumTargetSplitSize must be > 0, found: %s", minimumTargetSplitSize);
+        requireNonNull(session, "session is null");
+        this.assignments = ImmutableMap.copyOf(constraint.getAssignments());
+        this.prepared = requireNonNull(evaluator, "evaluator is null")
+                .prepare(session, constraint.getExpression());
     }
 
-    private static Map<String, String> stripUnnecessaryProperties(Map<String, String> schema)
+    private static Schema stripUnnecessaryProperties(Map<String, String> schema)
     {
         // Sending the full schema with every split is costly and can be avoided for formats supported natively
-        schema = OrcPageSourceFactory.stripUnnecessaryProperties(schema);
-        schema = ParquetPageSourceFactory.stripUnnecessaryProperties(schema);
-        schema = RcFilePageSourceFactory.stripUnnecessaryProperties(schema);
-        return schema;
+        String serializationLibraryName = getSerializationLibraryName(schema);
+        boolean isFullAcidTable = isFullAcidTable(schema);
+        Map<String, String> serdeProperties = schema;
+        if (RcFilePageSourceFactory.stripUnnecessaryProperties(serializationLibraryName)
+                || OrcPageSourceFactory.stripUnnecessaryProperties(serializationLibraryName)
+                || ParquetPageSourceFactory.stripUnnecessaryProperties(serializationLibraryName)) {
+            serdeProperties = ImmutableMap.of();
+        }
+        return new Schema(serializationLibraryName, isFullAcidTable, serdeProperties);
     }
 
     public String getPartitionName()
@@ -175,7 +202,7 @@ public class InternalHiveSplitFactory
 
         if (!splittable) {
             // not splittable, use the hosts from the first block if it exists
-            blocks = ImmutableList.of(new InternalHiveBlock(start, start + length, blocks.get(0).getAddresses()));
+            blocks = ImmutableList.of(new InternalHiveBlock(start, start + length, blocks.get(0).addresses()));
         }
 
         return Optional.of(new InternalHiveSplit(
@@ -205,31 +232,31 @@ public class InternalHiveSplitFactory
         checkArgument(length >= 0, "Split (%s) has negative length (%s)", path, length);
         checkArgument(!blocks.isEmpty(), "Split (%s) has no blocks", path);
         checkArgument(
-                start == blocks.get(0).getStart(),
+                start == blocks.get(0).start(),
                 "Split (%s) start (%s) does not match first block start (%s)",
                 path,
                 start,
-                blocks.get(0).getStart());
+                blocks.get(0).start());
         checkArgument(
-                start + length == blocks.getLast().getEnd(),
+                start + length == blocks.getLast().end(),
                 "Split (%s) end (%s) does not match last block end (%s)",
                 path,
                 start + length,
-                blocks.getLast().getEnd());
+                blocks.getLast().end());
         for (int i = 1; i < blocks.size(); i++) {
             checkArgument(
-                    blocks.get(i - 1).getEnd() == blocks.get(i).getStart(),
+                    blocks.get(i - 1).end() == blocks.get(i).start(),
                     "Split (%s) block end (%s) does not match next block start (%s)",
                     path,
-                    blocks.get(i - 1).getEnd(),
-                    blocks.get(i).getStart());
+                    blocks.get(i - 1).end(),
+                    blocks.get(i).start());
         }
     }
 
     private static boolean allBlocksHaveAddress(Collection<InternalHiveBlock> blocks)
     {
         return blocks.stream()
-                .map(InternalHiveBlock::getAddresses)
+                .map(InternalHiveBlock::addresses)
                 .noneMatch(List::isEmpty);
     }
 
@@ -251,10 +278,23 @@ public class InternalHiveSplitFactory
                         .findFirst());
     }
 
-    private static boolean pathMatchesPredicate(Optional<Domain> pathDomain, String path)
+    private boolean pathMatchesPredicate(Optional<Domain> pathDomain, String path)
     {
-        return pathDomain
-                .map(domain -> domain.includesNullableValue(utf8Slice(path)))
-                .orElse(true);
+        Slice pathSlice = utf8Slice(path);
+        if (pathDomain.isPresent() && !pathDomain.get().includesNullableValue(pathSlice)) {
+            return false;
+        }
+
+        Optional<String> pathVariableName = assignments.entrySet().stream()
+                .filter(assignment -> assignment.getValue().equals(pathColumnHandle()))
+                .map(Map.Entry::getKey)
+                .findFirst();
+        if (pathVariableName.isEmpty() || !prepared.getArguments().contains(pathVariableName.get())) {
+            return true;
+        }
+        return switch (prepared.tryEvaluate(ImmutableMap.of(pathVariableName.get(), new NullableValue(PATH_TYPE, pathSlice)))) {
+            case EvaluationResult.Value(var value) -> Boolean.TRUE.equals(value);
+            case EvaluationResult.NoResult _ -> true;
+        };
     }
 }

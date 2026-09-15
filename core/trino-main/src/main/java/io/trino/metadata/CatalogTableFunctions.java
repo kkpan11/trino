@@ -37,6 +37,11 @@ public class CatalogTableFunctions
         this.functions = Maps.uniqueIndex(functions, function -> lowerCaseSchemaFunctionName(new SchemaFunctionName(function.getSchema(), function.getName())));
     }
 
+    public Map<SchemaFunctionName, ConnectorTableFunction> listTableFunctions()
+    {
+        return functions;
+    }
+
     public Optional<ConnectorTableFunction> getTableFunction(SchemaFunctionName schemaFunctionName)
     {
         return Optional.ofNullable(functions.get(lowerCaseSchemaFunctionName(schemaFunctionName)));
@@ -45,7 +50,7 @@ public class CatalogTableFunctions
     private static SchemaFunctionName lowerCaseSchemaFunctionName(SchemaFunctionName name)
     {
         return new SchemaFunctionName(
-                name.getSchemaName().toLowerCase(ENGLISH),
-                name.getFunctionName().toLowerCase(ENGLISH));
+                name.schemaName().toLowerCase(ENGLISH),
+                name.functionName().toLowerCase(ENGLISH));
     }
 }

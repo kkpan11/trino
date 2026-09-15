@@ -215,14 +215,14 @@ public class AsyncQueue<T>
                     try {
                         BorrowResult<T, O> borrowResult = function.apply(elements);
                         if (elements.isEmpty()) {
-                            checkArgument(borrowResult.getElementsToInsert().isEmpty(), "Function must not insert anything when no element is borrowed");
-                            return borrowResult.getResult();
+                            checkArgument(borrowResult.elementsToInsert().isEmpty(), "Function must not insert anything when no element is borrowed");
+                            return borrowResult.result();
                         }
-                        List<T> elementsToInsert = borrowResult.getElementsToInsert();
+                        List<T> elementsToInsert = borrowResult.elementsToInsert();
                         if (!elementsToInsert.isEmpty()) {
                             offerAll(elementsToInsert);
                         }
-                        return borrowResult.getResult();
+                        return borrowResult.result();
                     }
                     finally {
                         if (!elements.isEmpty()) {
@@ -232,7 +232,8 @@ public class AsyncQueue<T>
                             }
                         }
                     }
-                }, directExecutor());
+                },
+                directExecutor());
     }
 
     private static void completeAsync(Executor executor, SettableFuture<Void> future)
@@ -240,25 +241,11 @@ public class AsyncQueue<T>
         executor.execute(() -> future.set(null));
     }
 
-    public static final class BorrowResult<T, R>
+    public record BorrowResult<T, R>(List<T> elementsToInsert, R result)
     {
-        private final List<T> elementsToInsert;
-        private final R result;
-
-        public BorrowResult(List<T> elementsToInsert, R result)
+        public BorrowResult
         {
-            this.elementsToInsert = ImmutableList.copyOf(elementsToInsert);
-            this.result = result;
-        }
-
-        public List<T> getElementsToInsert()
-        {
-            return elementsToInsert;
-        }
-
-        public R getResult()
-        {
-            return result;
+            elementsToInsert = ImmutableList.copyOf(elementsToInsert);
         }
     }
 }

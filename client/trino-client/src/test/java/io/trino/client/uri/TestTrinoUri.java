@@ -84,7 +84,7 @@ public class TestTrinoUri
         // property in url multiple times
         assertInvalid("trino://localhost:8080/blackhole?password=a&password=b", "Connection property password is in the URL multiple times");
 
-        // property not well formed, missing '='
+        // property not well-formed, missing '='
         assertInvalid("trino://localhost:8080/blackhole?password&user=abc", "Connection argument is not a valid connection property: 'password'");
 
         // property in both url and arguments
@@ -104,7 +104,7 @@ public class TestTrinoUri
         assertInvalid("trino://localhost:8080?SSL=2", "Connection property SSL value is invalid: 2");
         assertInvalid("trino://localhost:8080?SSL=abc", "Connection property SSL value is invalid: abc");
 
-        //invalid ssl verification mode
+        // invalid ssl verification mode
         assertInvalid("trino://localhost:8080?SSL=true&SSLVerification=0", "Connection property SSLVerification value is invalid: 0");
         assertInvalid("trino://localhost:8080?SSL=true&SSLVerification=abc", "Connection property SSLVerification value is invalid: abc");
 
@@ -223,9 +223,9 @@ public class TestTrinoUri
     {
         assertThatThrownBy(() -> TrinoUri.create("trino://localhost:8080?user=&SSLVerification=true", new Properties()))
                 .hasMessageContaining(
-                    "Provided connection properties are invalid:\n" +
-                    "Connection property SSLVerification requires TLS/SSL to be enabled\n" +
-                    "Connection property user value is empty");
+                        "Provided connection properties are invalid:\n" +
+                                "Connection property SSLVerification requires TLS/SSL to be enabled\n" +
+                                "Connection property user value is empty");
     }
 
     @Test
@@ -493,6 +493,17 @@ public class TestTrinoUri
 
         TrinoUri secureUri = createTrinoUri("trino://localhost?SSL=true");
         assertThat(secureUri.getHttpUri()).isEqualTo(URI.create("https://localhost:443"));
+    }
+
+    @Test
+    public void testValidateConnection()
+    {
+        TrinoUri uri = createTrinoUri("trino://localhost:8080");
+        assertThat(uri.isValidateConnection()).isFalse();
+        uri = createTrinoUri("trino://localhost:8080?validateConnection=true");
+        assertThat(uri.isValidateConnection()).isTrue();
+        uri = createTrinoUri("trino://localhost:8080?validateConnection=false");
+        assertThat(uri.isValidateConnection()).isFalse();
     }
 
     private static boolean isBuilderHelperMethod(String name)

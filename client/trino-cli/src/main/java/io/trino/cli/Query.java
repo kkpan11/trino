@@ -14,7 +14,6 @@
 package io.trino.cli;
 
 import com.google.common.base.Splitter;
-import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import io.trino.cli.ClientOptions.OutputFormat;
 import io.trino.client.ClientSelectedRole;
@@ -57,9 +56,7 @@ import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.logging.Level.FINE;
-import static org.jline.utils.AttributedStyle.CYAN;
 import static org.jline.utils.AttributedStyle.DEFAULT;
-import static org.jline.utils.AttributedStyle.RED;
 
 public class Query
         implements Closeable
@@ -69,11 +66,17 @@ public class Query
     private final AtomicBoolean ignoreUserInterrupt = new AtomicBoolean();
     private final StatementClient client;
     private final boolean debug;
+    private final int maxQueuedRows;
+    private final int maxBufferedRows;
+    private final Theme theme;
 
-    public Query(StatementClient client, boolean debug)
+    public Query(StatementClient client, boolean debug, int maxQueuedRows, int maxBufferedRows, Theme theme)
     {
         this.client = requireNonNull(client, "client is null");
         this.debug = debug;
+        this.maxQueuedRows = maxQueuedRows;
+        this.maxBufferedRows = maxBufferedRows;
+        this.theme = requireNonNull(theme, "theme is null");
     }
 
     public Optional<String> getSetCatalog()
@@ -99,6 +102,11 @@ public class Query
     public boolean isResetAuthorizationUser()
     {
         return client.isResetAuthorizationUser();
+    }
+
+    public Set<ClientSelectedRole> getSetOriginalRoles()
+    {
+        return client.getSetOriginalRoles();
     }
 
     public Map<String, String> getSetSessionProperties()
@@ -158,10 +166,10 @@ public class Query
     private boolean renderQueryOutput(Terminal terminal, PrintStream out, PrintStream errorChannel, OutputFormat outputFormat, Optional<String> pager, boolean showProgress, boolean decimalDataSize)
     {
         StatusPrinter statusPrinter = null;
-        WarningsPrinter warningsPrinter = new PrintStreamWarningsPrinter(errorChannel);
+        WarningsPrinter warningsPrinter = new PrintStreamWarningsPrinter(errorChannel, theme);
 
         if (showProgress) {
-            statusPrinter = new StatusPrinter(client, errorChannel, debug, isInteractive(pager), decimalDataSize);
+            statusPrinter = new StatusPrinter(client, errorChannel, debug, isInteractive(pager), decimalDataSize, theme);
             statusPrinter.printInitialStatusUpdates(terminal);
         }
         else {
@@ -215,12 +223,12 @@ public class Query
 
     private boolean isInteractive(Optional<String> pager)
     {
-        return pager.map(name -> name.trim().length() != 0).orElse(true);
+        return pager.map(name -> !name.trim().isEmpty()).orElse(true);
     }
 
     private void processInitialStatusUpdates(WarningsPrinter warningsPrinter)
     {
-        while (client.isRunning() && (client.currentData().getData() == null)) {
+        while (client.isRunning() && client.currentRows().isNull()) {
             warningsPrinter.print(client.currentStatusInfo().getWarnings(), true, false);
             try {
                 client.advance();
@@ -242,8 +250,8 @@ public class Query
     private void renderUpdate(Terminal terminal, PrintStream out, QueryStatusInfo results, OutputFormat outputFormat, Optional<String> pager)
     {
         String status = results.getUpdateType();
-        if (results.getUpdateCount() != null) {
-            long count = results.getUpdateCount();
+        if (results.getUpdateCount().isPresent()) {
+            long count = results.getUpdateCount().orElseThrow();
             status += format(": %s row%s", count, (count != 1) ? "s" : "");
             out.println(status);
         }
@@ -259,7 +267,7 @@ public class Query
 
     private void discardResults()
     {
-        try (OutputHandler handler = new OutputHandler(new NullPrinter())) {
+        try (OutputHandler handler = new OutputHandler(new NullPrinter(), 100, 100)) {
             handler.processRows(client);
         }
         catch (IOException e) {
@@ -298,7 +306,7 @@ public class Query
         try (Pager pager = Pager.create(pagerName);
                 ThreadInterruptor clientThread = new ThreadInterruptor();
                 Writer writer = createWriter(pager);
-                OutputHandler handler = createOutputHandler(format, maxWidth, writer, columns)) {
+                OutputHandler handler = createOutputHandler(format, maxWidth, writer, columns, maxQueuedRows, maxBufferedRows)) {
             if (!pager.isNullPager()) {
                 // ignore the user pressing ctrl-C while in the pager
                 ignoreUserInterrupt.set(true);
@@ -321,26 +329,26 @@ public class Query
     private void sendOutput(PrintStream out, OutputFormat format, int maxWidth, List<Column> fieldNames)
             throws IOException
     {
-        try (OutputHandler handler = createOutputHandler(format, maxWidth, createWriter(out), fieldNames)) {
+        try (OutputHandler handler = createOutputHandler(format, maxWidth, createWriter(out), fieldNames, maxQueuedRows, maxBufferedRows)) {
             handler.processRows(client);
         }
     }
 
-    private static OutputHandler createOutputHandler(OutputFormat format, int maxWidth, Writer writer, List<Column> columns)
+    private OutputHandler createOutputHandler(OutputFormat format, int maxWidth, Writer writer, List<Column> columns, int maxQueuedRows, int maxBufferedRows)
     {
-        return new OutputHandler(createOutputPrinter(format, maxWidth, writer, columns));
+        return new OutputHandler(createOutputPrinter(format, maxWidth, writer, columns), maxQueuedRows, maxBufferedRows);
     }
 
-    private static OutputPrinter createOutputPrinter(OutputFormat format, int maxWidth, Writer writer, List<Column> columns)
+    private OutputPrinter createOutputPrinter(OutputFormat format, int maxWidth, Writer writer, List<Column> columns)
     {
         List<String> fieldNames = columns.stream()
                 .map(Column::getName)
                 .collect(toImmutableList());
         switch (format) {
             case AUTO:
-                return new AutoTablePrinter(columns, writer, maxWidth);
+                return new AutoTablePrinter(columns, writer, maxWidth, theme);
             case ALIGNED:
-                return new AlignedTablePrinter(columns, writer);
+                return new AlignedTablePrinter(columns, writer, theme);
             case VERTICAL:
                 return new VerticalRecordPrinter(fieldNames, writer);
             case CSV:
@@ -392,7 +400,7 @@ public class Query
         out.println();
     }
 
-    private static void renderErrorLocation(String query, ErrorLocation location, PrintStream out)
+    private void renderErrorLocation(String query, ErrorLocation location, PrintStream out)
     {
         List<String> lines = ImmutableList.copyOf(Splitter.on('\n').split(query).iterator());
 
@@ -407,13 +415,13 @@ public class Query
         if (isRealTerminal()) {
             AttributedStringBuilder builder = new AttributedStringBuilder();
 
-            builder.style(DEFAULT.foreground(CYAN));
+            builder.style(theme.errorContext());
             for (int i = 1; i < location.getLineNumber(); i++) {
                 builder.append(lines.get(i - 1)).append("\n");
             }
             builder.append(good);
 
-            builder.style(DEFAULT.foreground(RED));
+            builder.style(theme.error());
             builder.append(bad).append("\n");
             for (int i = location.getLineNumber(); i < lines.size(); i++) {
                 builder.append(lines.get(i)).append("\n");
@@ -424,7 +432,7 @@ public class Query
         }
         else {
             String prefix = format("LINE %s: ", location.getLineNumber());
-            String padding = Strings.repeat(" ", prefix.length() + (location.getColumnNumber() - 1));
+            String padding = " ".repeat(prefix.length() + (location.getColumnNumber() - 1));
             out.println(prefix + errorLine);
             out.println(padding + "^");
         }
@@ -435,9 +443,9 @@ public class Query
     {
         private final PrintStream printStream;
 
-        PrintStreamWarningsPrinter(PrintStream printStream)
+        PrintStreamWarningsPrinter(PrintStream printStream, Theme theme)
         {
-            super(OptionalInt.empty());
+            super(OptionalInt.empty(), theme);
             this.printStream = requireNonNull(printStream, "printStream is null");
         }
 

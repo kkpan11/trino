@@ -19,7 +19,6 @@ import com.google.errorprone.annotations.FormatMethod;
 import com.sun.management.UnixOperatingSystemMXBean;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import org.joda.time.DateTime;
 
 import java.lang.Runtime.Version;
 import java.lang.management.GarbageCollectorMXBean;
@@ -27,19 +26,12 @@ import java.lang.management.ManagementFactory;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
+import java.time.Year;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
-import java.util.OptionalLong;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static java.lang.Integer.parseInt;
 import static java.lang.String.format;
-import static java.util.regex.Pattern.quote;
 
 final class TrinoSystemRequirements
 {
@@ -61,10 +53,18 @@ final class TrinoSystemRequirements
         verifyOsArchitecture();
         verifyByteOrder();
         verifyUsingG1Gc();
-        verifyJdk8329528Workaround();
+        verifyVectorApiEnabled();
+        verifyUnixOperatingMBeans();
         verifyFileDescriptor();
         verifySlice();
         verifyUtf8();
+    }
+
+    private static void verifyUnixOperatingMBeans()
+    {
+        if (!(ManagementFactory.getOperatingSystemMXBean() instanceof UnixOperatingSystemMXBean)) {
+            failRequirement("Trino requires access to UnixOperatingSystemMXBean");
+        }
     }
 
     private static void verify64BitJvm()
@@ -107,8 +107,7 @@ final class TrinoSystemRequirements
 
     private static void verifyJavaVersion()
     {
-        Version required = Version.parse("22.0.1");
-
+        Version required = Version.parse("25");
         if (Runtime.version().compareTo(required) < 0) {
             failRequirement("Trino requires Java %s at minimum (found %s)", required, Runtime.version());
         }
@@ -131,39 +130,28 @@ final class TrinoSystemRequirements
         }
     }
 
-    private static void verifyJdk8329528Workaround()
+    private static void verifyVectorApiEnabled()
     {
-        if (Runtime.version().compareTo(Version.parse("22.0.2")) < 0) {
-            Optional<String> collectionsKeepPinned = getJvmConfigurationFlag("XX:G1NumCollectionsKeepPinned");
-            int requiredValue = 10000000;
-            if (collectionsKeepPinned.isEmpty() || parseInt(collectionsKeepPinned.get()) < requiredValue) {
-                failRequirement("Trino requires -XX:+UnlockDiagnosticVMOptions -XX:G1NumCollectionsKeepPinned=%d on Java versions lower than 22.0.2 due to JDK-8329528", requiredValue);
-            }
+        if (ModuleLayer.boot().findModule("jdk.incubator.vector").isEmpty()) {
+            failRequirement("Trino requires the Vector API to be enabled/linked at runtime");
         }
     }
 
     private static void verifyFileDescriptor()
     {
-        OptionalLong maxFileDescriptorCount = getMaxFileDescriptorCount();
-        if (maxFileDescriptorCount.isEmpty()) {
-            // This should never happen since we have verified the OS and JVM above
-            failRequirement("Cannot read OS file descriptor limit");
+        long maxFileDescriptorCount = getMaxFileDescriptorCount();
+        if (maxFileDescriptorCount < MIN_FILE_DESCRIPTORS) {
+            failRequirement("Trino requires at least %s file descriptors (found %s)", MIN_FILE_DESCRIPTORS, maxFileDescriptorCount);
         }
-        if (maxFileDescriptorCount.getAsLong() < MIN_FILE_DESCRIPTORS) {
-            failRequirement("Trino requires at least %s file descriptors (found %s)", MIN_FILE_DESCRIPTORS, maxFileDescriptorCount.getAsLong());
-        }
-        if (maxFileDescriptorCount.getAsLong() < RECOMMENDED_FILE_DESCRIPTORS) {
-            warnRequirement("Current OS file descriptor limit is %s. Trino recommends at least %s", maxFileDescriptorCount.getAsLong(), RECOMMENDED_FILE_DESCRIPTORS);
+        if (maxFileDescriptorCount < RECOMMENDED_FILE_DESCRIPTORS) {
+            warnRequirement("Current OS file descriptor limit is %s. Trino recommends at least %s", maxFileDescriptorCount, RECOMMENDED_FILE_DESCRIPTORS);
         }
     }
 
-    private static OptionalLong getMaxFileDescriptorCount()
+    private static long getMaxFileDescriptorCount()
     {
-        return Stream.of(ManagementFactory.getOperatingSystemMXBean())
-                .filter(UnixOperatingSystemMXBean.class::isInstance)
-                .map(UnixOperatingSystemMXBean.class::cast)
-                .mapToLong(UnixOperatingSystemMXBean::getMaxFileDescriptorCount)
-                .findFirst();
+        // This is safe because we have already verified the OS and JVM above
+        return ((UnixOperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean()).getMaxFileDescriptorCount();
     }
 
     private static void verifySlice()
@@ -192,28 +180,10 @@ final class TrinoSystemRequirements
      */
     private static void verifySystemTimeIsReasonable()
     {
-        int currentYear = DateTime.now().year().get();
-        if (currentYear < 2024) {
+        Year currentYear = Year.now();
+        if (currentYear.isBefore(Year.of(2025))) {
             failRequirement("Trino requires the system time to be current (found year %s)", currentYear);
         }
-    }
-
-    private static Optional<String> getJvmConfigurationFlag(String flag)
-    {
-        Pattern pattern = Pattern.compile("-%s=(.*)".formatted(quote(flag)), Pattern.DOTALL);
-        Optional<String> matched = Optional.empty();
-        List<String> matching = new ArrayList<>(1);
-        for (String argument : ManagementFactory.getRuntimeMXBean().getInputArguments()) {
-            Matcher matcher = pattern.matcher(argument);
-            if (matcher.matches()) {
-                matched = Optional.of(matcher.group(1));
-                matching.add(argument);
-            }
-        }
-        if (matching.size() > 1) {
-            failRequirement("Multiple JVM configuration flags matched %s: %s", pattern.pattern(), matching);
-        }
-        return matched;
     }
 
     @FormatMethod

@@ -15,9 +15,8 @@ package io.trino.plugin.resourcegroups.db;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
-import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.google.inject.Inject;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.airlift.log.Logger;
@@ -41,16 +40,15 @@ import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
 import java.util.AbstractMap;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -59,11 +57,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.Duration.succinctNanos;
 import static io.trino.spi.StandardErrorCode.CONFIGURATION_INVALID;
 import static io.trino.spi.StandardErrorCode.CONFIGURATION_UNAVAILABLE;
-import static java.util.Collections.synchronizedList;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 
@@ -74,13 +73,12 @@ public class DbResourceGroupConfigurationManager
 
     private final Optional<LifeCycleManager> lifeCycleManager;
     private final ResourceGroupsDao dao;
-    private final ConcurrentMap<ResourceGroupId, ResourceGroup> groups = new ConcurrentHashMap<>();
-    @GuardedBy("this")
-    private Map<ResourceGroupIdTemplate, ResourceGroupSpec> resourceGroupSpecs = new HashMap<>();
-    private final ConcurrentMap<ResourceGroupIdTemplate, List<ResourceGroupId>> configuredGroups = new ConcurrentHashMap<>();
+    private final Map<ResourceGroupId, ResourceGroupSpec> specsUsedToConfigureGroups = new ConcurrentHashMap<>();
+    private final ResourceGroupToTemplateMap configuredGroups = new ResourceGroupToTemplateMap();
     private final AtomicReference<List<ResourceGroupSpec>> rootGroups = new AtomicReference<>(ImmutableList.of());
     private final AtomicReference<List<ResourceGroupSelector>> selectors = new AtomicReference<>();
     private final AtomicReference<Optional<Duration>> cpuQuotaPeriod = new AtomicReference<>(Optional.empty());
+    private final AtomicReference<Optional<Duration>> physicalDataScanQuotaPeriod = new AtomicReference<>(Optional.empty());
     private final ScheduledExecutorService configExecutor = newSingleThreadScheduledExecutor(daemonThreadsNamed("DbResourceGroupConfigurationManager"));
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicLong lastRefresh = new AtomicLong();
@@ -99,8 +97,7 @@ public class DbResourceGroupConfigurationManager
             ResourceGroupsDao dao,
             @ForEnvironment String environment)
     {
-        this(
-                Optional.of(lifeCycleManager),
+        this(Optional.of(lifeCycleManager),
                 memoryPoolManager,
                 config,
                 dao,
@@ -114,8 +111,7 @@ public class DbResourceGroupConfigurationManager
             ResourceGroupsDao dao,
             String environment)
     {
-        this(
-                Optional.empty(),
+        this(Optional.empty(),
                 memoryPoolManager,
                 config,
                 dao,
@@ -147,6 +143,12 @@ public class DbResourceGroupConfigurationManager
     }
 
     @Override
+    protected Optional<Duration> getPhysicalDataScanQuotaPeriod()
+    {
+        return physicalDataScanQuotaPeriod.get();
+    }
+
+    @Override
     protected List<ResourceGroupSpec> getRootGroups()
     {
         if (lastRefresh.get() == 0) {
@@ -157,6 +159,13 @@ public class DbResourceGroupConfigurationManager
         }
 
         return rootGroups.get();
+    }
+
+    @Override
+    protected void configureGroup(ResourceGroup group, ResourceGroupSpec groupSpec)
+    {
+        super.configureGroup(group, groupSpec);
+        specsUsedToConfigureGroups.put(group.getId(), groupSpec);
     }
 
     @PreDestroy
@@ -177,10 +186,7 @@ public class DbResourceGroupConfigurationManager
     public void configure(ResourceGroup group, SelectionContext<ResourceGroupIdTemplate> criteria)
     {
         ResourceGroupSpec groupSpec = getMatchingSpec(group, criteria);
-        if (groups.putIfAbsent(group.getId(), group) == null) {
-            // If a new spec replaces the spec returned from getMatchingSpec the group will be reconfigured on the next run of load().
-            configuredGroups.computeIfAbsent(criteria.getContext(), v -> synchronizedList(new ArrayList<>())).add(group.getId());
-        }
+        configuredGroups.put(criteria.getContext(), group);
         synchronized (getRootGroup(group.getId())) {
             configureGroup(group, groupSpec);
         }
@@ -215,31 +221,24 @@ public class DbResourceGroupConfigurationManager
         return selectors.get();
     }
 
-    private synchronized Optional<Duration> getCpuQuotaPeriodFromDb()
+    private synchronized ResourceGroupGlobalProperties getResourceGroupGlobalPropertiesFromDB()
     {
-        List<ResourceGroupGlobalProperties> globalProperties = dao.getResourceGroupGlobalProperties();
-        checkState(globalProperties.size() <= 1, "There is more than one cpu_quota_period");
-        return !globalProperties.isEmpty() ? globalProperties.get(0).getCpuQuotaPeriod() : Optional.empty();
+        return dao.getResourceGroupGlobalProperties();
     }
 
     @VisibleForTesting
     public synchronized void load()
     {
         try {
-            Map.Entry<ManagerSpec, Map<ResourceGroupIdTemplate, ResourceGroupSpec>> specsFromDb = buildSpecsFromDb();
+            Entry<ManagerSpec, Map<ResourceGroupIdTemplate, ResourceGroupSpec>> specsFromDb = buildSpecsFromDb();
             ManagerSpec managerSpec = specsFromDb.getKey();
-            Map<ResourceGroupIdTemplate, ResourceGroupSpec> resourceGroupSpecs = specsFromDb.getValue();
-            Set<ResourceGroupIdTemplate> changedSpecs = new HashSet<>();
-            Set<ResourceGroupIdTemplate> deletedSpecs = Sets.difference(this.resourceGroupSpecs.keySet(), resourceGroupSpecs.keySet());
+            Map<ResourceGroupIdTemplate, ResourceGroupSpec> newResourceGroupSpecs = specsFromDb.getValue();
+            Map<ResourceGroupIdTemplate, Set<ResourceGroup>> templateToGroup = configuredGroups.getAllTemplateToGroupsMappings();
+            Map<ResourceGroup, ResourceGroupSpec> changedGroups = findChangedGroups(templateToGroup, newResourceGroupSpecs);
+            Set<ResourceGroup> deletedGroups = findDeletedGroups(templateToGroup, newResourceGroupSpecs);
 
-            for (Map.Entry<ResourceGroupIdTemplate, ResourceGroupSpec> entry : resourceGroupSpecs.entrySet()) {
-                if (!entry.getValue().sameConfig(this.resourceGroupSpecs.get(entry.getKey()))) {
-                    changedSpecs.add(entry.getKey());
-                }
-            }
-
-            this.resourceGroupSpecs = resourceGroupSpecs;
             this.cpuQuotaPeriod.set(managerSpec.getCpuQuotaPeriod());
+            this.physicalDataScanQuotaPeriod.set(managerSpec.getPhysicalDataScanQuotaPeriod());
             this.rootGroups.set(managerSpec.getRootGroups());
             List<ResourceGroupSelector> selectors = buildSelectors(managerSpec);
             if (exactMatchSelectorEnabled) {
@@ -252,19 +251,19 @@ public class DbResourceGroupConfigurationManager
                 this.selectors.set(selectors);
             }
 
-            configureChangedGroups(changedSpecs);
-            disableDeletedGroups(deletedSpecs);
+            configureChangedGroups(changedGroups);
+            disableDeletedGroups(deletedGroups);
 
             if (lastRefresh.get() > 0) {
-                for (ResourceGroupIdTemplate deleted : deletedSpecs) {
-                    log.info("Resource group spec deleted %s", deleted);
+                for (ResourceGroup deleted : deletedGroups) {
+                    log.info("Resource group deleted '%s'", deleted.getId());
                 }
-                for (ResourceGroupIdTemplate changed : changedSpecs) {
-                    log.info("Resource group spec %s changed to %s", changed, resourceGroupSpecs.get(changed));
+                for (Entry<ResourceGroup, ResourceGroupSpec> entry : changedGroups.entrySet()) {
+                    log.info("Resource group '%s' changed to %s", entry.getKey().getId(), entry.getValue());
                 }
             }
             else {
-                log.info("Loaded %s selectors and %s resource groups from database", this.selectors.get().size(), this.resourceGroupSpecs.size());
+                log.info("Loaded %s selectors and %s resource groups from database", this.selectors.get().size(), this.specsUsedToConfigureGroups.size());
             }
 
             lastRefresh.set(System.nanoTime());
@@ -278,8 +277,42 @@ public class DbResourceGroupConfigurationManager
         }
     }
 
+    private Map<ResourceGroup, ResourceGroupSpec> findChangedGroups(
+            Map<ResourceGroupIdTemplate, Set<ResourceGroup>> templateToGroups,
+            Map<ResourceGroupIdTemplate, ResourceGroupSpec> newResourceGroupSpecs)
+    {
+        ImmutableMap.Builder<ResourceGroup, ResourceGroupSpec> changedGroups = ImmutableMap.builder();
+        for (Entry<ResourceGroupIdTemplate, Set<ResourceGroup>> entry : templateToGroups.entrySet()) {
+            ResourceGroupSpec newSpec = newResourceGroupSpecs.get(entry.getKey());
+            if (newSpec != null) {
+                Set<ResourceGroup> changedGroupsForCurrentTemplate = entry.getValue().stream()
+                        .filter(resourceGroupId -> {
+                            ResourceGroupSpec previousSpec = specsUsedToConfigureGroups.get(resourceGroupId.getId());
+                            return previousSpec == null || !previousSpec.sameConfig(newSpec);
+                        })
+                        .collect(toImmutableSet());
+                for (ResourceGroup group : changedGroupsForCurrentTemplate) {
+                    changedGroups.put(group, newSpec);
+                }
+            }
+        }
+        return changedGroups.buildOrThrow();
+    }
+
+    private Set<ResourceGroup> findDeletedGroups(
+            Map<ResourceGroupIdTemplate, Set<ResourceGroup>> templateToGroups,
+            Map<ResourceGroupIdTemplate, ResourceGroupSpec> newResourceGroupSpecs)
+    {
+        return templateToGroups.entrySet().stream()
+                .filter(entry -> !newResourceGroupSpecs.containsKey(entry.getKey()))
+                .flatMap(entry -> entry.getValue().stream())
+                .filter(resourceGroup -> !resourceGroup.isDisabled())
+                .collect(toImmutableSet());
+    }
+
     // Populate temporary data structures to build resource group specs and selectors from db
-    private synchronized void populateFromDbHelper(Map<Long, ResourceGroupSpecBuilder> recordMap,
+    private synchronized void populateFromDbHelper(
+            Map<Long, ResourceGroupSpecBuilder> recordMap,
             Set<Long> rootGroupIds,
             Map<Long, ResourceGroupIdTemplate> resourceGroupIdTemplateMap,
             Map<Long, Set<Long>> subGroupIdsToBuild)
@@ -292,12 +325,12 @@ public class DbResourceGroupConfigurationManager
                 resourceGroupIdTemplateMap.put(record.getId(), new ResourceGroupIdTemplate(record.getNameTemplate().toString()));
             }
             else {
-                subGroupIdsToBuild.computeIfAbsent(record.getParentId().get(), k -> new HashSet<>()).add(record.getId());
+                subGroupIdsToBuild.computeIfAbsent(record.getParentId().get(), _ -> new HashSet<>()).add(record.getId());
             }
         }
     }
 
-    private synchronized Map.Entry<ManagerSpec, Map<ResourceGroupIdTemplate, ResourceGroupSpec>> buildSpecsFromDb()
+    private synchronized Entry<ManagerSpec, Map<ResourceGroupIdTemplate, ResourceGroupSpec>> buildSpecsFromDb()
     {
         // New resource group spec map
         Map<ResourceGroupIdTemplate, ResourceGroupSpec> resourceGroupSpecs = new HashMap<>();
@@ -315,7 +348,7 @@ public class DbResourceGroupConfigurationManager
         // Build up resource group specs from leaf to root
         for (LinkedList<Long> queue = new LinkedList<>(rootGroupIds); !queue.isEmpty(); ) {
             Long id = queue.pollFirst();
-            resourceGroupIdTemplateMap.computeIfAbsent(id, k -> {
+            resourceGroupIdTemplateMap.computeIfAbsent(id, _ -> {
                 ResourceGroupSpecBuilder builder = recordMap.get(id);
                 return ResourceGroupIdTemplate.forSubGroupNamed(
                         resourceGroupIdTemplateMap.get(builder.getParentId().get()),
@@ -346,59 +379,48 @@ public class DbResourceGroupConfigurationManager
         // Specs are built from db records, validate and return manager spec
         List<ResourceGroupSpec> rootGroups = rootGroupIds.stream().map(resourceGroupSpecMap::get).collect(Collectors.toList());
 
+        // The SQL query returns selectors for all groups matching this environment or having
+        // a NULL environment (wildcard). Filter out selectors whose resource group was not
+        // reachable from a root — e.g. a NULL-env child under an env-specific parent that
+        // belongs to a different environment.
         List<SelectorSpec> selectors = dao.getSelectors(environment)
                 .stream()
+                .filter(selectorRecord -> resourceGroupSpecMap.containsKey(selectorRecord.getResourceGroupId()))
                 .map(selectorRecord ->
                         new SelectorSpec(
                                 selectorRecord.getUserRegex(),
                                 selectorRecord.getUserGroupRegex(),
+                                selectorRecord.getOriginalUserRegex(),
+                                selectorRecord.getAuthenticatedUserRegex(),
                                 selectorRecord.getSourceRegex(),
+                                selectorRecord.getQueryTextRegex(),
                                 selectorRecord.getQueryType(),
                                 selectorRecord.getClientTags(),
                                 selectorRecord.getSelectorResourceEstimate(),
-                                resourceGroupIdTemplateMap.get(selectorRecord.getResourceGroupId()))
-                ).collect(Collectors.toList());
-        ManagerSpec managerSpec = new ManagerSpec(rootGroups, selectors, getCpuQuotaPeriodFromDb());
+                                resourceGroupIdTemplateMap.get(selectorRecord.getResourceGroupId()))).collect(Collectors.toList());
+
+        ResourceGroupGlobalProperties globalProperties = dao.getResourceGroupGlobalProperties();
+        ManagerSpec managerSpec = new ManagerSpec(rootGroups, selectors, globalProperties.getCpuQuotaPeriod(), globalProperties.getPhysicalDataScanQuotaPeriod());
         validateRootGroups(managerSpec);
         return new AbstractMap.SimpleImmutableEntry<>(managerSpec, resourceGroupSpecs);
     }
 
-    private synchronized void configureChangedGroups(Set<ResourceGroupIdTemplate> changedSpecs)
+    private synchronized void configureChangedGroups(Map<ResourceGroup, ResourceGroupSpec> changedGroups)
     {
-        for (ResourceGroupIdTemplate resourceGroupIdTemplate : changedSpecs) {
-            for (ResourceGroupId resourceGroupId : configuredGroups(resourceGroupIdTemplate)) {
-                synchronized (getRootGroup(resourceGroupId)) {
-                    configureGroup(groups.get(resourceGroupId), resourceGroupSpecs.get(resourceGroupIdTemplate));
-                }
+        for (Entry<ResourceGroup, ResourceGroupSpec> entry : changedGroups.entrySet()) {
+            ResourceGroup group = entry.getKey();
+            ResourceGroupSpec groupSpec = entry.getValue();
+            synchronized (getRootGroup(group.getId())) {
+                configureGroup(group, groupSpec);
             }
         }
     }
 
-    private synchronized void disableDeletedGroups(Set<ResourceGroupIdTemplate> deletedSpecs)
+    private synchronized void disableDeletedGroups(Set<ResourceGroup> deletedGroups)
     {
-        for (ResourceGroupIdTemplate resourceGroupIdTemplate : deletedSpecs) {
-            for (ResourceGroupId resourceGroupId : configuredGroups(resourceGroupIdTemplate)) {
-                disableGroup(groups.get(resourceGroupId));
-            }
+        for (ResourceGroup group : deletedGroups) {
+            group.setDisabled(true);
         }
-    }
-
-    private List<ResourceGroupId> configuredGroups(ResourceGroupIdTemplate idTemplate)
-    {
-        List<ResourceGroupId> groups = configuredGroups.get(idTemplate);
-        if (groups == null) {
-            return ImmutableList.of();
-        }
-        synchronized (groups) { // configuredGroups values are synchronized lists
-            return ImmutableList.copyOf(groups);
-        }
-    }
-
-    private synchronized void disableGroup(ResourceGroup group)
-    {
-        // Disable groups that are removed from the db
-        group.setHardConcurrencyLimit(0);
-        group.setMaxQueuedQueries(0);
     }
 
     private ResourceGroup getRootGroup(ResourceGroupId groupId)
@@ -409,7 +431,7 @@ public class DbResourceGroupConfigurationManager
             parent = groupId.getParent();
         }
         // GroupId is guaranteed to be in groups: it is added before the first call to this method in configure()
-        return groups.get(groupId);
+        return configuredGroups.get(groupId);
     }
 
     @Managed
@@ -423,5 +445,48 @@ public class DbResourceGroupConfigurationManager
     public void shutdown()
     {
         lifeCycleManager.ifPresent(LifeCycleManager::stop);
+    }
+
+    /**
+     * Stores mappings between group ID templates and groups expanded from them.
+     * A group, throughout its lifecycle, can be expanded from different templates.
+     * For example, 'admin' can be expanded from 'admin' and '${USER}'.
+     * This data structure stores the most recent mapping for a group registered by
+     * {@link ResourceGroupToTemplateMap#put(ResourceGroupIdTemplate, ResourceGroup)}.
+     */
+    private static class ResourceGroupToTemplateMap
+    {
+        private final Map<ResourceGroupId, ResourceGroup> groups = new ConcurrentHashMap<>();
+        private final Map<ResourceGroupId, ResourceGroupIdTemplate> groupIdToTemplate = new HashMap<>();
+        private final Map<ResourceGroupIdTemplate, Set<ResourceGroup>> templateToGroups = new HashMap<>();
+
+        /**
+         * Registers a mapping between a template and a group.
+         * If a mapping for the group already exists, it is replaced by the new one.
+         */
+        synchronized void put(ResourceGroupIdTemplate newTemplate, ResourceGroup group)
+        {
+            ResourceGroup previousGroup = groups.putIfAbsent(group.getId(), group);
+            checkState(previousGroup == null || previousGroup == group, "Unexpected resource group instance");
+
+            ResourceGroupIdTemplate previousTemplate = groupIdToTemplate.put(group.getId(), newTemplate);
+            if (previousTemplate != null) {
+                templateToGroups.get(previousTemplate)
+                        .remove(group);
+            }
+            templateToGroups.computeIfAbsent(newTemplate, _ -> new HashSet<>())
+                    .add(group);
+        }
+
+        ResourceGroup get(ResourceGroupId groupId)
+        {
+            return groups.get(groupId);
+        }
+
+        synchronized Map<ResourceGroupIdTemplate, Set<ResourceGroup>> getAllTemplateToGroupsMappings()
+        {
+            return templateToGroups.entrySet().stream()
+                    .collect(toImmutableMap(Entry::getKey, entry -> ImmutableSet.copyOf(entry.getValue())));
+        }
     }
 }

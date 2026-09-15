@@ -50,8 +50,7 @@ public class MitmProxy
             Optional<Network> network,
             int retryLimit)
     {
-        super(
-                image,
+        super(image,
                 hostName,
                 exposePorts,
                 filesToMount,
@@ -67,10 +66,14 @@ public class MitmProxy
         withRunCommand(
                 ImmutableList.of(
                         "mitmdump",
-                        "--listen-port", Integer.toString(MITMPROXY_PORT),
-                        "--certs", "/tmp/cert.pem",
-                        "--set", "proxy_debug=true",
-                        "--set", "stream_large_bodies=0"));
+                        "--listen-port",
+                        Integer.toString(MITMPROXY_PORT),
+                        "--certs",
+                        "/tmp/cert.pem",
+                        "--set",
+                        "proxy_debug=true",
+                        "--set",
+                        "stream_large_bodies=0"));
 
         withLogConsumer(MitmProxy::printProxiedRequest);
     }
@@ -79,7 +82,7 @@ public class MitmProxy
     {
         String line = outputFrame.getUtf8String().trim();
         if (!line.startsWith("<<")) {
-            log.info("Proxied " + line);
+            log.info("Proxied %s,", line);
         }
     }
 
@@ -87,7 +90,7 @@ public class MitmProxy
     public void start()
     {
         super.start();
-        log.info("Mitm proxy container started with address: " + getProxyEndpoint());
+        log.info("Mitm proxy container started with address: %s", getProxyEndpoint());
     }
 
     public HostAndPort getProxyHostAndPort()

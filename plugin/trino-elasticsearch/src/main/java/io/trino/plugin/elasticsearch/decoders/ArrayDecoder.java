@@ -16,11 +16,12 @@ package io.trino.plugin.elasticsearch.decoders;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.plugin.elasticsearch.DecoderDescriptor;
+import io.trino.plugin.elasticsearch.client.SearchDocument;
 import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.BlockBuilder;
-import org.elasticsearch.search.SearchHit;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Supplier;
 
 public class ArrayDecoder
@@ -34,7 +35,7 @@ public class ArrayDecoder
     }
 
     @Override
-    public void decode(SearchHit hit, Supplier<Object> getter, BlockBuilder output)
+    public void decode(SearchDocument document, Supplier<Object> getter, BlockBuilder output)
     {
         Object data = getter.get();
 
@@ -42,10 +43,10 @@ public class ArrayDecoder
             output.appendNull();
         }
         else if (data instanceof List<?> list) {
-            ((ArrayBlockBuilder) output).buildEntry(elementBuilder -> list.forEach(element -> elementDecoder.decode(hit, () -> element, elementBuilder)));
+            ((ArrayBlockBuilder) output).buildEntry(elementBuilder -> list.forEach(element -> elementDecoder.decode(document, () -> element, elementBuilder)));
         }
         else {
-            ((ArrayBlockBuilder) output).buildEntry(elementBuilder -> elementDecoder.decode(hit, () -> data, elementBuilder));
+            ((ArrayBlockBuilder) output).buildEntry(elementBuilder -> elementDecoder.decode(document, () -> data, elementBuilder));
         }
     }
 
@@ -70,6 +71,25 @@ public class ArrayDecoder
         public Decoder createDecoder()
         {
             return new ArrayDecoder(elementDescriptor.createDecoder());
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            Descriptor that = (Descriptor) o;
+            return Objects.equals(this.elementDescriptor, that.elementDescriptor);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return elementDescriptor.hashCode();
         }
     }
 }

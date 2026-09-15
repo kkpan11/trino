@@ -33,6 +33,7 @@ import io.trino.sql.planner.plan.PlanNode;
 
 import java.util.Optional;
 
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.matching.Pattern.nonEmpty;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -140,7 +141,7 @@ public class TransformCorrelatedGroupedAggregationWithoutProjection
         AggregationNode distinct = null;
 
         // decorrelate nested plan
-        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(plannerContext, context.getSymbolAllocator(), context.getLookup());
+        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(plannerContext, getCharVarcharCoercion(context.getSession()), context.getSymbolAllocator(), context.getLookup());
         Optional<PlanNodeDecorrelator.DecorrelatedNode> decorrelatedSource = decorrelator.decorrelateFilters(source, correlatedJoinNode.getCorrelation());
         if (decorrelatedSource.isEmpty()) {
             // we failed to decorrelate the nested plan, so check if we can extract a distinct operator from the nested plan
@@ -174,8 +175,6 @@ public class TransformCorrelatedGroupedAggregationWithoutProjection
                 decorrelatedSource.get().getCorrelatedPredicates(),
                 Optional.empty(),
                 Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
                 ImmutableMap.of(),
                 Optional.empty());
 
@@ -201,7 +200,6 @@ public class TransformCorrelatedGroupedAggregationWithoutProjection
                                 .addAll(groupedAggregation.getGroupingKeys())
                                 .build()))
                 .setPreGroupedSymbols(ImmutableList.of())
-                .setHashSymbol(Optional.empty())
                 .setGroupIdSymbol(Optional.empty())
                 .build();
 

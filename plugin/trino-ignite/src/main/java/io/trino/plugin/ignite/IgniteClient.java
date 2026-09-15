@@ -81,10 +81,14 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.ignite.IgniteTableProperties.PRIMARY_KEY_PROPERTY;
 import static io.trino.plugin.jdbc.ColumnMapping.longMapping;
 import static io.trino.plugin.jdbc.DecimalConfig.DecimalMapping.ALLOW_OVERFLOW;
@@ -217,51 +221,32 @@ public class IgniteClient
             return mapping;
         }
 
-        switch (typeHandle.jdbcType()) {
-            case Types.BOOLEAN:
-                return Optional.of(booleanColumnMapping());
-
-            case Types.TINYINT:
-                return Optional.of(tinyintColumnMapping());
-
-            case Types.SMALLINT:
-                return Optional.of(smallintColumnMapping());
-
-            case Types.INTEGER:
-                return Optional.of(integerColumnMapping());
-
-            case Types.BIGINT:
-                return Optional.of(bigintColumnMapping());
-
-            case Types.FLOAT:
-                return Optional.of(realColumnMapping());
-
-            case Types.DOUBLE:
-                return Optional.of(doubleColumnMapping());
-
-            case Types.DECIMAL:
+        return switch (typeHandle.jdbcType()) {
+            case Types.BOOLEAN -> Optional.of(booleanColumnMapping());
+            case Types.TINYINT -> Optional.of(tinyintColumnMapping());
+            case Types.SMALLINT -> Optional.of(smallintColumnMapping());
+            case Types.INTEGER -> Optional.of(integerColumnMapping());
+            case Types.BIGINT -> Optional.of(bigintColumnMapping());
+            case Types.FLOAT -> Optional.of(realColumnMapping());
+            case Types.DOUBLE -> Optional.of(doubleColumnMapping());
+            case Types.DECIMAL -> {
                 int decimalDigits = typeHandle.requiredDecimalDigits();
                 int precision = typeHandle.requiredColumnSize();
                 if (getDecimalRounding(session) == ALLOW_OVERFLOW && precision > Decimals.MAX_PRECISION) {
                     int scale = min(decimalDigits, getDecimalDefaultScale(session));
-                    return Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)));
+                    yield Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)));
                 }
                 precision = precision + max(-decimalDigits, 0); // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
                 if (precision > Decimals.MAX_PRECISION) {
-                    break;
+                    yield Optional.empty();
                 }
-                return Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0))));
-
-            case Types.VARCHAR:
-                return Optional.of(varcharColumnMapping(typeHandle.columnSize()));
-
-            case Types.DATE:
-                return Optional.of(longMapping(DATE, dateReadFunction(), dateWriteFunction()));
-
-            case Types.BINARY:
-                return Optional.of(varbinaryColumnMapping());
-        }
-        return Optional.empty();
+                yield Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0))));
+            }
+            case Types.VARCHAR -> Optional.of(varcharColumnMapping(typeHandle.columnSize()));
+            case Types.DATE -> Optional.of(longMapping(DATE, dateReadFunction(), dateWriteFunction()));
+            case Types.BINARY -> Optional.of(varbinaryColumnMapping());
+            default -> Optional.empty();
+        };
     }
 
     @Override
@@ -295,8 +280,8 @@ public class IgniteClient
             }
             return WriteMapping.objectMapping(dataType, longDecimalWriteFunction(decimalType));
         }
-        if (type instanceof CharType) {
-            return WriteMapping.sliceMapping("varchar(" + ((CharType) type).getLength() + ")", varcharWriteFunction());
+        if (type instanceof CharType charType) {
+            return WriteMapping.sliceMapping("varchar(" + charType.getLength() + ")", varcharWriteFunction());
         }
         if (type instanceof VarcharType varcharType) {
             String dataType;
@@ -378,7 +363,7 @@ public class IgniteClient
     }
 
     @Override
-    public JdbcOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    public JdbcOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Consumer<Runnable> rollbackActionCollector)
     {
         if (tableMetadata.getComment().isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating tables with table comment");
@@ -405,7 +390,8 @@ public class IgniteClient
 
         for (String primaryKey : primaryKeys) {
             if (!columnNames.contains(primaryKey)) {
-                throw new TrinoException(INVALID_TABLE_PROPERTY,
+                throw new TrinoException(
+                        INVALID_TABLE_PROPERTY,
                         format("Column '%s' specified in property '%s' doesn't exist in table", primaryKey, PRIMARY_KEY_PROPERTY));
             }
         }
@@ -414,13 +400,14 @@ public class IgniteClient
 
         try (Connection connection = connectionFactory.openConnection(session)) {
             execute(session, connection, sql);
-
-            return new IgniteOutputTableHandle(
+            IgniteOutputTableHandle destinationTableHandle = new IgniteOutputTableHandle(
                     new RemoteTableName(Optional.empty(), Optional.of(schemaTableName.getSchemaName()), schemaTableName.getTableName()),
                     columnNames,
                     columnTypes.build(),
                     Optional.empty(),
                     primaryKeys.isEmpty() ? Optional.of(IGNITE_DUMMY_ID) : Optional.empty());
+            rollbackActionCollector.accept(() -> rollbackDestinationTableCreation(session, destinationTableHandle.getRemoteTableName()));
+            return destinationTableHandle;
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
@@ -437,7 +424,7 @@ public class IgniteClient
             columnDefinitions.add(quoted(IGNITE_DUMMY_ID) + " VARCHAR NOT NULL");
             primaryKeys = ImmutableList.of(IGNITE_DUMMY_ID);
         }
-        columnDefinitions.add("PRIMARY KEY (" + join(", ", primaryKeys.stream().map(this::quoted).collect(joining(", "))) + ")");
+        columnDefinitions.add("PRIMARY KEY (" + primaryKeys.stream().map(this::quoted).collect(joining(", ")) + ")");
 
         String remoteTableName = quoted(null, schemaTableName.getSchemaName(), schemaTableName.getTableName());
         return format("CREATE TABLE %s (%s) ", remoteTableName, join(", ", columnDefinitions.build()));
@@ -464,6 +451,26 @@ public class IgniteClient
     public boolean isLimitGuaranteed(ConnectorSession session)
     {
         return true;
+    }
+
+    @Override
+    public boolean supportsMerge()
+    {
+        return true;
+    }
+
+    @Override
+    public List<JdbcColumnHandle> getPrimaryKeys(ConnectorSession session, RemoteTableName remoteTableName)
+    {
+        JdbcTableHandle plainTable = new JdbcTableHandle(remoteTableName.getSchemaTableName(), remoteTableName, Optional.empty());
+        Map<String, Object> tableProperties = getTableProperties(session, plainTable);
+        Set<String> primaryKey = ImmutableSet.copyOf(IgniteTableProperties.getPrimaryKey(tableProperties));
+        List<JdbcColumnHandle> primaryKeys = getColumns(session, remoteTableName.getSchemaTableName(), remoteTableName)
+                .stream()
+                .filter(columnHandle -> primaryKey.contains(columnHandle.getColumnName().toLowerCase(ENGLISH)))
+                .collect(toImmutableList());
+        verify(!primaryKeys.isEmpty(), "Ignite primary keys is empty");
+        return primaryKeys;
     }
 
     @Override

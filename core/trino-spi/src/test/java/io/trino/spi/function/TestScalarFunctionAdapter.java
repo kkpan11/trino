@@ -49,7 +49,6 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
-import static io.trino.spi.block.TestingSession.SESSION;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BOXED_NULLABLE;
@@ -78,7 +77,7 @@ import static java.util.Collections.nCopies;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestScalarFunctionAdapter
+class TestScalarFunctionAdapter
 {
     private static final TypeOperators TYPE_OPERATORS = new TypeOperators();
     private static final ArrayType ARRAY_TYPE = new ArrayType(BIGINT);
@@ -113,7 +112,7 @@ public class TestScalarFunctionAdapter
                 simpleConvention(BLOCK_BUILDER, BOXED_NULLABLE));
 
         // verify non-null and null value are written to the block
-        BlockBuilder blockBuilder = DOUBLE.createBlockBuilder(null, 1);
+        BlockBuilder blockBuilder = DOUBLE.createFixedSizeBlockBuilder(1);
         adaptedMethodHandle.invoke(1.1, blockBuilder);
         adaptedMethodHandle.invoke(null, blockBuilder);
         Block block = blockBuilder.buildValueBlock();
@@ -356,7 +355,7 @@ public class TestScalarFunctionAdapter
                 actualConvention.supportsSession(),
                 actualConvention.supportsInstanceFactory());
 
-        // crete an exact invoker to the handle, so we can use object invoke interface without type coercion concerns
+        // create an exact invoker to the handle, so we can use object invoke interface without type coercion concerns
         MethodHandle exactInvoker = MethodHandles.exactInvoker(adaptedMethodHandle.type())
                 .bindTo(adaptedMethodHandle);
         if (expectedConvention.getReturnConvention() != BLOCK_BUILDER) {
@@ -554,6 +553,7 @@ public class TestScalarFunctionAdapter
                     callArguments.add(fixedSlice);
                     callArguments.add(0);
                     callArguments.add(variableSlice);
+                    callArguments.add(0);
                 }
                 case IN_OUT -> callArguments.add(new TestingInOut(argumentType, testValue));
                 default -> throw new IllegalArgumentException("Unsupported argument convention: " + argumentConvention);
@@ -578,7 +578,7 @@ public class TestScalarFunctionAdapter
             return Slices.utf8Slice("test");
         }
         if (argumentType.equals(ARRAY_TYPE)) {
-            BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, 4);
+            BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(4);
             blockBuilder.appendNull();
             BIGINT.writeLong(blockBuilder, 99);
             blockBuilder.appendNull();
@@ -682,9 +682,12 @@ public class TestScalarFunctionAdapter
 
         @SuppressWarnings("unused")
         public boolean nullFlag(
-                double doubleValue, boolean doubleNull,
-                Slice sliceValue, boolean sliceNull,
-                Block blockValue, boolean blockNull)
+                double doubleValue,
+                boolean doubleNull,
+                Slice sliceValue,
+                boolean sliceNull,
+                Block blockValue,
+                boolean blockNull)
         {
             checkState(!invoked, "Already invoked");
             invoked = true;
@@ -718,10 +721,14 @@ public class TestScalarFunctionAdapter
 
         @SuppressWarnings("unused")
         public boolean nullFlagObjects(
-                Slice sliceValue, boolean sliceNull,
-                Block blockValue, boolean blockNull,
-                Object objectCharValue, boolean objectCharNull,
-                Object objectTimestampValue, boolean objectTimestampNull)
+                Slice sliceValue,
+                boolean sliceNull,
+                Block blockValue,
+                boolean blockNull,
+                Object objectCharValue,
+                boolean objectCharNull,
+                Object objectTimestampValue,
+                boolean objectTimestampNull)
         {
             checkState(!invoked, "Already invoked");
             invoked = true;
@@ -763,9 +770,12 @@ public class TestScalarFunctionAdapter
 
         @SuppressWarnings("unused")
         public boolean blockPosition(
-                Block doubleBlock, int doublePosition,
-                Block sliceBlock, int slicePosition,
-                Block blockBlock, int blockPosition)
+                Block doubleBlock,
+                int doublePosition,
+                Block sliceBlock,
+                int slicePosition,
+                Block blockBlock,
+                int blockPosition)
         {
             checkState(!invoked, "Already invoked");
             invoked = true;
@@ -796,10 +806,14 @@ public class TestScalarFunctionAdapter
 
         @SuppressWarnings("unused")
         public boolean blockPositionObjects(
-                Block sliceBlock, int slicePosition,
-                Block blockBlock, int blockPosition,
-                Block objectCharBlock, int objectCharPosition,
-                Block objectTimestampBlock, int objectTimestampPosition)
+                Block sliceBlock,
+                int slicePosition,
+                Block blockBlock,
+                int blockPosition,
+                Block objectCharBlock,
+                int objectCharPosition,
+                Block objectTimestampBlock,
+                int objectTimestampPosition)
         {
             checkState(!invoked, "Already invoked");
             invoked = true;
@@ -837,9 +851,12 @@ public class TestScalarFunctionAdapter
 
         @SuppressWarnings("unused")
         public boolean valueBlockPosition(
-                LongArrayBlock doubleBlock, int doublePosition,
-                VariableWidthBlock sliceBlock, int slicePosition,
-                ArrayBlock blockBlock, int blockPosition)
+                LongArrayBlock doubleBlock,
+                int doublePosition,
+                VariableWidthBlock sliceBlock,
+                int slicePosition,
+                ArrayBlock blockBlock,
+                int blockPosition)
         {
             checkState(!invoked, "Already invoked");
             invoked = true;
@@ -870,10 +887,14 @@ public class TestScalarFunctionAdapter
 
         @SuppressWarnings("unused")
         public boolean valueBlockPositionObjects(
-                VariableWidthBlock sliceBlock, int slicePosition,
-                ArrayBlock blockBlock, int blockPosition,
-                VariableWidthBlock objectCharBlock, int objectCharPosition,
-                Fixed12Block objectTimestampBlock, int objectTimestampPosition)
+                VariableWidthBlock sliceBlock,
+                int slicePosition,
+                ArrayBlock blockBlock,
+                int blockPosition,
+                VariableWidthBlock objectCharBlock,
+                int objectCharPosition,
+                Fixed12Block objectTimestampBlock,
+                int objectTimestampPosition)
         {
             checkState(!invoked, "Already invoked");
             invoked = true;
@@ -996,8 +1017,8 @@ public class TestScalarFunctionAdapter
 
         private static void assertArgumentValue(Object actual, Object expected)
         {
-            if (actual instanceof Block && expected instanceof Block) {
-                assertBlockEquals(BIGINT, (Block) actual, (Block) expected);
+            if (actual instanceof Block actualBlock && expected instanceof Block expectedBlock) {
+                assertBlockEquals(BIGINT, actualBlock, expectedBlock);
             }
             else {
                 assertThat(actual).isEqualTo(expected);
@@ -1007,7 +1028,7 @@ public class TestScalarFunctionAdapter
         private static void assertBlockEquals(Type type, Block actual, Block expected)
         {
             for (int position = 0; position < actual.getPositionCount(); position++) {
-                assertThat(type.getObjectValue(SESSION, actual, position)).isEqualTo(type.getObjectValue(SESSION, expected, position));
+                assertThat(type.getObjectValue(actual, position)).isEqualTo(type.getObjectValue(expected, position));
             }
         }
     }

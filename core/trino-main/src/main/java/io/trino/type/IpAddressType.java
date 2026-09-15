@@ -23,19 +23,18 @@ import io.trino.spi.block.BlockBuilderStatus;
 import io.trino.spi.block.Int128ArrayBlock;
 import io.trino.spi.block.Int128ArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.BlockIndex;
 import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 import io.trino.spi.type.AbstractType;
 import io.trino.spi.type.FixedWidthType;
-import io.trino.spi.type.StandardTypes;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeOperatorDeclaration;
 import io.trino.spi.type.TypeOperators;
-import io.trino.spi.type.TypeSignature;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -57,6 +56,7 @@ public class IpAddressType
         extends AbstractType
         implements FixedWidthType
 {
+    public static final String NAME = "ipaddress";
     private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION = extractOperatorDeclaration(IpAddressType.class, lookup(), Slice.class);
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
@@ -64,7 +64,7 @@ public class IpAddressType
 
     private IpAddressType()
     {
-        super(new TypeSignature(StandardTypes.IPADDRESS), Slice.class, Int128ArrayBlock.class);
+        super(new TypeDescriptor(NAME), Slice.class, Int128ArrayBlock.class);
     }
 
     @Override
@@ -74,7 +74,7 @@ public class IpAddressType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -89,15 +89,15 @@ public class IpAddressType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, getFixedSize());
-    }
-
-    @Override
     public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
         return new Int128ArrayBlockBuilder(null, positionCount);
+    }
+
+    @Override
+    public String getDisplayName()
+    {
+        return NAME;
     }
 
     @Override
@@ -119,7 +119,7 @@ public class IpAddressType
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public Object getObjectValue(Block block, int position)
     {
         if (block.isNull(position)) {
             return null;
@@ -129,25 +129,6 @@ public class IpAddressType
         }
         catch (UnknownHostException e) {
             throw new IllegalArgumentException();
-        }
-    }
-
-    @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        appendTo(
-                (Int128ArrayBlock) block.getUnderlyingValueBlock(),
-                block.getUnderlyingValuePosition(position),
-                (Int128ArrayBlockBuilder) blockBuilder);
-    }
-
-    private void appendTo(Int128ArrayBlock block, int position, Int128ArrayBlockBuilder blockBuilder)
-    {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            blockBuilder.writeInt128(block.getInt128High(position), block.getInt128Low(position));
         }
     }
 
@@ -192,7 +173,8 @@ public class IpAddressType
     private static Slice readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return Slices.wrappedBuffer(fixedSizeSlice, fixedSizeOffset, INT128_BYTES);
     }
@@ -202,6 +184,7 @@ public class IpAddressType
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
             @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset,
             BlockBuilder blockBuilder)
     {
         ((Int128ArrayBlockBuilder) blockBuilder).writeInt128(
@@ -212,10 +195,10 @@ public class IpAddressType
     @ScalarOperator(READ_VALUE)
     private static void writeFlat(
             Slice value,
-            byte[] fixedSizeSlice,
-            int fixedSizeOffset,
-            byte[] unusedVariableSizeSlice,
-            int unusedVariableSizeOffset)
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         value.getBytes(0, fixedSizeSlice, fixedSizeOffset, INT128_BYTES);
     }
@@ -240,6 +223,22 @@ public class IpAddressType
                 rightBlock.getInt128Low(rightPosition));
     }
 
+    @ScalarOperator(EQUAL)
+    private static boolean equalOperator(
+            @FlatFixed byte[] leftFixedSizeSlice,
+            @FlatFixedOffset int leftFixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset,
+            @BlockPosition Int128ArrayBlock rightBlock,
+            @BlockIndex int rightPosition)
+    {
+        return equal(
+                (long) LONG_HANDLE.get(leftFixedSizeSlice, leftFixedSizeOffset),
+                (long) LONG_HANDLE.get(leftFixedSizeSlice, leftFixedSizeOffset + SIZE_OF_LONG),
+                rightBlock.getInt128High(rightPosition),
+                rightBlock.getInt128Low(rightPosition));
+    }
+
     private static boolean equal(long leftLow, long leftHigh, long rightLow, long rightHigh)
     {
         return leftLow == rightLow && leftHigh == rightHigh;
@@ -255,6 +254,18 @@ public class IpAddressType
     private static long xxHash64Operator(@BlockPosition Int128ArrayBlock block, @BlockIndex int position)
     {
         return xxHash64(block.getInt128High(position), block.getInt128Low(position));
+    }
+
+    @ScalarOperator(XX_HASH_64)
+    private static long xxHash64Operator(
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
+    {
+        return xxHash64(
+                (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset),
+                (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset + SIZE_OF_LONG));
     }
 
     private static long xxHash64(long low, long high)

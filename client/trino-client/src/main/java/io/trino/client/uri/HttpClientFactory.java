@@ -14,10 +14,12 @@
 package io.trino.client.uri;
 
 import io.trino.client.ClientException;
+import io.trino.client.DisallowLocalRedirectInterceptor;
 import io.trino.client.DnsResolver;
 import io.trino.client.auth.external.CompositeRedirectHandler;
 import io.trino.client.auth.external.ExternalAuthenticator;
 import io.trino.client.auth.external.HttpTokenPoller;
+import io.trino.client.auth.external.KnownToken;
 import io.trino.client.auth.external.RedirectHandler;
 import io.trino.client.auth.external.TokenPoller;
 import okhttp3.OkHttpClient;
@@ -29,7 +31,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.trino.client.KerberosUtil.defaultCredentialCachePath;
 import static io.trino.client.OkHttpUtil.basicAuth;
-import static io.trino.client.OkHttpUtil.disableHttp2;
+import static io.trino.client.OkHttpUtil.extraHeaders;
 import static io.trino.client.OkHttpUtil.setupAlternateHostnameVerification;
 import static io.trino.client.OkHttpUtil.setupCookieJar;
 import static io.trino.client.OkHttpUtil.setupHttpLogging;
@@ -39,8 +41,8 @@ import static io.trino.client.OkHttpUtil.setupKerberos;
 import static io.trino.client.OkHttpUtil.setupSocksProxy;
 import static io.trino.client.OkHttpUtil.setupSsl;
 import static io.trino.client.OkHttpUtil.setupTimeouts;
-import static io.trino.client.OkHttpUtil.tokenAuth;
 import static io.trino.client.OkHttpUtil.userAgent;
+import static io.trino.client.auth.external.ExternalAuthenticator.REDIRECT_URI_FIELD;
 import static io.trino.client.uri.ConnectionProperties.SslVerificationMode.CA;
 import static io.trino.client.uri.ConnectionProperties.SslVerificationMode.FULL;
 import static io.trino.client.uri.ConnectionProperties.SslVerificationMode.NONE;
@@ -53,18 +55,105 @@ public class HttpClientFactory
     public static OkHttpClient.Builder toHttpClientBuilder(TrinoUri uri, String userAgent)
     {
         OkHttpClient.Builder builder = unauthenticatedClientBuilder(uri, userAgent);
-        disableHttp2(builder);
         setupCookieJar(builder);
-
-        if (!uri.isUseSecureConnection()) {
-            setupInsecureSsl(builder);
-        }
 
         if (uri.hasPassword()) {
             if (!uri.isUseSecureConnection()) {
                 throw new RuntimeException("TLS/SSL is required for authentication with username and password");
             }
-            builder.addInterceptor(basicAuth(uri.getRequiredUser(), uri.getPassword().orElseThrow(() -> new RuntimeException("Password expected"))));
+            builder.addNetworkInterceptor(basicAuth(uri.getRequiredUser(), uri.getPassword().orElseThrow(() -> new RuntimeException("Password expected"))));
+        }
+
+        if (uri.getKerberosRemoteServiceName().isPresent()) {
+            if (!uri.isUseSecureConnection()) {
+                throw new RuntimeException("TLS/SSL is required for Kerberos authentication");
+            }
+            setupKerberos(
+                    builder,
+                    uri.getRequiredKerberosServicePrincipalPattern(),
+                    uri.getRequiredKerberosRemoteServiceName(),
+                    uri.getRequiredKerberosUseCanonicalHostname(),
+                    uri.getKerberosPrincipal(),
+                    uri.getKerberosConfigPath(),
+                    uri.getKerberosKeytabPath(),
+                    Optional.ofNullable(uri.getKerberosCredentialCachePath()
+                            .orElseGet(() -> defaultCredentialCachePath().map(File::new).orElse(null))),
+                    uri.getKerberosDelegation(),
+                    uri.getKerberosConstrainedDelegation());
+        }
+
+        if (uri.getAccessToken().isPresent()) {
+            if (!uri.isUseSecureConnection()) {
+                throw new RuntimeException("TLS/SSL required for authentication using an access token");
+            }
+            // Pre-seed the token so the interceptor injects it on the first request; the
+            // authenticator transparently refreshes it via x_token_server on expiry.
+            KnownToken knownToken = KnownToken.withInitialToken(uri.getAccessToken().get());
+            ExternalAuthenticator externalAuthenticator = new ExternalAuthenticator(
+                    redirectUri -> {},
+                    new HttpTokenPoller(builder.build()),
+                    knownToken,
+                    Duration.ofMinutes(2));
+            builder.addNetworkInterceptor(externalAuthenticator);
+            builder.authenticator((route, response) -> {
+                // If x_redirect_server is present the server requires a full browser-based
+                // OAuth2 flow, which cannot be done with a static access token. Return null
+                // so OkHttp surfaces the 401 as an authentication failure.
+                boolean requiresRedirect = response.challenges().stream()
+                        .filter(challenge -> challenge.scheme().equalsIgnoreCase("Bearer"))
+                        .anyMatch(challenge -> challenge.authParams().containsKey(REDIRECT_URI_FIELD));
+                if (requiresRedirect) {
+                    return null;
+                }
+                return externalAuthenticator.authenticate(route, response);
+            });
+        }
+
+        if (!uri.getExtraHeaders().isEmpty()) {
+            builder.addNetworkInterceptor(extraHeaders(uri.getExtraHeaders()));
+        }
+
+        if (uri.isExternalAuthenticationEnabled()) {
+            if (!uri.isUseSecureConnection()) {
+                throw new RuntimeException("TLS/SSL required for authentication using external authorization");
+            }
+
+            // create HTTP client that shares the same settings, but without the external authenticator
+            TokenPoller poller = new HttpTokenPoller(builder.build());
+
+            Duration timeout = uri.getExternalAuthenticationTimeout()
+                    .map(value -> Duration.ofMillis(value.toMillis()))
+                    .orElse(Duration.ofMinutes(2));
+
+            KnownTokenCache knownTokenCache = uri.getExternalAuthenticationTokenCache();
+            Optional<RedirectHandler> configuredHandler = uri.getExternalRedirectStrategies()
+                    .map(CompositeRedirectHandler::new)
+                    .map(RedirectHandler.class::cast);
+
+            RedirectHandler redirectHandler = TrinoUri.getRedirectHandler()
+                    .orElseGet(() -> configuredHandler.orElseThrow(() -> new RuntimeException("External authentication redirect handler is not configured")));
+
+            ExternalAuthenticator authenticator = new ExternalAuthenticator(
+                    redirectHandler, poller, knownTokenCache.create(), timeout);
+
+            builder.authenticator(authenticator);
+            builder.addNetworkInterceptor(authenticator);
+        }
+
+        return builder;
+    }
+
+    public static OkHttpClient.Builder unauthenticatedClientBuilder(TrinoUri uri, String userAgent)
+    {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder();
+        setupUserAgent(builder, userAgent);
+        setupSocksProxy(builder, uri.getSocksProxy());
+        setupHttpProxy(builder, uri.getHttpProxy());
+        setupTimeouts(builder, toIntExact(uri.getTimeout().toMillis()), TimeUnit.MILLISECONDS);
+        setupHttpLogging(builder, uri.getHttpLoggingLevel());
+
+        if (uri.isLocalRedirectDisallowed()) {
+            builder.addNetworkInterceptor(new DisallowLocalRedirectInterceptor());
         }
 
         if (uri.isUseSecureConnection()) {
@@ -94,71 +183,12 @@ public class HttpClientFactory
                 setupInsecureSsl(builder);
             }
         }
-
-        if (uri.getKerberosRemoteServiceName().isPresent()) {
-            if (!uri.isUseSecureConnection()) {
-                throw new RuntimeException("TLS/SSL is required for Kerberos authentication");
-            }
-            setupKerberos(
-                    builder,
-                    uri.getRequiredKerberosServicePrincipalPattern(),
-                    uri.getRequiredKerberosRemoteServiceName(),
-                    uri.getRequiredKerberosUseCanonicalHostname(),
-                    uri.getKerberosPrincipal(),
-                    uri.getKerberosConfigPath(),
-                    uri.getKerberosKeytabPath(),
-                    Optional.ofNullable(uri.getKerberosCredentialCachePath()
-                            .orElseGet(() -> defaultCredentialCachePath().map(File::new).orElse(null))),
-                    uri.getKerberosDelegation(),
-                    uri.getKerberosConstrainedDelegation());
-        }
-
-        if (uri.getAccessToken().isPresent()) {
-            if (!uri.isUseSecureConnection()) {
-                throw new RuntimeException("TLS/SSL required for authentication using an access token");
-            }
-            builder.addInterceptor(tokenAuth(uri.getAccessToken().get()));
-        }
-
-        if (uri.isExternalAuthenticationEnabled()) {
-            if (!uri.isUseSecureConnection()) {
-                throw new RuntimeException("TLS/SSL required for authentication using external authorization");
-            }
-
-            // create HTTP client that shares the same settings, but without the external authenticator
-            TokenPoller poller = new HttpTokenPoller(builder.build());
-
-            Duration timeout = uri.getExternalAuthenticationTimeout()
-                    .map(value -> Duration.ofMillis(value.toMillis()))
-                    .orElse(Duration.ofMinutes(2));
-
-            KnownTokenCache knownTokenCache = uri.getExternalAuthenticationTokenCache();
-            Optional<RedirectHandler> configuredHandler = uri.getExternalRedirectStrategies()
-                    .map(CompositeRedirectHandler::new)
-                    .map(RedirectHandler.class::cast);
-
-            RedirectHandler redirectHandler = TrinoUri.getRedirectHandler()
-                    .orElseGet(() -> configuredHandler.orElseThrow(() -> new RuntimeException("External authentication redirect handler is not configured")));
-
-            ExternalAuthenticator authenticator = new ExternalAuthenticator(
-                    redirectHandler, poller, knownTokenCache.create(), timeout);
-
-            builder.authenticator(authenticator);
-            builder.addInterceptor(authenticator);
+        else {
+            setupInsecureSsl(builder);
         }
 
         uri.getDnsResolver().ifPresent(resolverClass -> builder.dns(instantiateDnsResolver(resolverClass, uri.getDnsResolverContext())::lookup));
-        return builder;
-    }
 
-    public static OkHttpClient.Builder unauthenticatedClientBuilder(TrinoUri uri, String userAgent)
-    {
-        OkHttpClient.Builder builder = new OkHttpClient.Builder();
-        setupUserAgent(builder, userAgent);
-        setupSocksProxy(builder, uri.getSocksProxy());
-        setupHttpProxy(builder, uri.getHttpProxy());
-        setupTimeouts(builder, toIntExact(uri.getTimeout().toMillis()), TimeUnit.MILLISECONDS);
-        setupHttpLogging(builder, uri.getHttpLoggingLevel());
         return builder;
     }
 

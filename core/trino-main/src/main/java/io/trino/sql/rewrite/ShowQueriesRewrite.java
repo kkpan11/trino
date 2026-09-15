@@ -13,13 +13,13 @@
  */
 package io.trino.sql.rewrite;
 
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.connector.CatalogHandle;
 import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.CatalogInfo;
@@ -38,8 +38,8 @@ import io.trino.metadata.TablePropertyManager;
 import io.trino.metadata.ViewDefinition;
 import io.trino.metadata.ViewPropertyManager;
 import io.trino.security.AccessControl;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.CatalogSchemaName;
+import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.function.FunctionKind;
@@ -51,6 +51,7 @@ import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeTemplate;
 import io.trino.sql.SqlEnvironmentConfig;
 import io.trino.sql.analyzer.AnalyzerFactory;
 import io.trino.sql.parser.ParsingException;
@@ -61,6 +62,7 @@ import io.trino.sql.tree.BooleanLiteral;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.ColumnDefinition;
 import io.trino.sql.tree.CreateMaterializedView;
+import io.trino.sql.tree.CreateMaterializedView.WhenStaleBehavior;
 import io.trino.sql.tree.CreateSchema;
 import io.trino.sql.tree.CreateTable;
 import io.trino.sql.tree.CreateView;
@@ -74,6 +76,7 @@ import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NodeRef;
 import io.trino.sql.tree.NullLiteral;
 import io.trino.sql.tree.Parameter;
+import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.PrincipalSpecification;
 import io.trino.sql.tree.Property;
 import io.trino.sql.tree.QualifiedName;
@@ -82,6 +85,7 @@ import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.Relation;
 import io.trino.sql.tree.Row;
 import io.trino.sql.tree.SelectItem;
+import io.trino.sql.tree.ShowBranches;
 import io.trino.sql.tree.ShowCatalogs;
 import io.trino.sql.tree.ShowColumns;
 import io.trino.sql.tree.ShowCreate;
@@ -98,7 +102,9 @@ import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.TableElement;
 import io.trino.sql.tree.Values;
+import io.trino.util.DateTimeUtils;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -113,7 +119,7 @@ import static io.trino.connector.informationschema.InformationSchemaTable.TABLES
 import static io.trino.connector.informationschema.InformationSchemaTable.TABLE_PRIVILEGES;
 import static io.trino.execution.CreateFunctionTask.defaultFunctionSchema;
 import static io.trino.execution.CreateFunctionTask.qualifiedFunctionName;
-import static io.trino.metadata.MetadataListing.listCatalogNames;
+import static io.trino.metadata.MetadataListing.listAllCatalogNames;
 import static io.trino.metadata.MetadataListing.listCatalogs;
 import static io.trino.metadata.MetadataListing.listSchemas;
 import static io.trino.metadata.MetadataUtil.createCatalogSchemaName;
@@ -123,6 +129,7 @@ import static io.trino.metadata.MetadataUtil.processRoleCommandCatalog;
 import static io.trino.metadata.PropertyUtil.toSqlProperties;
 import static io.trino.spi.StandardErrorCode.CATALOG_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_PROPERTY;
+import static io.trino.spi.StandardErrorCode.INVALID_DEFAULT_COLUMN_VALUE;
 import static io.trino.spi.StandardErrorCode.INVALID_MATERIALIZED_VIEW_PROPERTY;
 import static io.trino.spi.StandardErrorCode.INVALID_SCHEMA_PROPERTY;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
@@ -153,7 +160,7 @@ import static io.trino.sql.QueryUtil.singleValueQuery;
 import static io.trino.sql.QueryUtil.table;
 import static io.trino.sql.SqlFormatter.formatSql;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
+import static io.trino.sql.analyzer.TypeDescriptorTranslator.toSqlType;
 import static io.trino.sql.tree.BooleanLiteral.FALSE_LITERAL;
 import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.sql.tree.CreateView.Security.DEFINER;
@@ -162,6 +169,7 @@ import static io.trino.sql.tree.LogicalExpression.and;
 import static io.trino.sql.tree.SaveMode.FAIL;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
 public final class ShowQueriesRewrite
@@ -210,7 +218,8 @@ public final class ShowQueriesRewrite
             Statement node,
             List<Expression> parameters,
             Map<NodeRef<Parameter>, Expression> parameterLookup,
-            WarningCollector warningCollector, PlanOptimizersStatsCollector planOptimizersStatsCollector)
+            WarningCollector warningCollector,
+            PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
         Visitor visitor = new Visitor(session);
         return (Statement) visitor.process(node, null);
@@ -230,14 +239,14 @@ public final class ShowQueriesRewrite
         protected Node visitExplain(Explain node, Void context)
         {
             Statement statement = (Statement) process(node.getStatement(), null);
-            return new Explain(node.getLocation(), statement, node.getOptions());
+            return new Explain(node.getLocation().orElseThrow(), statement, node.getOptions());
         }
 
         @Override
         protected Node visitExplainAnalyze(ExplainAnalyze node, Void context)
         {
             Statement statement = (Statement) process(node.getStatement(), null);
-            return new ExplainAnalyze(node.getLocation(), statement, node.isVerbose());
+            return new ExplainAnalyze(node.getLocation().orElseThrow(), statement, node.isVerbose());
         }
 
         @Override
@@ -259,10 +268,7 @@ public final class ShowQueriesRewrite
 
             Optional<String> likePattern = showTables.getLikePattern();
             if (likePattern.isPresent()) {
-                Expression likePredicate = new LikePredicate(
-                        identifier("table_name"),
-                        new StringLiteral(likePattern.get()),
-                        showTables.getEscape().map(StringLiteral::new));
+                Expression likePredicate = new Predicated(null, identifier("table_name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), showTables.getEscape().map(StringLiteral::new)));
                 predicate = logicalAnd(predicate, likePredicate);
             }
 
@@ -402,10 +408,7 @@ public final class ShowQueriesRewrite
             Optional<Expression> predicate = Optional.empty();
             Optional<String> likePattern = node.getLikePattern();
             if (likePattern.isPresent()) {
-                predicate = Optional.of(new LikePredicate(
-                        identifier("schema_name"),
-                        new StringLiteral(likePattern.get()),
-                        node.getEscape().map(StringLiteral::new)));
+                predicate = Optional.of(new Predicated(null, identifier("schema_name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), node.getEscape().map(StringLiteral::new))));
             }
 
             return simpleQuery(
@@ -418,7 +421,7 @@ public final class ShowQueriesRewrite
         @Override
         protected Node visitShowCatalogs(ShowCatalogs node, Void context)
         {
-            List<Expression> rows = listCatalogNames(session, metadata, accessControl, Domain.all(VARCHAR)).stream()
+            List<Expression> rows = listAllCatalogNames(session, metadata, accessControl, Domain.all(VARCHAR)).stream()
                     .map(name -> row(new StringLiteral(name)))
                     .collect(toImmutableList());
 
@@ -428,10 +431,7 @@ public final class ShowQueriesRewrite
                 predicate = Optional.of(BooleanLiteral.FALSE_LITERAL);
             }
             else if (node.getLikePattern().isPresent()) {
-                predicate = Optional.of(new LikePredicate(
-                        identifier("catalog"),
-                        new StringLiteral(node.getLikePattern().get()),
-                        node.getEscape().map(StringLiteral::new)));
+                predicate = Optional.of(new Predicated(null, identifier("catalog"), new LikePredicate(null, false, new StringLiteral(node.getLikePattern().get()), node.getEscape().map(StringLiteral::new))));
             }
 
             return simpleQuery(
@@ -492,10 +492,7 @@ public final class ShowQueriesRewrite
                     equal(identifier("table_name"), new StringLiteral(targetTableName.objectName())));
             Optional<String> likePattern = showColumns.getLikePattern();
             if (likePattern.isPresent()) {
-                Expression likePredicate = new LikePredicate(
-                        identifier("column_name"),
-                        new StringLiteral(likePattern.get()),
-                        showColumns.getEscape().map(StringLiteral::new));
+                Expression likePredicate = new Predicated(null, identifier("column_name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), showColumns.getEscape().map(StringLiteral::new)));
                 predicate = logicalAnd(predicate, likePredicate);
             }
 
@@ -558,10 +555,20 @@ public final class ShowQueriesRewrite
                     query,
                     false,
                     false,
-                    Optional.empty(), // TODO support GRACE PERIOD
+                    viewDefinition.get().getGracePeriod()
+                            .map(DateTimeUtils::formatDayTimeInterval),
+                    Optional.of(toSqlWhenStaleBehavior(viewDefinition.get().getWhenStaleBehavior())),
                     propertyNodes,
                     viewDefinition.get().getComment())).trim();
             return singleValueQuery("Create Materialized View", sql);
+        }
+
+        private static WhenStaleBehavior toSqlWhenStaleBehavior(ConnectorMaterializedViewDefinition.WhenStaleBehavior whenStale)
+        {
+            return switch (whenStale) {
+                case INLINE -> WhenStaleBehavior.INLINE;
+                case FAIL -> WhenStaleBehavior.FAIL;
+            };
         }
 
         private Query showCreateView(ShowCreate node)
@@ -595,6 +602,7 @@ public final class ShowQueriesRewrite
             List<Property> propertyNodes = toSqlProperties("view " + objectName, INVALID_VIEW_PROPERTY, properties, allViewProperties);
             CreateView.Security security = viewDefinition.get().isRunAsInvoker() ? INVOKER : DEFINER;
             String sql = formatSql(new CreateView(
+                    node.getLocation().orElseThrow(),
                     QualifiedName.of(ImmutableList.of(catalogName, schemaName, tableName)),
                     query,
                     false,
@@ -638,9 +646,10 @@ public final class ShowQueriesRewrite
                         return new ColumnDefinition(
                                 QualifiedName.of(column.getName()),
                                 toSqlType(column.getType()),
+                                column.getDefaultValue().map(value -> parseDefaultColumnValueExpression(value, objectName, node)),
                                 column.isNullable(),
                                 propertyNodes,
-                                Optional.ofNullable(column.getComment()));
+                                column.getComment());
                     })
                     .collect(toImmutableList());
 
@@ -649,12 +658,23 @@ public final class ShowQueriesRewrite
             List<Property> propertyNodes = toSqlProperties("table " + targetTableName, INVALID_TABLE_PROPERTY, properties, allTableProperties);
 
             CreateTable createTable = new CreateTable(
+                    node.getLocation().orElseThrow(),
                     QualifiedName.of(targetTableName.catalogName(), targetTableName.schemaName(), targetTableName.objectName()),
                     columns,
                     FAIL,
                     propertyNodes,
                     connectorTableMetadata.getComment());
             return singleValueQuery("Create Table", formatSql(createTable).trim());
+        }
+
+        private Expression parseDefaultColumnValueExpression(String expression, QualifiedObjectName name, Node node)
+        {
+            try {
+                return parser.createExpression(expression);
+            }
+            catch (ParsingException e) {
+                throw semanticException(INVALID_DEFAULT_COLUMN_VALUE, node, e, "Failed parsing default column value '%s': %s", name, e.getMessage());
+            }
         }
 
         private Query showCreateSchema(ShowCreate node)
@@ -741,10 +761,7 @@ public final class ShowQueriesRewrite
                             .collect(toImmutableList())),
                     aliased(new Values(rows), "functions", ImmutableList.copyOf(columns.keySet())),
                     node.getLikePattern()
-                            .map(like -> new LikePredicate(
-                                    identifier("function_name"),
-                                    new StringLiteral(like),
-                                    node.getEscape().map(StringLiteral::new)))
+                            .map(like -> new Predicated(null, identifier("function_name"), new LikePredicate(null, false, new StringLiteral(like), node.getEscape().map(StringLiteral::new))))
                             .map(Expression.class::cast)
                             .orElse(TRUE_LITERAL),
                     ordering(
@@ -761,8 +778,10 @@ public final class ShowQueriesRewrite
         {
             return row(
                     new StringLiteral(alias),
-                    new StringLiteral(function.getSignature().getReturnType().toString()),
-                    new StringLiteral(Joiner.on(", ").join(function.getSignature().getArgumentTypes())),
+                    new StringLiteral(function.getSignature().getReturnType().render()),
+                    new StringLiteral(function.getSignature().getArgumentTypes().stream()
+                            .map(TypeTemplate::render)
+                            .collect(joining(", "))),
                     new StringLiteral(getFunctionType(function)),
                     function.isDeterministic() ? TRUE_LITERAL : FALSE_LITERAL,
                     new StringLiteral(nullToEmpty(function.getDescription())));
@@ -800,9 +819,47 @@ public final class ShowQueriesRewrite
                 case AGGREGATE -> "aggregate";
                 case WINDOW -> "window";
                 case SCALAR -> "scalar";
-                // TODO https://github.com/trinodb/trino/issues/12550
-                case TABLE -> throw new IllegalArgumentException("Unexpected function kind: " + kind);
+                case TABLE -> "table";
             };
+        }
+
+        @Override
+        protected Node visitShowBranches(ShowBranches showBranches, Void context)
+        {
+            QualifiedObjectName tableName = createQualifiedObjectName(session, showBranches, showBranches.getTableName());
+            accessControl.checkCanShowBranches(session.toSecurityContext(), tableName);
+            getRequiredCatalogHandle(metadata, session, showBranches, tableName.catalogName());
+            if (!metadata.schemaExists(session, new CatalogSchemaName(tableName.catalogName(), tableName.schemaName()))) {
+                throw semanticException(SCHEMA_NOT_FOUND, showBranches, "Schema '%s' does not exist", tableName.schemaName());
+            }
+            if (metadata.isMaterializedView(session, tableName)) {
+                throw semanticException(NOT_SUPPORTED, showBranches, "Relation '%s' is a materialized view, not a table", tableName);
+            }
+            if (metadata.isView(session, tableName)) {
+                throw semanticException(NOT_SUPPORTED, showBranches, "Relation '%s' is a view, not a table", tableName);
+            }
+            Optional<TableHandle> tableHandle = metadata.getRedirectionAwareTableHandle(session, tableName).tableHandle();
+            if (tableHandle.isEmpty()) {
+                throw semanticException(TABLE_NOT_FOUND, showBranches, "Table '%s' does not exist", tableName);
+            }
+
+            String columnName = "Branch";
+            List<Expression> rows = new ArrayList<>();
+            for (String branch : metadata.listBranches(session, tableName)) {
+                rows.add(row(new StringLiteral(branch)));
+            }
+
+            if (rows.isEmpty()) {
+                return emptyQuery(ImmutableList.of(columnName), ImmutableList.of(VARCHAR));
+            }
+
+            return simpleQuery(
+                    selectList(
+                            aliasedName("branch_name", "Branch")),
+                    aliased(
+                            new Values(ImmutableList.copyOf(rows)),
+                            "branches",
+                            ImmutableList.of("branch_name")));
         }
 
         @Override
@@ -833,10 +890,7 @@ public final class ShowQueriesRewrite
             Expression predicate = identifier("include");
             Optional<String> likePattern = node.getLikePattern();
             if (likePattern.isPresent()) {
-                predicate = and(predicate, new LikePredicate(
-                        identifier("name"),
-                        new StringLiteral(likePattern.get()),
-                        node.getEscape().map(StringLiteral::new)));
+                predicate = and(predicate, new Predicated(null, identifier("name"), new LikePredicate(null, false, new StringLiteral(likePattern.get()), node.getEscape().map(StringLiteral::new))));
             }
 
             return simpleQuery(

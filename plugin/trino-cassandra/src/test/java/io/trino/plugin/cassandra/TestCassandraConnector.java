@@ -16,6 +16,7 @@ package io.trino.plugin.cassandra;
 import com.datastax.oss.protocol.internal.util.Bytes;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.net.InetAddresses;
 import com.google.common.primitives.Shorts;
 import com.google.common.primitives.SignedBytes;
@@ -34,8 +35,9 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.DynamicFilterSnapshot;
 import io.trino.spi.connector.RecordCursor;
+import io.trino.spi.connector.RecordSet;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
@@ -63,7 +65,6 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
-import static io.airlift.testing.Assertions.assertInstanceOf;
 import static io.trino.plugin.cassandra.CassandraTestingUtils.TABLE_ALL_TYPES;
 import static io.trino.plugin.cassandra.CassandraTestingUtils.TABLE_DELETE_DATA;
 import static io.trino.plugin.cassandra.CassandraTestingUtils.TABLE_TUPLE_TYPE;
@@ -89,6 +90,7 @@ import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Fail.fail;
+import static org.assertj.core.api.InstanceOfAssertFactories.type;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 @TestInstance(PER_CLASS)
@@ -121,22 +123,24 @@ public class TestCassandraConnector
 
         CassandraConnectorFactory connectorFactory = new CassandraConnectorFactory();
 
-        Connector connector = connectorFactory.create("test", ImmutableMap.of(
-                "cassandra.contact-points", server.getHost(),
-                "cassandra.load-policy.use-dc-aware", "true",
-                "cassandra.load-policy.dc-aware.local-dc", "datacenter1",
-                "cassandra.native-protocol-port", Integer.toString(server.getPort()),
-                "bootstrap.quiet", "true"),
+        Connector connector = connectorFactory.create(
+                "test",
+                ImmutableMap.of(
+                        "cassandra.contact-points", server.getHost(),
+                        "cassandra.load-policy.use-dc-aware", "true",
+                        "cassandra.load-policy.dc-aware.local-dc", "datacenter1",
+                        "cassandra.native-protocol-port", Integer.toString(server.getPort()),
+                        "bootstrap.quiet", "true"),
                 new TestingConnectorContext());
 
         metadata = connector.getMetadata(SESSION, CassandraTransactionHandle.INSTANCE);
-        assertInstanceOf(metadata, CassandraMetadata.class);
+        assertThat(metadata).isInstanceOf(CassandraMetadata.class);
 
         splitManager = connector.getSplitManager();
-        assertInstanceOf(splitManager, CassandraSplitManager.class);
+        assertThat(splitManager).isInstanceOf(CassandraSplitManager.class);
 
         recordSetProvider = connector.getRecordSetProvider();
-        assertInstanceOf(recordSetProvider, CassandraRecordSetProvider.class);
+        assertThat(recordSetProvider).isInstanceOf(CassandraRecordSetProvider.class);
 
         database = keyspace;
         table = new SchemaTableName(database, TABLE_ALL_TYPES.toLowerCase(ENGLISH));
@@ -181,6 +185,38 @@ public class TestCassandraConnector
     }
 
     @Test
+    public void testGetRecordsEmptyWhereClause()
+    {
+        ConnectorTransactionHandle transaction = CassandraTransactionHandle.INSTANCE;
+        ConnectorTableHandle tableHandle = getTableHandle(table);
+        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(
+                transaction,
+                SESSION,
+                tableHandle,
+                ImmutableSet.of(),
+                Constraint.alwaysTrue()));
+        CassandraSplit cassandraSplit = assertThat(splits)
+                .singleElement()
+                .asInstanceOf(type(CassandraSplit.class)).actual();
+        assertThat(cassandraSplit.partitionId()).isEqualTo(CassandraPartition.UNPARTITIONED_ID);
+        CassandraSplit syntheticSplit = new CassandraSplit(
+                CassandraPartition.UNPARTITIONED_ID,
+                null,
+                cassandraSplit.addresses());
+        RecordSet recordSet = recordSetProvider.getRecordSet(
+                transaction,
+                SESSION,
+                syntheticSplit,
+                tableHandle,
+                ImmutableList.copyOf(metadata.getColumnHandles(SESSION, tableHandle).values()));
+        try (RecordCursor cursor = recordSet.cursor()) {
+            while (cursor.advanceNextPosition()) {
+                // Consume the cursor to ensure CQL works.
+            }
+        }
+    }
+
+    @Test
     public void testGetRecords()
     {
         ConnectorTableHandle tableHandle = getTableHandle(table);
@@ -192,7 +228,7 @@ public class TestCassandraConnector
 
         tableHandle = metadata.applyFilter(SESSION, tableHandle, Constraint.alwaysTrue()).get().getHandle();
 
-        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, tableHandle, DynamicFilter.EMPTY, Constraint.alwaysTrue()));
+        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, tableHandle, ImmutableSet.of(), Constraint.alwaysTrue()));
 
         long rowNumber = 0;
         for (ConnectorSplit split : splits) {
@@ -211,7 +247,7 @@ public class TestCassandraConnector
                     rowNumber++;
 
                     String keyValue = cursor.getSlice(columnIndex.get("key")).toStringUtf8();
-                    assertThat(keyValue.startsWith("key ")).isTrue();
+                    assertThat(keyValue).startsWith("key ");
                     int rowId = Integer.parseInt(keyValue.substring(4));
 
                     assertThat(keyValue).isEqualTo("key " + rowId);
@@ -264,7 +300,7 @@ public class TestCassandraConnector
 
         ConnectorTransactionHandle transaction = CassandraTransactionHandle.INSTANCE;
 
-        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, tableHandle, DynamicFilter.EMPTY, Constraint.alwaysTrue()));
+        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, tableHandle, ImmutableSet.of(), Constraint.alwaysTrue()));
 
         long rowNumber = 0;
         for (ConnectorSplit split : splits) {
@@ -317,7 +353,7 @@ public class TestCassandraConnector
 
         tableHandle = metadata.applyFilter(SESSION, tableHandle, Constraint.alwaysTrue()).get().getHandle();
 
-        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, tableHandle, DynamicFilter.EMPTY, Constraint.alwaysTrue()));
+        List<ConnectorSplit> splits = getAllSplits(splitManager.getSplits(transaction, SESSION, tableHandle, ImmutableSet.of(), Constraint.alwaysTrue()));
 
         long rowNumber = 0;
         for (ConnectorSplit split : splits) {
@@ -348,9 +384,9 @@ public class TestCassandraConnector
                     assertThat(TIMESTAMP_MILLIS.getLong(value.getRawFieldBlock(5), valueRawIndex)).isEqualTo(117964800000L);
                     assertThat(VARCHAR.getSlice(value.getRawFieldBlock(6), valueRawIndex).toStringUtf8()).isEqualTo("ansi");
                     assertThat(BOOLEAN.getBoolean(value.getRawFieldBlock(7), valueRawIndex)).isTrue();
-                    assertThat(DOUBLE.getDouble(value.getRawFieldBlock(8), valueRawIndex)).isEqualTo(99999999999999997748809823456034029568D);
+                    assertThat(DOUBLE.getDouble(value.getRawFieldBlock(8), valueRawIndex)).isEqualTo(99999999999999997748809823456034029568d);
                     assertThat(DOUBLE.getDouble(value.getRawFieldBlock(9), valueRawIndex)).isEqualTo(4.9407e-324);
-                    assertThat(REAL.getObjectValue(SESSION, value.getRawFieldBlock(10), valueRawIndex)).isEqualTo(1.4E-45f);
+                    assertThat(REAL.getObjectValue(value.getRawFieldBlock(10), valueRawIndex)).isEqualTo(1.4e-45f);
                     assertThat(InetAddresses.toAddrString(InetAddress.getByAddress(IpAddressType.IPADDRESS.getSlice(value.getRawFieldBlock(11), valueRawIndex).getBytes()))).isEqualTo("0.0.0.0");
                     assertThat(VARCHAR.getSlice(value.getRawFieldBlock(12), valueRawIndex).toStringUtf8()).isEqualTo("varchar");
                     assertThat(VARCHAR.getSlice(value.getRawFieldBlock(13), valueRawIndex).toStringUtf8()).isEqualTo("-9223372036854775808");
@@ -443,12 +479,12 @@ public class TestCassandraConnector
     {
         ImmutableList.Builder<ConnectorSplit> splits = ImmutableList.builder();
         while (!splitSource.isFinished()) {
-            splits.addAll(getFutureValue(splitSource.getNextBatch(1000)).getSplits());
+            splits.addAll(getFutureValue(splitSource.getNextBatch(1000, new DynamicFilterSnapshot(TupleDomain.all(), true))));
         }
         return splits.build();
     }
 
-    private static ImmutableMap<String, Integer> indexColumns(List<ColumnHandle> columnHandles)
+    private static Map<String, Integer> indexColumns(List<ColumnHandle> columnHandles)
     {
         ImmutableMap.Builder<String, Integer> index = ImmutableMap.builder();
         int i = 0;

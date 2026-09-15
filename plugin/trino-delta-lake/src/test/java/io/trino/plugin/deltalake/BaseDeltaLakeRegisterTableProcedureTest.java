@@ -17,7 +17,7 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.metastore.HiveMetastore;
-import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
+import io.trino.metastore.HiveMetastoreFactory;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
@@ -29,6 +29,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Verify.verify;
+import static io.trino.plugin.deltalake.TestingDeltaLakeUtils.getConnectorService;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogDir;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogJsonEntryPath;
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -180,7 +181,7 @@ public abstract class BaseDeltaLakeRegisterTableProcedureTest
 
         // Delete files under transaction log directory and put an invalid log file to verify register_table call fails
         QueryRunner queryRunner = getQueryRunner();
-        TrinoFileSystem fileSystem = TestingDeltaLakeUtils.getConnectorService(queryRunner, TrinoFileSystemFactory.class)
+        TrinoFileSystem fileSystem = getConnectorService(queryRunner, TrinoFileSystemFactory.class)
                 .create(ConnectorIdentity.ofUser("test"));
         fileSystem.deleteDirectory(Location.of(tableLocation));
         fileSystem.newOutputFile(getTransactionLogJsonEntryPath(getTransactionLogDir(tableLocation), 0))
@@ -209,7 +210,7 @@ public abstract class BaseDeltaLakeRegisterTableProcedureTest
 
         // Delete files under transaction log directory to verify register_table call fails
         QueryRunner queryRunner = getQueryRunner();
-        TrinoFileSystem fileSystem = TestingDeltaLakeUtils.getConnectorService(queryRunner, TrinoFileSystemFactory.class)
+        TrinoFileSystem fileSystem = getConnectorService(queryRunner, TrinoFileSystemFactory.class)
                 .create(ConnectorIdentity.ofUser("test"));
         fileSystem.deleteDirectory(Location.of(tableLocation));
 
@@ -224,7 +225,7 @@ public abstract class BaseDeltaLakeRegisterTableProcedureTest
     public void testRegisterTableWithNonExistingTableLocation()
     {
         String tableName = "test_register_table_with_non_existing_table_location_" + randomNameSuffix();
-        String tableLocation = "/test/delta-lake/hive/warehouse/orders_5-581fad8517934af6be1857a903559d44";
+        String tableLocation = nonExistingTableLocation();
         assertQueryFails(format("CALL system.register_table(CURRENT_SCHEMA, '%s', '%s')", tableName, tableLocation),
                 ".*No transaction log found in location (.*).*");
     }
@@ -258,7 +259,7 @@ public abstract class BaseDeltaLakeRegisterTableProcedureTest
         String tableName = "test_register_table_with_invalid_uri_scheme_" + randomNameSuffix();
         String tableLocation = "invalid://hadoop-master:9000/test/delta-lake/hive/orders_5-581fad8517934af6be1857a903559d44";
         assertQueryFails(format("CALL system.register_table(CURRENT_SCHEMA, '%s', '%s')", tableName, tableLocation),
-                ".*Failed checking table location (.*)");
+                invalidUriSchemeError());
     }
 
     @Test
@@ -272,7 +273,8 @@ public abstract class BaseDeltaLakeRegisterTableProcedureTest
                 ".*'TABLE_LOCATION' is missing.*");
         assertQueryFails(format("CALL system.register_table('%s')", schema),
                 ".*'TABLE_NAME' is missing.*");
-        assertQueryFails("CALL system.register_table()",
+        assertQueryFails(
+                "CALL system.register_table()",
                 ".*'SCHEMA_NAME' is missing.*");
 
         assertQueryFails(format("CALL system.register_table(NULL, '%s', '%s')", tableName, tableLocation),
@@ -319,16 +321,19 @@ public abstract class BaseDeltaLakeRegisterTableProcedureTest
         throw new IllegalStateException("Location not found in SHOW CREATE TABLE result");
     }
 
-    private String getTableComment(String tableName)
-    {
-        return (String) computeScalar(format(
-                "SELECT comment FROM system.metadata.table_comments WHERE catalog_name = CURRENT_CATALOG AND schema_name = CURRENT_SCHEMA AND table_name = '%s'",
-                tableName));
-    }
-
     protected HiveMetastore metastore()
     {
-        return TestingDeltaLakeUtils.getConnectorService(getQueryRunner(), HiveMetastoreFactory.class)
+        return getConnectorService(getQueryRunner(), HiveMetastoreFactory.class)
                 .createMetastore(Optional.empty());
+    }
+
+    protected String nonExistingTableLocation()
+    {
+        return "/test/delta-lake/hive/warehouse/orders_5-581fad8517934af6be1857a903559d44";
+    }
+
+    protected String invalidUriSchemeError()
+    {
+        return ".*Failed checking table location (.*)";
     }
 }

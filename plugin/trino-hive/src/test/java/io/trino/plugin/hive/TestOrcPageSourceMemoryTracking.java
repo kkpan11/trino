@@ -22,36 +22,37 @@ import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
 import io.trino.hive.orc.NullMemoryManager;
 import io.trino.hive.orc.impl.WriterImpl;
-import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Split;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.metastore.HiveType;
 import io.trino.operator.DriverContext;
 import io.trino.operator.ScanFilterAndProjectOperator.ScanFilterAndProjectOperatorFactory;
 import io.trino.operator.SourceOperator;
 import io.trino.operator.SourceOperatorFactory;
 import io.trino.operator.TableScanOperator.TableScanOperatorFactory;
-import io.trino.operator.project.CursorProcessor;
 import io.trino.operator.project.PageProcessor;
 import io.trino.orc.OrcReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.hive.orc.OrcPageSourceFactory;
 import io.trino.plugin.hive.orc.OrcReaderConfig;
 import io.trino.plugin.hive.orc.OrcWriterConfig;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.Page;
-import io.trino.spi.block.Block;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
-import io.trino.sql.gen.columnar.ColumnarFilterCompiler;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
+import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.plan.PlanNodeId;
-import io.trino.sql.relational.RowExpression;
 import io.trino.testing.TestingConnectorSession;
 import io.trino.testing.TestingSplit;
 import org.apache.hadoop.conf.Configuration;
@@ -60,7 +61,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.ql.exec.FileSinkOperator.RecordWriter;
 import org.apache.hadoop.hive.ql.io.orc.OrcFile;
 import org.apache.hadoop.hive.ql.io.orc.OrcFile.WriterOptions;
-import org.apache.hadoop.hive.ql.io.orc.OrcInputFormat;
 import org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat;
 import org.apache.hadoop.hive.ql.io.orc.OrcSerde;
 import org.apache.hadoop.hive.ql.io.orc.Writer;
@@ -80,6 +80,7 @@ import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
@@ -95,25 +96,24 @@ import java.util.stream.Collectors;
 
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.airlift.testing.Assertions.assertBetweenInclusive;
 import static io.airlift.units.DataSize.Unit.BYTE;
-import static io.trino.metadata.FunctionManager.createTestingFunctionManager;
+import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.hdfs.HdfsTestUtils.HDFS_FILE_SYSTEM_FACTORY;
+import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.orc.OrcReader.MAX_BATCH_SIZE;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.PARTITION_KEY;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static io.trino.plugin.hive.HiveColumnHandle.createBaseColumn;
 import static io.trino.plugin.hive.HivePageSourceProvider.ColumnMapping.buildColumnMappings;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_FILE_SYSTEM_FACTORY;
 import static io.trino.plugin.hive.HiveTestUtils.SESSION;
 import static io.trino.plugin.hive.acid.AcidTransaction.NO_ACID_TRANSACTION;
-import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeSignature;
+import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeDescriptor;
 import static io.trino.plugin.hive.util.SerdeConstants.LIST_COLUMNS;
 import static io.trino.plugin.hive.util.SerdeConstants.LIST_COLUMN_COMMENTS;
 import static io.trino.plugin.hive.util.SerdeConstants.LIST_COLUMN_TYPES;
-import static io.trino.plugin.hive.util.SerdeConstants.SERIALIZATION_LIB;
-import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
-import static io.trino.sql.relational.Expressions.field;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingHandles.TEST_CATALOG_HANDLE;
 import static io.trino.testing.TestingHandles.TEST_TABLE_HANDLE;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -124,7 +124,7 @@ import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.stream.Collectors.toList;
-import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.FILE_INPUT_FORMAT;
+import static java.util.stream.IntStream.range;
 import static org.apache.hadoop.hive.ql.io.orc.CompressionKind.ZLIB;
 import static org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory.getStandardStructObjectInspector;
 import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.javaStringObjectInspector;
@@ -142,11 +142,11 @@ public class TestOrcPageSourceMemoryTracking
     private static final Configuration CONFIGURATION = new Configuration(false);
     private static final int NUM_ROWS = 50000;
     private static final int STRIPE_ROWS = 20000;
-    private static final FunctionManager functionManager = createTestingFunctionManager();
-    private static final ExpressionCompiler EXPRESSION_COMPILER = new ExpressionCompiler(
-            functionManager,
-            new PageFunctionCompiler(functionManager, 0),
-            new ColumnarFilterCompiler(functionManager, 0));
+    // Page source memory usage is reported rounded up to this granule,
+    // keep in sync with MemoryContextReservationHandler.REPORT_GRANULARITY
+    private static final long MEMORY_REPORT_GRANULARITY = 1 << 20;
+    private static final TestingFunctionResolution FUNCTION_RESOLUTION = new TestingFunctionResolution();
+    private static final ExpressionCompiler EXPRESSION_COMPILER = FUNCTION_RESOLUTION.getExpressionCompiler();
     private static final ConnectorSession UNCACHED_SESSION = HiveTestUtils.getHiveSession(new HiveConfig(), new OrcReaderConfig().setTinyStripeThreshold(DataSize.of(0, BYTE)));
     private static final ConnectorSession CACHED_SESSION = SESSION;
 
@@ -163,7 +163,7 @@ public class TestOrcPageSourceMemoryTracking
     public void setUp()
             throws Exception
     {
-        tempFile = File.createTempFile("trino_test_orc_page_source_memory_tracking", "orc");
+        tempFile = Files.createTempFile("trino_test_orc_page_source_memory_tracking", "orc").toFile();
         verify(tempFile.delete());
         testPreparer = new TestPreparer(tempFile.getAbsolutePath());
     }
@@ -195,125 +195,138 @@ public class TestOrcPageSourceMemoryTracking
         // feel free to change them if they break in the future
 
         FileFormatDataSourceStats stats = new FileFormatDataSourceStats();
-        ConnectorPageSource pageSource = testPreparer.newPageSource(stats, useCache ? CACHED_SESSION : UNCACHED_SESSION);
+        var memoryContext = new MemoryContext()
+        {
+            private long currentBytes;
+
+            @Override
+            public void setBytes(long currentBytes)
+            {
+                this.currentBytes = currentBytes;
+            }
+        };
+        ConnectorPageSource pageSource = testPreparer.newPageSource(stats, useCache ? CACHED_SESSION : UNCACHED_SESSION, memoryContext);
 
         if (useCache) {
             // file is fully cached
-            assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize(), testPreparer.getFileSize() + 200);
+            assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
         }
         else {
-            assertThat(pageSource.getMemoryUsage()).isEqualTo(0);
+            assertThat(memoryContext.currentBytes).isEqualTo(0);
         }
 
         long memoryUsage = -1;
         int totalRows = 0;
         while (totalRows < 20000) {
             assertThat(pageSource.isFinished()).isFalse();
-            Page page = pageSource.getNextPage();
+            SourcePage page = pageSource.getNextSourcePage();
             assertThat(page).isNotNull();
-            Block block = page.getBlock(1);
 
             if (memoryUsage == -1) {
-                // Memory usage before lazy-loading the block
+                // Memory usage before data loading
                 if (useCache) {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize(), testPreparer.getFileSize() + 2000);
+                    assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), 0L, 1000L);
+                    assertThat(memoryContext.currentBytes).isIn(0L, MEMORY_REPORT_GRANULARITY);
                 }
-                createUnboundedVarcharType().getSlice(block, block.getPositionCount() - 1); // trigger loading for lazy block
-                memoryUsage = pageSource.getMemoryUsage();
-                // Memory usage after lazy-loading the actual block
+
+                // trigger data loading
+                VARCHAR.getSlice(page.getBlock(1), page.getPositionCount() - 1);
+
+                memoryUsage = memoryContext.currentBytes;
                 if (useCache) {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize() + 270_000, testPreparer.getFileSize() + 280_000);
+                    assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
-                    assertBetweenInclusive(memoryUsage, 460_000L, 469_999L);
+                    assertThat(memoryUsage).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
             }
-            else {
-                assertThat(pageSource.getMemoryUsage()).isEqualTo(memoryUsage);
-                createUnboundedVarcharType().getSlice(block, block.getPositionCount() - 1); // trigger loading for lazy block
-                assertThat(pageSource.getMemoryUsage()).isEqualTo(memoryUsage);
-            }
+
+            // verify memory size is not changing
+            assertThat(memoryContext.currentBytes).isEqualTo(memoryUsage);
+            VARCHAR.getSlice(page.getBlock(1), page.getPositionCount() - 1);
+            assertThat(memoryContext.currentBytes).isEqualTo(memoryUsage);
             totalRows += page.getPositionCount();
         }
 
         memoryUsage = -1;
         while (totalRows < 40000) {
             assertThat(pageSource.isFinished()).isFalse();
-            Page page = pageSource.getNextPage();
+            SourcePage page = pageSource.getNextSourcePage();
             assertThat(page).isNotNull();
-            Block block = page.getBlock(1);
 
             if (memoryUsage == -1) {
-                // Memory usage before lazy-loading the block
+                // Memory usage before data loading
                 if (useCache) {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize(), testPreparer.getFileSize() + 2000);
+                    assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), 0L, 1000L);
+                    assertThat(memoryContext.currentBytes).isIn(0L, MEMORY_REPORT_GRANULARITY);
                 }
-                createUnboundedVarcharType().getSlice(block, block.getPositionCount() - 1); // trigger loading for lazy block
-                memoryUsage = pageSource.getMemoryUsage();
-                // Memory usage after lazy-loading the actual block
+
+                // trigger data loading
+                VARCHAR.getSlice(page.getBlock(1), page.getPositionCount() - 1);
+
+                memoryUsage = memoryContext.currentBytes;
                 if (useCache) {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize() + 270_000, testPreparer.getFileSize() + 280_000);
+                    assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
-                    assertBetweenInclusive(memoryUsage, 460_000L, 469_999L);
+                    assertThat(memoryUsage).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
             }
-            else {
-                assertThat(pageSource.getMemoryUsage()).isEqualTo(memoryUsage);
-                createUnboundedVarcharType().getSlice(block, block.getPositionCount() - 1); // trigger loading for lazy block
-                assertThat(pageSource.getMemoryUsage()).isEqualTo(memoryUsage);
-            }
+
+            // verify memory size is not changing
+            assertThat(memoryContext.currentBytes).isEqualTo(memoryUsage);
+            VARCHAR.getSlice(page.getBlock(1), page.getPositionCount() - 1);
+            assertThat(memoryContext.currentBytes).isEqualTo(memoryUsage);
             totalRows += page.getPositionCount();
         }
 
         memoryUsage = -1;
         while (totalRows < NUM_ROWS) {
             assertThat(pageSource.isFinished()).isFalse();
-            Page page = pageSource.getNextPage();
+            SourcePage page = pageSource.getNextSourcePage();
             assertThat(page).isNotNull();
-            Block block = page.getBlock(1);
 
             if (memoryUsage == -1) {
                 // Memory usage before lazy-loading the block
                 if (useCache) {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize(), testPreparer.getFileSize() + 2000);
+                    assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), 0L, 1000L);
+                    assertThat(memoryContext.currentBytes).isIn(0L, MEMORY_REPORT_GRANULARITY);
                 }
-                createUnboundedVarcharType().getSlice(block, block.getPositionCount() - 1); // trigger loading for lazy block
-                memoryUsage = pageSource.getMemoryUsage();
-                // Memory usage after loading the actual block
+
+                // trigger data loading
+                VARCHAR.getSlice(page.getBlock(1), page.getPositionCount() - 1);
+
+                memoryUsage = memoryContext.currentBytes;
                 if (useCache) {
-                    assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize() + 260_000, testPreparer.getFileSize() + 270_000);
+                    assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
-                    assertBetweenInclusive(memoryUsage, 360_000L, 369_999L);
+                    assertThat(memoryUsage).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
             }
-            else {
-                assertThat(pageSource.getMemoryUsage()).isEqualTo(memoryUsage);
-                createUnboundedVarcharType().getSlice(block, block.getPositionCount() - 1); // trigger loading for lazy block
-                assertThat(pageSource.getMemoryUsage()).isEqualTo(memoryUsage);
-            }
+
+            // verify memory size is not changing
+            assertThat(memoryContext.currentBytes).isEqualTo(memoryUsage);
+            VARCHAR.getSlice(page.getBlock(1), page.getPositionCount() - 1);
+            assertThat(memoryContext.currentBytes).isEqualTo(memoryUsage);
             totalRows += page.getPositionCount();
         }
 
         assertThat(pageSource.isFinished()).isFalse();
-        assertThat(pageSource.getNextPage()).isNull();
+        assertThat(pageSource.getNextSourcePage()).isNull();
         assertThat(pageSource.isFinished()).isTrue();
         if (useCache) {
             // file is fully cached
-            assertBetweenInclusive(pageSource.getMemoryUsage(), testPreparer.getFileSize(), testPreparer.getFileSize() + 200);
+            assertThat(memoryContext.currentBytes).isEqualTo(MEMORY_REPORT_GRANULARITY);
         }
         else {
-            assertThat(pageSource.getMemoryUsage()).isEqualTo(0);
+            assertThat(memoryContext.currentBytes).isEqualTo(0);
         }
         pageSource.close();
     }
@@ -354,21 +367,22 @@ public class TestOrcPageSourceMemoryTracking
             columnBuilder.add(dataColumns[i]);
         }
         List<TestColumn> testColumns = columnBuilder.build();
-        File tempFile = File.createTempFile("trino_test_orc_page_source_max_read_bytes", "orc");
+        File tempFile = Files.createTempFile("trino_test_orc_page_source_max_read_bytes", "orc").toFile();
         verify(tempFile.delete());
 
         TestPreparer testPreparer = new TestPreparer(tempFile.getAbsolutePath(), testColumns, rowCount, rowCount);
-        ConnectorPageSource pageSource = testPreparer.newPageSource(stats, session);
+        ConnectorPageSource pageSource = testPreparer.newPageSource(stats, session, MemoryContext.NO_LIMIT);
 
         try {
             int positionCount = 0;
             while (true) {
-                Page page = pageSource.getNextPage();
+                SourcePage page = pageSource.getNextSourcePage();
                 if (pageSource.isFinished()) {
                     break;
                 }
                 assertThat(page).isNotNull();
-                page = page.getLoadedPage();
+                // load all page data
+                page.getPage();
                 positionCount += page.getPositionCount();
                 // assert upper bound is tight
                 // ignore the first MAX_BATCH_SIZE rows given the sizes are set when loading the blocks
@@ -378,7 +392,7 @@ public class TestOrcPageSourceMemoryTracking
                     assertThat(page.getSizeInBytes() < (long) maxReadBytes * (MAX_BATCH_SIZE / step) || 1 == page.getPositionCount()).isTrue();
                 }
             }
-
+            pageSource.close();
             // verify the stats are correctly recorded
             Distribution distribution = stats.getMaxCombinedBytesPerRow().getAllTime();
             assertThat((int) distribution.getCount()).isEqualTo(1);
@@ -410,7 +424,7 @@ public class TestOrcPageSourceMemoryTracking
                 assertThat(page).isNotNull();
                 if (memoryUsage == -1) {
                     memoryUsage = driverContext.getMemoryUsage();
-                    assertBetweenInclusive(memoryUsage, 460000L, 469999L);
+                    assertThat(memoryUsage).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
                     assertThat(driverContext.getMemoryUsage()).isEqualTo(memoryUsage);
@@ -425,7 +439,7 @@ public class TestOrcPageSourceMemoryTracking
                 assertThat(page).isNotNull();
                 if (memoryUsage == -1) {
                     memoryUsage = driverContext.getMemoryUsage();
-                    assertBetweenInclusive(memoryUsage, 460000L, 469999L);
+                    assertThat(memoryUsage).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
                     assertThat(driverContext.getMemoryUsage()).isEqualTo(memoryUsage);
@@ -440,7 +454,7 @@ public class TestOrcPageSourceMemoryTracking
                 assertThat(page).isNotNull();
                 if (memoryUsage == -1) {
                     memoryUsage = driverContext.getMemoryUsage();
-                    assertBetweenInclusive(memoryUsage, 360000L, 369999L);
+                    assertThat(memoryUsage).isEqualTo(MEMORY_REPORT_GRANULARITY);
                 }
                 else {
                     assertThat(driverContext.getMemoryUsage()).isEqualTo(memoryUsage);
@@ -474,7 +488,7 @@ public class TestOrcPageSourceMemoryTracking
 
                 // memory usage varies depending on stripe alignment
                 long memoryUsage = driverContext.getMemoryUsage();
-                assertThat(memoryUsage < 1000 || (memoryUsage > 150_000 && memoryUsage < 630_000))
+                assertThat(memoryUsage < 1000 || memoryUsage == MEMORY_REPORT_GRANULARITY)
                         .describedAs(format("Memory usage (%s) outside of bounds", memoryUsage))
                         .isTrue();
 
@@ -484,14 +498,14 @@ public class TestOrcPageSourceMemoryTracking
             // done... in the current implementation finish is not set until output returns a null page
             assertThat(operator.getOutput()).isNull();
             assertThat(operator.isFinished()).isTrue();
-            assertBetweenInclusive(driverContext.getMemoryUsage(), 0L, 500L);
+            assertThat(driverContext.getMemoryUsage()).isBetween(0L, 500L);
         }
     }
 
     private class TestPreparer
     {
         private final FileSplit fileSplit;
-        private final Map<String, String> schema;
+        private final Schema schema;
         private final List<HiveColumnHandle> columns;
         private final List<Type> types;
         private final String partitionName;
@@ -509,12 +523,13 @@ public class TestOrcPageSourceMemoryTracking
                 throws Exception
         {
             OrcSerde serde = new OrcSerde();
-            schema = ImmutableMap.<String, String>builder()
-                    .put(LIST_COLUMNS, testColumns.stream().map(TestColumn::getName).collect(Collectors.joining(",")))
-                    .put(LIST_COLUMN_TYPES, testColumns.stream().map(TestColumn::getType).collect(Collectors.joining(",")))
-                    .put(FILE_INPUT_FORMAT, OrcInputFormat.class.getName())
-                    .put(SERIALIZATION_LIB, serde.getClass().getName())
-                    .buildOrThrow();
+            schema = new Schema(
+                    serde.getClass().getName(),
+                    false,
+                    ImmutableMap.<String, String>builder()
+                            .put(LIST_COLUMNS, testColumns.stream().map(TestColumn::getName).collect(Collectors.joining(",")))
+                            .put(LIST_COLUMN_TYPES, testColumns.stream().map(TestColumn::getType).collect(Collectors.joining(",")))
+                            .buildOrThrow());
 
             partitionKeys = testColumns.stream()
                     .filter(TestColumn::isPartitionKey)
@@ -533,7 +548,7 @@ public class TestOrcPageSourceMemoryTracking
 
                 ObjectInspector inspector = testColumn.getObjectInspector();
                 HiveType hiveType = HiveType.valueOf(inspector.getTypeName());
-                Type type = TESTING_TYPE_MANAGER.getType(getTypeSignature(hiveType));
+                Type type = TESTING_TYPE_MANAGER.getType(getTypeDescriptor(hiveType));
 
                 columnsBuilder.add(createBaseColumn(testColumn.getName(), columnIndex, hiveType, type, testColumn.isPartitionKey() ? PARTITION_KEY : REGULAR, Optional.empty()));
                 typesBuilder.add(type);
@@ -549,12 +564,12 @@ public class TestOrcPageSourceMemoryTracking
             return fileSplit.getLength();
         }
 
-        public ConnectorPageSource newPageSource()
+        public ConnectorPageSource newPageSource(MemoryContext memoryContext)
         {
-            return newPageSource(new FileFormatDataSourceStats(), UNCACHED_SESSION);
+            return newPageSource(new FileFormatDataSourceStats(), UNCACHED_SESSION, memoryContext);
         }
 
-        public ConnectorPageSource newPageSource(FileFormatDataSourceStats stats, ConnectorSession session)
+        public ConnectorPageSource newPageSource(FileFormatDataSourceStats stats, ConnectorSession session, MemoryContext memoryContext)
         {
             OrcPageSourceFactory orcPageSourceFactory = new OrcPageSourceFactory(new OrcReaderOptions(), HDFS_FILE_SYSTEM_FACTORY, stats, UTC);
 
@@ -586,21 +601,23 @@ public class TestOrcPageSourceMemoryTracking
                     Optional.empty(),
                     false,
                     NO_ACID_TRANSACTION,
-                    columnMappings).orElseThrow();
+                    columnMappings,
+                    memoryContext).orElseThrow();
             return connectorPageSource;
         }
 
         public SourceOperator newTableScanOperator(DriverContext driverContext)
         {
-            ConnectorPageSource pageSource = newPageSource();
             SourceOperatorFactory sourceOperatorFactory = new TableScanOperatorFactory(
                     0,
                     new PlanNodeId("0"),
                     new PlanNodeId("0"),
-                    catalog -> (session, split, table, columnHandles, dynamicFilter) -> pageSource,
+                    (_, _) -> (_, _, _, _, _, _, memoryContext) -> newPageSource(memoryContext),
                     TEST_TABLE_HANDLE,
+                    Optional.empty(),
                     columns.stream().map(ColumnHandle.class::cast).collect(toImmutableList()),
-                    DynamicFilter.EMPTY);
+                    types,
+                    newSimpleAggregatedMemoryContext());
             SourceOperator operator = sourceOperatorFactory.createOperator(driverContext);
             operator.addSplit(new Split(TEST_CATALOG_HANDLE, TestingSplit.createLocalSplit()));
             return operator;
@@ -608,26 +625,26 @@ public class TestOrcPageSourceMemoryTracking
 
         public SourceOperator newScanFilterAndProjectOperator(DriverContext driverContext)
         {
-            ConnectorPageSource pageSource = newPageSource();
-            ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
-            for (int i = 0; i < types.size(); i++) {
-                projectionsBuilder.add(field(i, types.get(i)));
-            }
-            Supplier<CursorProcessor> cursorProcessor = EXPRESSION_COMPILER.compileCursorProcessor(Optional.empty(), projectionsBuilder.build(), "key");
-            Supplier<PageProcessor> pageProcessor = EXPRESSION_COMPILER.compilePageProcessor(Optional.empty(), projectionsBuilder.build());
+            Map<Symbol, Integer> layout = range(0, types.size()).boxed()
+                    .collect(toImmutableMap(i -> new Symbol(types.get(i), "field_" + i), i -> i));
+            List<Expression> projections = range(0, types.size())
+                    .mapToObj(i -> (Expression) new Reference(types.get(i), "field_" + i))
+                    .collect(toImmutableList());
+            Supplier<PageProcessor> pageProcessor = EXPRESSION_COMPILER.compilePageProcessor(TEST_SESSION, Optional.empty(), projections, layout);
             SourceOperatorFactory sourceOperatorFactory = new ScanFilterAndProjectOperatorFactory(
                     0,
                     new PlanNodeId("test"),
                     new PlanNodeId("0"),
-                    (catalog) -> (session, split, table, columnHandles, dynamicFilter) -> pageSource,
-                    cursorProcessor,
-                    (_) -> pageProcessor.get(),
+                    (_, _) -> (_, _, _, _, _, _, memoryContext) -> newPageSource(memoryContext),
+                    _ -> pageProcessor.get(),
                     TEST_TABLE_HANDLE,
+                    Optional.empty(),
                     columns.stream().map(ColumnHandle.class::cast).collect(toList()),
                     DynamicFilter.EMPTY,
                     types,
                     DataSize.ofBytes(0),
-                    0);
+                    0,
+                    newSimpleAggregatedMemoryContext());
             SourceOperator operator = sourceOperatorFactory.createOperator(driverContext);
             operator.addSplit(new Split(TEST_CATALOG_HANDLE, TestingSplit.createLocalSplit()));
             operator.noMoreSplits();

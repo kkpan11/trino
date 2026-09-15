@@ -21,8 +21,10 @@ import io.trino.spi.function.AggregationState;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
+import io.trino.spi.type.StandardTypes;
 
 @AggregationFunction("make_set_digest")
 public final class BuildSetDigestAggregation
@@ -64,7 +66,8 @@ public final class BuildSetDigestAggregation
         }
     }
 
-    @OutputFunction(SetDigestType.NAME)
+    @SqlNullable
+    @OutputFunction(StandardTypes.SET_DIGEST)
     public static void output(SetDigestState state, BlockBuilder out)
     {
         SERIALIZER.serialize(state, out);

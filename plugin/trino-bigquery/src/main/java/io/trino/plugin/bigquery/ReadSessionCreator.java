@@ -16,7 +16,6 @@ package io.trino.plugin.bigquery;
 import com.google.api.gax.rpc.ApiException;
 import com.google.cloud.bigquery.TableDefinition;
 import com.google.cloud.bigquery.TableId;
-import com.google.cloud.bigquery.TableInfo;
 import com.google.cloud.bigquery.storage.v1.ArrowSerializationOptions;
 import com.google.cloud.bigquery.storage.v1.BigQueryReadClient;
 import com.google.cloud.bigquery.storage.v1.CreateReadSessionRequest;
@@ -28,23 +27,22 @@ import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.connector.TableNotFoundException;
 
 import java.util.List;
 import java.util.Optional;
 
+import static com.google.cloud.bigquery.TableDefinition.Type.EXTERNAL;
 import static com.google.cloud.bigquery.TableDefinition.Type.MATERIALIZED_VIEW;
 import static com.google.cloud.bigquery.TableDefinition.Type.SNAPSHOT;
 import static com.google.cloud.bigquery.TableDefinition.Type.TABLE;
 import static com.google.cloud.bigquery.TableDefinition.Type.VIEW;
 import static com.google.cloud.bigquery.storage.v1.ArrowSerializationOptions.CompressionCodec.ZSTD;
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static io.trino.plugin.bigquery.BigQueryErrorCode.BIGQUERY_CREATE_READ_SESSION_ERROR;
 import static io.trino.plugin.bigquery.BigQuerySessionProperties.isViewMaterializationWithFilter;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.String.format;
 import static java.time.temporal.ChronoUnit.MILLIS;
+import static java.util.Objects.requireNonNullElse;
 import static java.util.stream.Collectors.toList;
 
 // A helper class, also handles view materialization
@@ -58,6 +56,7 @@ public class ReadSessionCreator
     private final boolean arrowSerializationEnabled;
     private final Duration viewExpiration;
     private final int maxCreateReadSessionRetries;
+    private final Optional<Integer> maxParallelism;
 
     public ReadSessionCreator(
             BigQueryClientFactory bigQueryClientFactory,
@@ -65,7 +64,8 @@ public class ReadSessionCreator
             boolean viewEnabled,
             boolean arrowSerializationEnabled,
             Duration viewExpiration,
-            int maxCreateReadSessionRetries)
+            int maxCreateReadSessionRetries,
+            Optional<Integer> maxParallelism)
     {
         this.bigQueryClientFactory = bigQueryClientFactory;
         this.bigQueryReadClientFactory = bigQueryReadClientFactory;
@@ -73,15 +73,19 @@ public class ReadSessionCreator
         this.arrowSerializationEnabled = arrowSerializationEnabled;
         this.viewExpiration = viewExpiration;
         this.maxCreateReadSessionRetries = maxCreateReadSessionRetries;
+        this.maxParallelism = maxParallelism;
     }
 
-    public ReadSession create(ConnectorSession session, TableId remoteTable, List<BigQueryColumnHandle> selectedFields, Optional<String> filter, int currentWorkerCount)
+    public ReadSession create(
+            ConnectorSession session,
+            TableDefinition.Type type,
+            TableId tableId,
+            List<BigQueryColumnHandle> selectedFields,
+            Optional<String> filter,
+            int currentWorkerCount)
     {
         BigQueryClient client = bigQueryClientFactory.create(session);
-        TableInfo tableDetails = client.getTable(remoteTable)
-                .orElseThrow(() -> new TableNotFoundException(new SchemaTableName(remoteTable.getDataset(), remoteTable.getTable())));
-
-        TableInfo actualTable = getActualTable(client, tableDetails, selectedFields, isViewMaterializationWithFilter(session) ? filter : Optional.empty());
+        TableId actualTableId = getActualTableId(client, type, tableId, selectedFields, isViewMaterializationWithFilter(session) ? filter : Optional.empty());
 
         List<String> filteredSelectedFields = selectedFields.stream()
                 .map(BigQueryColumnHandle::getQualifiedName)
@@ -101,14 +105,19 @@ public class ReadSessionCreator
             }
             // At least 100 to cater for cluster scale up
             int desiredParallelism = Math.min(currentWorkerCount * 3, 100);
-            CreateReadSessionRequest createReadSessionRequest = CreateReadSessionRequest.newBuilder()
+            CreateReadSessionRequest.Builder requestBuilder = CreateReadSessionRequest.newBuilder()
                     .setParent("projects/" + client.getParentProjectId())
                     .setReadSession(ReadSession.newBuilder()
                             .setDataFormat(format)
-                            .setTable(toTableResourceName(actualTable.getTableId()))
-                            .setReadOptions(readOptions))
-                    .setPreferredMinStreamCount(desiredParallelism)
-                    .build();
+                            .setTable(toTableResourceName(actualTableId))
+                            .setReadOptions(readOptions));
+            if (maxParallelism.isPresent()) {
+                int maxStreamCount = maxParallelism.get();
+                requestBuilder.setMaxStreamCount(maxStreamCount);
+                // preferred_min_stream_count must be less than or equal to max_stream_count
+                desiredParallelism = Math.min(desiredParallelism, maxStreamCount);
+            }
+            requestBuilder.setPreferredMinStreamCount(desiredParallelism);
 
             return Failsafe.with(RetryPolicy.builder()
                             .withMaxRetries(maxCreateReadSessionRetries)
@@ -118,10 +127,10 @@ public class ReadSessionCreator
                             .build())
                     .get(() -> {
                         try {
-                            return bigQueryReadClient.createReadSession(createReadSessionRequest);
+                            return bigQueryReadClient.createReadSession(requestBuilder.build());
                         }
                         catch (ApiException e) {
-                            throw new TrinoException(BIGQUERY_CREATE_READ_SESSION_ERROR, "Cannot create read session" + firstNonNull(e.getMessage(), e), e);
+                            throw new TrinoException(BIGQUERY_CREATE_READ_SESSION_ERROR, "Cannot create read session" + requireNonNullElse(e.getMessage(), e), e);
                         }
                     });
         }
@@ -132,16 +141,15 @@ public class ReadSessionCreator
         return format("projects/%s/datasets/%s/tables/%s", tableId.getProject(), tableId.getDataset(), tableId.getTable());
     }
 
-    private TableInfo getActualTable(
+    private TableId getActualTableId(
             BigQueryClient client,
-            TableInfo remoteTable,
+            TableDefinition.Type tableType,
+            TableId tableId,
             List<BigQueryColumnHandle> requiredColumns,
             Optional<String> filter)
     {
-        TableDefinition tableDefinition = remoteTable.getDefinition();
-        TableDefinition.Type tableType = tableDefinition.getType();
-        if (tableType == TABLE || tableType == SNAPSHOT) {
-            return remoteTable;
+        if (tableType == TABLE || tableType == SNAPSHOT || tableType == EXTERNAL) {
+            return tableId;
         }
         if (tableType == VIEW || tableType == MATERIALIZED_VIEW) {
             if (!viewEnabled) {
@@ -150,10 +158,13 @@ public class ReadSessionCreator
                         BigQueryConfig.VIEWS_ENABLED));
             }
             // get it from the view
-            return client.getCachedTable(viewExpiration, remoteTable, requiredColumns, filter);
+            return client.getCachedTable(viewExpiration, tableId, requiredColumns, filter).getTableId();
         }
-        // Storage API doesn't support reading other table types (materialized views, external)
-        throw new TrinoException(NOT_SUPPORTED, format("Table type '%s' of table '%s.%s' is not supported",
-                tableType, remoteTable.getTableId().getDataset(), remoteTable.getTableId().getTable()));
+        // Storage API doesn't support reading other table types (materialized views, non-biglake external tables)
+        throw new TrinoException(NOT_SUPPORTED, format(
+                "Table type '%s' of table '%s.%s' is not supported",
+                tableType,
+                tableId.getDataset(),
+                tableId.getTable()));
     }
 }

@@ -22,9 +22,10 @@ import io.trino.execution.ForQueryExecution;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.TableExecuteContextManager;
 import io.trino.execution.scheduler.OutputDataSizeEstimate;
-import io.trino.metadata.InternalNodeManager;
+import io.trino.execution.scheduler.StableHostAddressProvider;
+import io.trino.node.InternalNode;
+import io.trino.node.InternalNodeManager;
 import io.trino.spi.HostAddress;
-import io.trino.spi.Node;
 import io.trino.spi.exchange.Exchange;
 import io.trino.sql.planner.MergePartitioningHandle;
 import io.trino.sql.planner.PartitioningHandle;
@@ -36,10 +37,10 @@ import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.RemoteSourceNode;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
-import java.util.function.LongConsumer;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
@@ -75,37 +76,46 @@ public class EventDrivenTaskSourceFactory
 {
     private final SplitSourceFactory splitSourceFactory;
     private final Executor executor;
+    private final InternalNode currentNode;
     private final InternalNodeManager nodeManager;
     private final TableExecuteContextManager tableExecuteContextManager;
+    private final StableHostAddressProvider stableHostAddressProvider;
     private final int splitBatchSize;
 
     @Inject
     public EventDrivenTaskSourceFactory(
             SplitSourceFactory splitSourceFactory,
             @ForQueryExecution ExecutorService executor,
+            InternalNode currentNode,
             InternalNodeManager nodeManager,
             TableExecuteContextManager tableExecuteContextManager,
+            StableHostAddressProvider stableHostAddressProvider,
             QueryManagerConfig queryManagerConfig)
     {
-        this(
-                splitSourceFactory,
+        this(splitSourceFactory,
                 executor,
+                currentNode,
                 nodeManager,
                 tableExecuteContextManager,
+                stableHostAddressProvider,
                 requireNonNull(queryManagerConfig, "queryManagerConfig is null").getScheduleSplitBatchSize());
     }
 
     public EventDrivenTaskSourceFactory(
             SplitSourceFactory splitSourceFactory,
             Executor executor,
+            InternalNode currentNode,
             InternalNodeManager nodeManager,
             TableExecuteContextManager tableExecuteContextManager,
+            StableHostAddressProvider stableHostAddressProvider,
             int splitBatchSize)
     {
         this.splitSourceFactory = requireNonNull(splitSourceFactory, "splitSourceFactory is null");
         this.executor = requireNonNull(executor, "executor is null");
+        this.currentNode = requireNonNull(currentNode, "currentNode is null");
         this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
         this.tableExecuteContextManager = requireNonNull(tableExecuteContextManager, "tableExecuteContextManager is null");
+        this.stableHostAddressProvider = requireNonNull(stableHostAddressProvider, "stableHostAddressProvider is null");
         this.splitBatchSize = splitBatchSize;
     }
 
@@ -115,7 +125,7 @@ public class EventDrivenTaskSourceFactory
             PlanFragment fragment,
             Map<PlanFragmentId, Exchange> sourceExchanges,
             FaultTolerantPartitioningScheme sourcePartitioningScheme,
-            LongConsumer getSplitTimeRecorder,
+            SplitSourceMetricsRecorder metricsRecorder,
             Map<PlanNodeId, OutputDataSizeEstimate> outputDataSizeEstimates)
     {
         ImmutableSetMultimap.Builder<PlanNodeId, PlanFragmentId> remoteSources = ImmutableSetMultimap.builder();
@@ -143,7 +153,7 @@ public class EventDrivenTaskSourceFactory
                 splitBatchSize,
                 standardSplitSizeInBytes,
                 sourcePartitioningScheme,
-                getSplitTimeRecorder);
+                metricsRecorder);
     }
 
     private SplitAssigner createSplitAssigner(
@@ -171,11 +181,10 @@ public class EventDrivenTaskSourceFactory
 
         boolean coordinatorOnly = partitioning.equals(COORDINATOR_DISTRIBUTION);
         if (partitioning.equals(SINGLE_DISTRIBUTION) || coordinatorOnly) {
-            ImmutableSet<HostAddress> hostRequirement = ImmutableSet.of();
+            Optional<HostAddress> hostRequirement = Optional.empty();
             if (coordinatorOnly) {
-                Node currentNode = nodeManager.getCurrentNode();
                 verify(currentNode.isCoordinator(), "current node is expected to be a coordinator");
-                hostRequirement = ImmutableSet.of(currentNode.getHostAndPort());
+                hostRequirement = Optional.of(currentNode.getHostAndPort());
             }
             return new SingleDistributionSplitAssigner(
                     hostRequirement,
@@ -191,7 +200,8 @@ public class EventDrivenTaskSourceFactory
         long arbitraryDistributionComputeTaskTargetSizeInBytesMax = getFaultTolerantExecutionArbitraryDistributionComputeTaskTargetSizeMax(session).toBytes();
         checkArgument(arbitraryDistributionComputeTaskTargetSizeInBytesMax >= arbitraryDistributionComputeTaskTargetSizeInBytesMin,
                 "arbitraryDistributionComputeTaskTargetSizeInBytesMax %s should be no smaller than arbitraryDistributionComputeTaskTargetSizeInBytesMin %s",
-                arbitraryDistributionComputeTaskTargetSizeInBytesMax, arbitraryDistributionComputeTaskTargetSizeInBytesMin);
+                arbitraryDistributionComputeTaskTargetSizeInBytesMax,
+                arbitraryDistributionComputeTaskTargetSizeInBytesMin);
 
         int arbitraryDistributionWriteTaskTargetSizeGrowthPeriod = getFaultTolerantExecutionArbitraryDistributionWriteTaskTargetSizeGrowthPeriod(session);
         double arbitraryDistributionWriteTaskTargetSizeGrowthFactor = getFaultTolerantExecutionArbitraryDistributionWriteTaskTargetSizeGrowthFactor(session);
@@ -199,7 +209,8 @@ public class EventDrivenTaskSourceFactory
         long arbitraryDistributionWriteTaskTargetSizeInBytesMax = getFaultTolerantExecutionArbitraryDistributionWriteTaskTargetSizeMax(session).toBytes();
         checkArgument(arbitraryDistributionWriteTaskTargetSizeInBytesMax >= arbitraryDistributionWriteTaskTargetSizeInBytesMin,
                 "arbitraryDistributionWriteTaskTargetSizeInBytesMax %s should be larger than arbitraryDistributionWriteTaskTargetSizeInBytesMin %s",
-                arbitraryDistributionWriteTaskTargetSizeInBytesMax, arbitraryDistributionWriteTaskTargetSizeInBytesMin);
+                arbitraryDistributionWriteTaskTargetSizeInBytesMax,
+                arbitraryDistributionWriteTaskTargetSizeInBytesMin);
 
         if (partitioning.equals(FIXED_ARBITRARY_DISTRIBUTION) || partitioning.equals(SOURCE_DISTRIBUTION)) {
             return new ArbitraryDistributionSplitAssigner(
@@ -211,7 +222,8 @@ public class EventDrivenTaskSourceFactory
                     arbitraryDistributionComputeTaskTargetSizeInBytesMin,
                     arbitraryDistributionComputeTaskTargetSizeInBytesMax,
                     standardSplitSizeInBytes,
-                    maxArbitraryDistributionTaskSplitCount);
+                    maxArbitraryDistributionTaskSplitCount,
+                    stableHostAddressProvider);
         }
 
         if (partitioning.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION)) {
@@ -224,10 +236,10 @@ public class EventDrivenTaskSourceFactory
                     arbitraryDistributionWriteTaskTargetSizeInBytesMin,
                     arbitraryDistributionWriteTaskTargetSizeInBytesMax,
                     standardSplitSizeInBytes,
-                    maxArbitraryDistributionTaskSplitCount);
+                    maxArbitraryDistributionTaskSplitCount,
+                    stableHostAddressProvider);
         }
-        if (partitioning.equals(FIXED_HASH_DISTRIBUTION) || partitioning.getCatalogHandle().isPresent() ||
-                (partitioning.getConnectorHandle() instanceof MergePartitioningHandle)) {
+        if (partitioning.equals(FIXED_HASH_DISTRIBUTION)) {
             return HashDistributionSplitAssigner.create(
                     partitioning.getCatalogHandle(),
                     partitionedSources,
@@ -236,10 +248,12 @@ public class EventDrivenTaskSourceFactory
                     outputDataSizeEstimates,
                     fragment,
                     getFaultTolerantExecutionHashDistributionComputeTaskTargetSize(session).toBytes(),
-                    toIntExact(round(getFaultTolerantExecutionHashDistributionComputeTasksToNodesMinRatio(session) * nodeManager.getAllNodes().getActiveNodes().size())),
+                    toIntExact(round(getFaultTolerantExecutionHashDistributionComputeTasksToNodesMinRatio(session) * nodeManager.getAllNodes().activeNodes().size())),
                     Integer.MAX_VALUE); // compute tasks are bounded by the number of partitions anyways
         }
-        if (partitioning.equals(SCALED_WRITER_HASH_DISTRIBUTION)) {
+        if (partitioning.equals(SCALED_WRITER_HASH_DISTRIBUTION)
+                || partitioning.getCatalogHandle().isPresent()
+                || (partitioning.getConnectorHandle() instanceof MergePartitioningHandle)) {
             return HashDistributionSplitAssigner.create(
                     partitioning.getCatalogHandle(),
                     partitionedSources,
@@ -248,7 +262,7 @@ public class EventDrivenTaskSourceFactory
                     outputDataSizeEstimates,
                     fragment,
                     getFaultTolerantExecutionHashDistributionWriteTaskTargetSize(session).toBytes(),
-                    toIntExact(round(getFaultTolerantExecutionHashDistributionWriteTasksToNodesMinRatio(session) * nodeManager.getAllNodes().getActiveNodes().size())),
+                    toIntExact(round(getFaultTolerantExecutionHashDistributionWriteTasksToNodesMinRatio(session) * nodeManager.getAllNodes().activeNodes().size())),
                     getFaultTolerantExecutionHashDistributionWriteTaskTargetMaxCount(session));
         }
 

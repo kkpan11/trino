@@ -1,12 +1,53 @@
 # Array functions and operators
 
+Array functions and operators use the [ARRAY type](array-type). Create an array
+with the data type constructor.
+
+Create an array of integer numbers:
+
+```sql
+SELECT ARRAY[1, 2, 4];
+-- [1, 2, 4]
+```
+
+Create an array of character values:
+
+```sql
+SELECT ARRAY['foo', 'bar', 'bazz'];
+-- [foo, bar, bazz]
+```
+
+Array elements must use the same type or it must be possible to coerce values to
+a common type. The following example uses integer and decimal values and the
+resulting array contains decimals:
+
+```sql
+SELECT ARRAY[1, 1.2, 4];
+-- [1.0, 1.2, 4.0]
+```
+
+Null values are allowed:
+
+```sql
+SELECT ARRAY[1, 2, NULL, -4, NULL];
+-- [1, 2, NULL, -4, NULL]
+```
+
 (subscript-operator)=
 ## Subscript operator: \[\]
 
-The `[]` operator is used to access an element of an array and is indexed starting from one:
+The `[]` operator is used to access an element of an array and is indexed
+starting from one:
 
-```
+```sql
 SELECT my_array[1] AS first_element
+```
+
+The following example constructs an array and then accesses the second element:
+
+```sql
+SELECT ARRAY[1, 1.2, 4][2];
+-- 1.2
 ```
 
 (concatenation-operator)=
@@ -57,6 +98,19 @@ Returns an array of the elements in the union of `x` and `y`, without duplicates
 Returns an array of elements in `x` but not in `y`, without duplicates.
 :::
 
+:::{function} array_first(array(E)) -> E
+Returns the first element of an `array`.
+If the array is empty, the function returns `NULL`, whereas
+the subscript operator would fail in such a case.
+:::
+
+:::{function} array_first(array(E), function(E, boolean)) -> E
+:noindex: true
+
+Returns the first element of the `array` that matches the predicate.
+If the array is empty or there is no match, the function returns `NULL`.
+:::
+
 :::{function} array_histogram(x) -> map<K, bigint>
 Returns a map where the keys are the unique elements in the input array
 `x` and the values are the number of times that each element appears in
@@ -84,6 +138,12 @@ Null elements are omitted in the result.
 :noindex: true
 
 Concatenates the elements of the given array using the delimiter and an optional string to replace nulls.
+:::
+
+:::{function} array_last(array(E)) -> E
+Returns the last element of an `array`.
+If the array is empty, the function returns `NULL`, whereas
+the subscript operator would fail in such a case.
 :::
 
 :::{function} array_max(x) -> x
@@ -407,15 +467,6 @@ Calculates the dot product:
 ```sql
 SELECT dot_product(ARRAY[1.0, 2.0], ARRAY[3.0, 4.0]);
 -- 11.0
-```
-:::
-
-:::{function} cosine_distance(array(double), array(double)) -> double
-Calculates the cosine distance:
-
-```sql
-SELECT cosine_distance(ARRAY[1.0, 2.0], ARRAY[3.0, 4.0]);
--- 0.01613008990009257
 ```
 :::
 

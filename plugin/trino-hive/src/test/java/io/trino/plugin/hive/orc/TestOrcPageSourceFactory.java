@@ -20,14 +20,15 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.hive.AcidInfo;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HiveConfig;
 import io.trino.plugin.hive.HivePageSourceFactory;
-import io.trino.plugin.hive.ReaderPageSource;
-import io.trino.spi.Page;
+import io.trino.plugin.hive.Schema;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.ConnectorIdentity;
@@ -48,18 +49,14 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.LongPredicate;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.io.Resources.getResource;
-import static io.trino.hive.thrift.metastore.hive_metastoreConstants.FILE_INPUT_FORMAT;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static io.trino.plugin.hive.HiveColumnHandle.createBaseColumn;
 import static io.trino.plugin.hive.HiveStorageFormat.ORC;
-import static io.trino.plugin.hive.HiveTableProperties.TRANSACTIONAL;
 import static io.trino.plugin.hive.HiveTestUtils.SESSION;
 import static io.trino.plugin.hive.acid.AcidTransaction.NO_ACID_TRANSACTION;
 import static io.trino.plugin.hive.util.HiveTypeTranslator.toHiveType;
-import static io.trino.plugin.hive.util.SerdeConstants.SERIALIZATION_LIB;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -79,14 +76,14 @@ public class TestOrcPageSourceFactory
     public void testFullFileRead()
             throws IOException
     {
-        assertRead(ImmutableMap.of(NATION_KEY, 0, NAME, 1, REGION_KEY, 2, COMMENT, 3), OptionalLong.empty(), Optional.empty(), nationKey -> false);
+        assertRead(ImmutableMap.of(NATION_KEY, 0, NAME, 1, REGION_KEY, 2, COMMENT, 3), OptionalLong.empty(), Optional.empty(), _ -> false);
     }
 
     @Test
     public void testSingleColumnRead()
             throws IOException
     {
-        assertRead(ImmutableMap.of(REGION_KEY, ALL_COLUMNS.get(REGION_KEY)), OptionalLong.empty(), Optional.empty(), nationKey -> false);
+        assertRead(ImmutableMap.of(REGION_KEY, ALL_COLUMNS.get(REGION_KEY)), OptionalLong.empty(), Optional.empty(), _ -> false);
     }
 
     /**
@@ -96,7 +93,7 @@ public class TestOrcPageSourceFactory
     public void testFullFileSkipped()
             throws IOException
     {
-        assertRead(ALL_COLUMNS, OptionalLong.of(100L), Optional.empty(), nationKey -> false);
+        assertRead(ALL_COLUMNS, OptionalLong.of(100L), Optional.empty(), _ -> false);
     }
 
     /**
@@ -106,7 +103,7 @@ public class TestOrcPageSourceFactory
     public void testSomeStripesAndRowGroupRead()
             throws IOException
     {
-        assertRead(ALL_COLUMNS, OptionalLong.of(5L), Optional.empty(), nationKey -> false);
+        assertRead(ALL_COLUMNS, OptionalLong.of(5L), Optional.empty(), _ -> false);
     }
 
     @Test
@@ -142,7 +139,7 @@ public class TestOrcPageSourceFactory
                 .build();
 
         List<Nation> result = readFile(fileSystemFactory, Map.of(), OptionalLong.empty(), acidInfo, fileLocation, 625);
-        assertThat(result.size()).isEqualTo(1);
+        assertThat(result).hasSize(1);
     }
 
     @Test
@@ -180,7 +177,7 @@ public class TestOrcPageSourceFactory
         List<Nation> expected = expectedResult(OptionalLong.empty(), nationKey -> nationKey == 24, 1);
         List<Nation> result = readFile(fileSystemFactory, ALL_COLUMNS, OptionalLong.empty(), Optional.of(acidInfo), fileLocation, 1780);
 
-        assertThat(result.size()).isEqualTo(expected.size());
+        assertThat(result).hasSize(expected.size());
         int deletedRowKey = 24;
         String deletedRowNameColumn = "UNITED STATES";
         assertThat(result.stream().anyMatch(acidNationRow -> acidNationRow.name().equals(deletedRowNameColumn) && acidNationRow.nationKey() == deletedRowKey))
@@ -202,7 +199,7 @@ public class TestOrcPageSourceFactory
     {
         List<Nation> expected = new ArrayList<>();
         for (Nation nation : ImmutableList.copyOf(new NationGenerator().iterator())) {
-            if (nationKeyPredicate.isPresent() && nationKeyPredicate.getAsLong() != nation.nationKey()) {
+            if (nationKeyPredicate.isPresent() && nationKeyPredicate.orElseThrow() != nation.nationKey()) {
                 continue;
             }
             if (deletedRows.test(nation.nationKey())) {
@@ -233,7 +230,7 @@ public class TestOrcPageSourceFactory
     {
         TupleDomain<HiveColumnHandle> tupleDomain = TupleDomain.all();
         if (nationKeyPredicate.isPresent()) {
-            tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(toHiveColumnHandle(NATION_KEY, 0), Domain.singleValue(INTEGER, nationKeyPredicate.getAsLong())));
+            tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(toHiveColumnHandle(NATION_KEY, 0), Domain.singleValue(INTEGER, nationKeyPredicate.orElseThrow())));
         }
 
         List<HiveColumnHandle> columnHandles = columns.entrySet().stream()
@@ -250,26 +247,22 @@ public class TestOrcPageSourceFactory
                 new FileFormatDataSourceStats(),
                 new HiveConfig());
 
-        Optional<ReaderPageSource> pageSourceWithProjections = pageSourceFactory.createPageSource(
-                SESSION,
-                location,
-                0,
-                fileSize,
-                fileSize,
-                12345,
-                createSchema(),
-                columnHandles,
-                tupleDomain,
-                acidInfo,
-                OptionalInt.empty(),
-                false,
-                NO_ACID_TRANSACTION);
-
-        checkArgument(pageSourceWithProjections.isPresent());
-        checkArgument(pageSourceWithProjections.get().getReaderColumns().isEmpty(),
-                "projected columns not expected here");
-
-        ConnectorPageSource pageSource = pageSourceWithProjections.get().get();
+        ConnectorPageSource pageSource = pageSourceFactory.createPageSource(
+                        SESSION,
+                        location,
+                        0,
+                        fileSize,
+                        fileSize,
+                        12345,
+                        createSchema(),
+                        columnHandles,
+                        tupleDomain,
+                        acidInfo,
+                        OptionalInt.empty(),
+                        false,
+                        NO_ACID_TRANSACTION,
+                        MemoryContext.NO_LIMIT)
+                .orElseThrow();
 
         int nationKeyColumn = columnNames.indexOf("n_nationkey");
         int nameColumn = columnNames.indexOf("n_name");
@@ -278,12 +271,11 @@ public class TestOrcPageSourceFactory
 
         ImmutableList.Builder<Nation> rows = ImmutableList.builder();
         while (!pageSource.isFinished()) {
-            Page page = pageSource.getNextPage();
+            SourcePage page = pageSource.getNextSourcePage();
             if (page == null) {
                 continue;
             }
 
-            page = page.getLoadedPage();
             for (int position = 0; position < page.getPositionCount(); position++) {
                 long nationKey = -42;
                 if (nationKeyColumn >= 0) {
@@ -328,13 +320,9 @@ public class TestOrcPageSourceFactory
                 Optional.empty());
     }
 
-    private static Map<String, String> createSchema()
+    private static Schema createSchema()
     {
-        return ImmutableMap.<String, String>builder()
-                .put(SERIALIZATION_LIB, ORC.getSerde())
-                .put(FILE_INPUT_FORMAT, ORC.getInputFormat())
-                .put(TRANSACTIONAL, "true")
-                .buildOrThrow();
+        return new Schema(ORC.getSerde(), true, ImmutableMap.of());
     }
 
     private static void assertEqualsByColumns(Set<NationColumn> columns, List<Nation> actualRows, List<Nation> expectedRows)

@@ -16,6 +16,7 @@ package io.trino.plugin.hive.metastore.glue;
 import com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
@@ -44,7 +45,8 @@ class TestGlueHiveMetastoreConfig
                 .setCatalogId(null)
                 .setPartitionSegments(5)
                 .setThreads(40)
-                .setAssumeCanonicalPartitionKeys(false));
+                .setAssumeCanonicalPartitionKeys(false)
+                .setSkipArchive(false));
     }
 
     @Test
@@ -68,13 +70,14 @@ class TestGlueHiveMetastoreConfig
                 .put("hive.metastore.glue.partitions-segments", "10")
                 .put("hive.metastore.glue.threads", "77")
                 .put("hive.metastore.glue.assume-canonical-partition-keys", "true")
+                .put("hive.metastore.glue.skip-archive", "true")
                 .buildOrThrow();
 
         GlueHiveMetastoreConfig expected = new GlueHiveMetastoreConfig()
                 .setGlueRegion("us-east-1")
-                .setGlueEndpointUrl("http://foo.bar")
+                .setGlueEndpointUrl(URI.create("http://foo.bar"))
                 .setGlueStsRegion("us-east-3")
-                .setGlueStsEndpointUrl("http://sts.foo.bar")
+                .setGlueStsEndpointUrl(URI.create("http://sts.foo.bar"))
                 .setPinGlueClientToCurrentRegion(true)
                 .setMaxGlueConnections(10)
                 .setMaxGlueErrorRetries(20)
@@ -87,7 +90,8 @@ class TestGlueHiveMetastoreConfig
                 .setCatalogId("0123456789")
                 .setPartitionSegments(10)
                 .setThreads(77)
-                .setAssumeCanonicalPartitionKeys(true);
+                .setAssumeCanonicalPartitionKeys(true)
+                .setSkipArchive(true);
 
         assertFullMapping(properties, expected);
     }

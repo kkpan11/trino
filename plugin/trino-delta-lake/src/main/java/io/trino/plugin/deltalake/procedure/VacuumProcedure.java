@@ -23,12 +23,13 @@ import io.trino.filesystem.FileEntry;
 import io.trino.filesystem.FileIterator;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
-import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.base.util.UncheckedCloseable;
 import io.trino.plugin.deltalake.DeltaLakeConfig;
+import io.trino.plugin.deltalake.DeltaLakeFileSystemFactory;
 import io.trino.plugin.deltalake.DeltaLakeMetadata;
 import io.trino.plugin.deltalake.DeltaLakeMetadataFactory;
 import io.trino.plugin.deltalake.DeltaLakeSessionProperties;
+import io.trino.plugin.deltalake.DeltaLakeTableCredentials;
 import io.trino.plugin.deltalake.DeltaLakeTableHandle;
 import io.trino.plugin.deltalake.transactionlog.AddFileEntry;
 import io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry;
@@ -62,12 +63,14 @@ import static com.google.common.base.Predicates.alwaysFalse;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.base.util.Procedures.checkProcedureArgument;
+import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_FILESYSTEM_ERROR;
 import static io.trino.plugin.deltalake.DeltaLakeMetadata.MAX_WRITER_VERSION;
 import static io.trino.plugin.deltalake.DeltaLakeMetadata.checkUnsupportedUniversalFormat;
 import static io.trino.plugin.deltalake.DeltaLakeMetadata.checkValidTableHandle;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.toUriFormat;
 import static io.trino.plugin.deltalake.DeltaLakeSessionProperties.getVacuumMinRetention;
-import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.DELETION_VECTORS_FEATURE_NAME;
-import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.unsupportedWriterFeatures;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.DELETION_VECTORS_FEATURE_NAME;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.unsupportedWriterFeatures;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.TRANSACTION_LOG_DIRECTORY;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogDir;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -95,14 +98,14 @@ public class VacuumProcedure
     }
 
     private final CatalogName catalogName;
-    private final TrinoFileSystemFactory fileSystemFactory;
+    private final DeltaLakeFileSystemFactory fileSystemFactory;
     private final DeltaLakeMetadataFactory metadataFactory;
     private final TransactionLogAccess transactionLogAccess;
 
     @Inject
     public VacuumProcedure(
             CatalogName catalogName,
-            TrinoFileSystemFactory fileSystemFactory,
+            DeltaLakeFileSystemFactory fileSystemFactory,
             DeltaLakeMetadataFactory metadataFactory,
             TransactionLogAccess transactionLogAccess)
     {
@@ -139,7 +142,10 @@ public class VacuumProcedure
         catch (TrinoException e) {
             throw e;
         }
-        catch (Exception e) {
+        catch (IOException e) {
+            throw new TrinoException(DELTA_LAKE_FILESYSTEM_ERROR, format("Failure when vacuuming %s.%s with retention %s: %s", schema, table, retention, e), e);
+        }
+        catch (RuntimeException e) {
             // This is not categorized as TrinoException. All possible external failures should be handled explicitly.
             throw new RuntimeException(format("Failure when vacuuming %s.%s with retention %s: %s", schema, table, retention, e), e);
         }
@@ -181,13 +187,12 @@ public class VacuumProcedure
             checkProcedureArgument(connectorTableHandle != null, "Table '%s' does not exist", tableName);
             DeltaLakeTableHandle handle = checkValidTableHandle(connectorTableHandle);
 
-            accessControl.checkCanInsertIntoTable(null, tableName);
-            accessControl.checkCanDeleteFromTable(null, tableName);
+            accessControl.checkCanInsertIntoTable(null, tableName, Optional.empty());
+            accessControl.checkCanDeleteFromTable(null, tableName, Optional.empty());
 
             checkUnsupportedUniversalFormat(handle.getMetadataEntry());
 
-            TableSnapshot tableSnapshot = metadata.getSnapshot(session, tableName, handle.getLocation(), Optional.of(handle.getReadVersion()));
-            ProtocolEntry protocolEntry = transactionLogAccess.getProtocolEntry(session, tableSnapshot);
+            ProtocolEntry protocolEntry = handle.getProtocolEntry();
             if (protocolEntry.minWriterVersion() > MAX_WRITER_VERSION) {
                 throw new TrinoException(NOT_SUPPORTED, "Cannot execute vacuum procedure with %d writer version".formatted(protocolEntry.minWriterVersion()));
             }
@@ -201,9 +206,11 @@ public class VacuumProcedure
                 throw new TrinoException(NOT_SUPPORTED, "Cannot execute vacuum procedure with %s writer features".formatted(DELETION_VECTORS_FEATURE_NAME));
             }
 
+            TableSnapshot tableSnapshot = metadata.getSnapshot(session, handle, Optional.of(handle.getReadVersion()));
             String tableLocation = tableSnapshot.getTableLocation();
             String transactionLogDir = getTransactionLogDir(tableLocation);
-            TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+            Optional<DeltaLakeTableCredentials> tableCredentials = metadata.getTableCredentials(session, handle).map(DeltaLakeTableCredentials.class::cast);
+            TrinoFileSystem fileSystem = fileSystemFactory.create(session, tableCredentials);
             String commonPathPrefix = tableLocation.endsWith("/") ? tableLocation : tableLocation + "/";
             String queryId = session.getQueryId();
 
@@ -213,29 +220,31 @@ public class VacuumProcedure
             Set<String> retainedPaths;
             try (Stream<AddFileEntry> activeAddEntries = transactionLogAccess.getActiveFiles(
                     session,
+                    handle,
+                    tableCredentials,
                     tableSnapshot,
-                    handle.getMetadataEntry(),
-                    handle.getProtocolEntry(),
                     TupleDomain.all(),
                     alwaysFalse())) {
-                retainedPaths = Stream.concat(
-                                activeAddEntries
-                                        // paths can be absolute as well in case of shallow-cloned tables, and they shouldn't be deleted as part of vacuum because according to
-                                        // delta-protocol absolute paths are inherited from base table and the vacuum procedure should only list and delete local file references
-                                        .map(AddFileEntry::getPath),
-                                transactionLogAccess.getJsonEntries(
-                                                fileSystem,
-                                                transactionLogDir,
-                                                // discard oldest "recent" snapshot, since we take RemoveFileEntry only, to identify files that are no longer
-                                                // active files, but still needed to read a "recent" snapshot
-                                                recentVersions.stream().sorted(naturalOrder())
-                                                        .skip(1)
-                                                        .collect(toImmutableList()))
-                                        .map(DeltaLakeTransactionLogEntry::getRemove)
-                                        .filter(Objects::nonNull)
-                                        .map(RemoveFileEntry::path))
-                        .peek(path -> checkState(!path.startsWith(tableLocation), "Unexpected absolute path in transaction log: %s", path))
-                        .collect(toImmutableSet());
+                try (Stream<String> pathEntries = Stream.concat(
+                        activeAddEntries
+                                // paths can be absolute as well in case of shallow-cloned tables, and they shouldn't be deleted as part of vacuum because according to
+                                // delta-protocol absolute paths are inherited from base table and the vacuum procedure should only list and delete local file references
+                                .map(AddFileEntry::getPath),
+                        transactionLogAccess.getJsonEntries(
+                                        fileSystem,
+                                        transactionLogDir,
+                                        // discard oldest "recent" snapshot, since we take RemoveFileEntry only, to identify files that are no longer
+                                        // active files, but still needed to read a "recent" snapshot
+                                        recentVersions.stream().sorted(naturalOrder())
+                                                .skip(1)
+                                                .collect(toImmutableList()))
+                                .map(DeltaLakeTransactionLogEntry::getRemove)
+                                .filter(Objects::nonNull)
+                                .map(RemoveFileEntry::path))) {
+                    retainedPaths = pathEntries
+                            .peek(path -> checkState(!path.startsWith(tableLocation), "Unexpected absolute path in transaction log: %s", path))
+                            .collect(toImmutableSet());
+                }
             }
 
             log.debug(
@@ -263,7 +272,9 @@ public class VacuumProcedure
                         "Unexpected path [%s] returned when listing files under [%s]",
                         location,
                         tableLocation);
-                String relativePath = location.substring(commonPathPrefix.length());
+
+                // Paths are RFC 2396 URI encoded https://github.com/delta-io/delta/blob/master/PROTOCOL.md#add-file-and-remove-file
+                String relativePath = toUriFormat(location.substring(commonPathPrefix.length()));
                 if (relativePath.isEmpty()) {
                     // A file returned for "tableLocation/", might be possible on S3.
                     continue;

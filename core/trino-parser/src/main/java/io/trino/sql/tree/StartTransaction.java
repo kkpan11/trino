@@ -1,4 +1,3 @@
-
 /*
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -30,7 +28,7 @@ public final class StartTransaction
 
     public StartTransaction(NodeLocation location, List<TransactionMode> transactionModes)
     {
-        super(Optional.of(location));
+        super(location);
         this.transactionModes = ImmutableList.copyOf(requireNonNull(transactionModes, "transactionModes is null"));
     }
 

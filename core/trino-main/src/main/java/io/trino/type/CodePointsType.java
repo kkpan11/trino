@@ -19,9 +19,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 
 public class CodePointsType
         extends AbstractVariableWidthType
@@ -31,11 +30,17 @@ public class CodePointsType
 
     private CodePointsType()
     {
-        super(new TypeSignature(NAME), int[].class);
+        super(new TypeDescriptor(NAME), int[].class);
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public String getDisplayName()
+    {
+        return NAME;
+    }
+
+    @Override
+    public Object getObjectValue(Block block, int position)
     {
         return getObject(block, position);
     }

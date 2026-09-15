@@ -22,15 +22,23 @@ import io.airlift.concurrent.MoreFutures;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
+import io.trino.blob.cache.alluxio.AlluxioBlobCachePlugin;
 import io.trino.execution.QueryManager;
+import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.metastore.Column;
 import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.Table;
 import io.trino.operator.OperatorStats;
 import io.trino.plugin.deltalake.transactionlog.AddFileEntry;
 import io.trino.plugin.deltalake.transactionlog.TransactionLogAccess;
 import io.trino.plugin.hive.TestingHivePlugin;
 import io.trino.plugin.hive.containers.HiveHadoop;
 import io.trino.plugin.hive.metastore.thrift.BridgingHiveMetastore;
+import io.trino.spi.Plugin;
 import io.trino.spi.QueryId;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.testing.BaseConnectorSmokeTest;
 import io.trino.testing.MaterializedResult;
@@ -49,6 +57,7 @@ import org.junit.jupiter.api.TestInstance;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
@@ -67,6 +76,9 @@ import static com.google.common.collect.MoreCollectors.onlyElement;
 import static com.google.common.collect.Sets.union;
 import static io.trino.SystemSessionProperties.ENABLE_DYNAMIC_FILTERING;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
+import static io.trino.metastore.HiveType.HIVE_STRING;
+import static io.trino.metastore.PrincipalPrivileges.NO_PRIVILEGES;
+import static io.trino.metastore.StorageFormat.VIEW_STORAGE_FORMAT;
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.deltalake.DeltaLakeMetadata.CREATE_OR_REPLACE_TABLE_AS_OPERATION;
 import static io.trino.plugin.deltalake.DeltaLakeMetadata.CREATE_OR_REPLACE_TABLE_OPERATION;
@@ -75,6 +87,7 @@ import static io.trino.plugin.deltalake.DeltaLakeSessionProperties.EXTENDED_STAT
 import static io.trino.plugin.deltalake.TestingDeltaLakeUtils.getConnectorService;
 import static io.trino.plugin.deltalake.TestingDeltaLakeUtils.getTableActiveFiles;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.TRANSACTION_LOG_DIRECTORY;
+import static io.trino.plugin.hive.TableType.VIRTUAL_VIEW;
 import static io.trino.plugin.hive.TestingThriftHiveMetastoreBuilder.testingThriftHiveMetastoreBuilder;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
 import static io.trino.testing.QueryAssertions.getTrinoExceptionCause;
@@ -139,11 +152,25 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     protected HiveHadoop hiveHadoop;
     private HiveMetastore metastore;
     private TransactionLogAccess transactionLogAccess;
+    private TrinoFileSystemFactory fileSystemFactory;
 
     protected void environmentSetup() {}
 
-    protected abstract HiveHadoop createHiveHadoop()
-            throws Exception;
+    protected HiveMetastore createMetastore()
+            throws Exception
+    {
+        hiveHadoop = closeAfterClass(createHiveHadoop());
+        return new BridgingHiveMetastore(
+                testingThriftHiveMetastoreBuilder()
+                        .metastoreClient(hiveHadoop.getHiveMetastoreEndpoint())
+                        .build(this::closeAfterClass));
+    }
+
+    protected HiveHadoop createHiveHadoop()
+            throws Exception
+    {
+        throw new UnsupportedOperationException("Subclass must override createMetastore() or createHiveHadoop()");
+    }
 
     protected abstract Map<String, String> hiveStorageConfiguration();
 
@@ -160,20 +187,18 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     protected abstract void deleteFile(String filePath);
 
     @Override
+    @SuppressWarnings("deprecation")
     protected QueryRunner createQueryRunner()
             throws Exception
     {
         environmentSetup();
 
-        this.hiveHadoop = closeAfterClass(createHiveHadoop());
-        this.metastore = new BridgingHiveMetastore(
-                testingThriftHiveMetastoreBuilder()
-                        .metastoreClient(hiveHadoop.getHiveMetastoreEndpoint())
-                        .build(this::closeAfterClass));
+        metastore = createMetastore();
 
         QueryRunner queryRunner = createDeltaLakeQueryRunner();
         try {
             this.transactionLogAccess = getConnectorService(queryRunner, TransactionLogAccess.class);
+            this.fileSystemFactory = getConnectorService(queryRunner, TrinoFileSystemFactory.class);
 
             REQUIRED_TPCH_TABLES.forEach(table -> queryRunner.execute(format(
                     "CREATE TABLE %s WITH (location = '%s') AS SELECT * FROM tpch.tiny.%1$s",
@@ -200,16 +225,20 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                 registerTableFromResources(table.tableName(), table.resourcePath(), queryRunner);
             });
 
-            queryRunner.installPlugin(new TestingHivePlugin(queryRunner.getCoordinator().getBaseDataDir().resolve("hive_data")));
-
-            queryRunner.createCatalog(
-                    "hive",
-                    "hive",
-                    ImmutableMap.<String, String>builder()
-                            .put("hive.metastore", "thrift")
-                            .put("hive.metastore.uri", hiveHadoop.getHiveMetastoreEndpoint().toString())
-                            .putAll(hiveStorageConfiguration())
-                            .buildOrThrow());
+            ImmutableMap.Builder<String, String> hiveProperties = ImmutableMap.<String, String>builder()
+                    .putAll(hiveStorageConfiguration());
+            if (hiveHadoop == null) {
+                queryRunner.installPlugin(new TestingHivePlugin(
+                        queryRunner.getCoordinator().getBaseDataDir().resolve("hive_data"),
+                        metastore));
+            }
+            else {
+                queryRunner.installPlugin(new TestingHivePlugin(queryRunner.getCoordinator().getBaseDataDir().resolve("hive_data")));
+                hiveProperties
+                        .put("hive.metastore", "thrift")
+                        .put("hive.metastore.uri", hiveHadoop.getHiveMetastoreEndpoint().toString());
+            }
+            queryRunner.createCatalog("hive", "hive", hiveProperties.buildOrThrow());
 
             return queryRunner;
         }
@@ -222,24 +251,51 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     private QueryRunner createDeltaLakeQueryRunner()
             throws Exception
     {
-        return DeltaLakeQueryRunner.builder(SCHEMA)
-                .setDeltaProperties(ImmutableMap.<String, String>builder()
-                        .put("hive.metastore.uri", hiveHadoop.getHiveMetastoreEndpoint().toString())
-                        .put("delta.metadata.cache-ttl", TEST_METADATA_CACHE_TTL_SECONDS + "s")
-                        .put("delta.metadata.live-files.cache-ttl", TEST_METADATA_CACHE_TTL_SECONDS + "s")
-                        .put("hive.metastore-cache-ttl", TEST_METADATA_CACHE_TTL_SECONDS + "s")
-                        .put("delta.register-table-procedure.enabled", "true")
-                        .put("hive.metastore.thrift.client.read-timeout", "1m") // read timed out sometimes happens with the default timeout
-                        .putAll(deltaStorageConfiguration())
-                        .buildOrThrow())
-                .setSchemaLocation(getLocationForTable(bucketName, SCHEMA))
-                .build();
+        ImmutableMap.Builder<String, String> deltaProperties = ImmutableMap.<String, String>builder()
+                .put("delta.metadata.cache-ttl", TEST_METADATA_CACHE_TTL_SECONDS + "s")
+                .put("hive.metastore-cache-ttl", TEST_METADATA_CACHE_TTL_SECONDS + "s")
+                .put("delta.register-table-procedure.enabled", "true")
+                .putAll(deltaStorageConfiguration());
+
+        DeltaLakeQueryRunner.Builder builder = DeltaLakeQueryRunner.builder(SCHEMA)
+                .setSchemaLocation(getLocationForTable(bucketName, SCHEMA));
+        if (hiveHadoop == null) {
+            builder.setMetastore(metastore);
+        }
+        else {
+            deltaProperties
+                    .put("hive.metastore.uri", hiveHadoop.getHiveMetastoreEndpoint().toString())
+                    .put("hive.metastore.thrift.client.read-timeout", "1m") // read timed out sometimes happens with the default timeout
+                    .put("fs.hadoop.enabled", "true");
+        }
+        builder.setDeltaProperties(deltaProperties.buildOrThrow());
+        getBlobCacheProperties().ifPresent(properties -> {
+            builder.withPlugin(getBlobCachePlugin());
+            builder.withBlobCache(getBlobCacheType(), properties);
+        });
+        return builder.build();
+    }
+
+    protected String getBlobCacheType()
+    {
+        return "alluxio";
+    }
+
+    protected Plugin getBlobCachePlugin()
+    {
+        return new AlluxioBlobCachePlugin();
+    }
+
+    protected Optional<Map<String, String>> getBlobCacheProperties()
+    {
+        return Optional.empty();
     }
 
     @AfterAll
-    public void cleanUp()
+    final void cleanUp()
     {
         hiveHadoop = null; // closed by closeAfterClass
+        metastore = null;
     }
 
     @Override
@@ -254,38 +310,41 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
     @Test
     public void testDropSchemaExternalFiles()
+            throws Exception
     {
         String schemaName = "externalFileSchema";
         String schemaDir = bucketUrl() + "drop-schema-with-external-files/";
-        String subDir = schemaDir + "subdir/";
-        String externalFile = subDir + "external-file";
+        String externalFile = schemaDir + "subdir/external-file";
+        TrinoFileSystem fileSystem = fileSystemFactory.create(ConnectorIdentity.ofUser("test"));
+        Location externalFileLocation = Location.of(externalFile);
 
         // Create file in a subdirectory of the schema directory before creating schema
-        hiveHadoop.executeInContainerFailOnError("hdfs", "dfs", "-mkdir", "-p", subDir);
-        hiveHadoop.executeInContainerFailOnError("hdfs", "dfs", "-touchz", externalFile);
+        fileSystem.newOutputFile(externalFileLocation).createOrOverwrite(new byte[0]);
 
         assertUpdate(format("CREATE SCHEMA %s WITH (location = '%s')", schemaName, schemaDir));
-        assertThat(hiveHadoop.executeInContainer("hdfs", "dfs", "-test", "-e", externalFile).getExitCode())
+        assertThat(fileSystem.newInputFile(externalFileLocation).exists())
                 .as("external file exists after creating schema")
-                .isEqualTo(0);
+                .isTrue();
 
         assertUpdate("DROP SCHEMA " + schemaName);
-        assertThat(hiveHadoop.executeInContainer("hdfs", "dfs", "-test", "-e", externalFile).getExitCode())
+        assertThat(fileSystem.newInputFile(externalFileLocation).exists())
                 .as("external file exists after dropping schema")
-                .isEqualTo(0);
+                .isTrue();
 
         // Test behavior without external file
-        hiveHadoop.executeInContainerFailOnError("hdfs", "dfs", "-rm", "-r", subDir);
+        fileSystem.deleteFile(externalFileLocation);
+        Location schemaLocation = externalFileLocation.parentDirectory().parentDirectory();
+        fileSystem.createDirectory(schemaLocation);
 
         assertUpdate(format("CREATE SCHEMA %s WITH (location = '%s')", schemaName, schemaDir));
-        assertThat(hiveHadoop.executeInContainer("hdfs", "dfs", "-test", "-d", schemaDir).getExitCode())
+        assertThat(fileSystem.directoryExists(schemaLocation))
                 .as("schema directory exists after creating schema")
-                .isEqualTo(0);
+                .isNotEqualTo(Optional.of(false));
 
         assertUpdate("DROP SCHEMA " + schemaName);
-        assertThat(hiveHadoop.executeInContainer("hdfs", "dfs", "-test", "-e", externalFile).getExitCode())
+        assertThat(fileSystem.directoryExists(schemaLocation))
                 .as("schema directory deleted after dropping schema without external file")
-                .isEqualTo(1);
+                .isNotEqualTo(Optional.of(true));
     }
 
     protected abstract String bucketUrl();
@@ -348,11 +407,13 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     public void testCreateTablePartitionValidation()
     {
         String tableName = "test_create_table_partition_validation_" + randomNameSuffix();
-        assertQueryFails("CREATE TABLE " + tableName + " (a int, b VARCHAR, c TIMESTAMP WITH TIME ZONE) " +
+        assertQueryFails(
+                "CREATE TABLE " + tableName + " (a int, b VARCHAR, c TIMESTAMP WITH TIME ZONE) " +
                         "WITH (location = '" + getLocationForTable(bucketName, tableName) + "', partitioned_by = ARRAY['a', 'd', 'e'])",
                 "Table property 'partitioned_by' contained column names which do not exist: \\[d, e]");
 
-        assertQueryFails("CREATE TABLE " + tableName + " (a, b, c) " +
+        assertQueryFails(
+                "CREATE TABLE " + tableName + " (a, b, c) " +
                         "WITH (location = '" + getLocationForTable(bucketName, tableName) + "', partitioned_by = ARRAY['a', 'd', 'e']) " +
                         "AS VALUES (1, 'one', TIMESTAMP '2020-02-03 01:02:03.123 UTC')",
                 "Table property 'partitioned_by' contained column names which do not exist: \\[d, e]");
@@ -526,10 +587,24 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         String schemaName = "test_schema" + randomNameSuffix();
         String viewName = "dummy_view";
         assertUpdate("CREATE SCHEMA " + schemaName);
-        hiveHadoop.runOnHive(format("CREATE VIEW %s.%s AS SELECT * FROM %s.customer", schemaName, viewName, SCHEMA));
+
+        Table.Builder view = Table.builder()
+                .setDatabaseName(schemaName)
+                .setTableName(viewName)
+                .setOwner(Optional.of(getSession().getUser()))
+                .setTableType(VIRTUAL_VIEW.name())
+                .setDataColumns(ImmutableList.of(new Column("dummy", HIVE_STRING, Optional.empty(), Map.of())))
+                .setViewOriginalText(Optional.of(format("SELECT * FROM %s.customer", SCHEMA)))
+                .setViewExpandedText(Optional.of(format("SELECT * FROM %s.customer", SCHEMA)));
+        view.getStorageBuilder()
+                .setStorageFormat(VIEW_STORAGE_FORMAT)
+                .setLocation("");
+        metastore.createTable(view.build(), NO_PRIVILEGES);
+
         assertThat(computeScalar(format("SHOW TABLES FROM %s LIKE '%s'", schemaName, viewName))).isEqualTo(viewName);
         assertThatThrownBy(() -> computeActual("DESCRIBE " + schemaName + "." + viewName)).hasMessageContaining(format("%s.%s is not a Delta Lake table", schemaName, viewName));
-        hiveHadoop.runOnHive("DROP DATABASE " + schemaName + " CASCADE");
+        metastore.dropTable(schemaName, viewName, true);
+        metastore.dropDatabase(schemaName, true);
     }
 
     @Test
@@ -596,7 +671,10 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                                 "   location = '%s',\n" +
                                 "   partitioned_by = ARRAY['regionkey']\n" +
                                 ")",
-                        DELTA_CATALOG, SCHEMA, tableName, getLocationForTable(bucketName, tableName)));
+                        DELTA_CATALOG,
+                        SCHEMA,
+                        tableName,
+                        getLocationForTable(bucketName, tableName)));
         assertQuery("SELECT * FROM " + tableName, "SELECT name, regionkey, comment FROM nation");
         assertUpdate("DROP TABLE " + tableName);
     }
@@ -623,7 +701,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         String tableName = "test_create_table_partitioned_by_date_" + randomNameSuffix();
         assertUpdate(
                 format("CREATE TABLE %s (i, d) WITH (location = '%s', partitioned_by = ARRAY['d']) AS VALUES (1, DATE '2020-01-01'), (2, DATE '1700-01-01')",
-                        tableName, getLocationForTable(bucketName, tableName)),
+                        tableName,
+                        getLocationForTable(bucketName, tableName)),
                 2);
         assertQuery("SELECT * FROM " + tableName, "VALUES (1, DATE '2020-01-01'), (2, DATE '1700-01-01')");
     }
@@ -761,17 +840,23 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         List<MaterializedRow> materializedRows = getQueryRunner()
                 .execute("SELECT DISTINCT regexp_replace(\"$path\", '(.*[/][^/]*)[/][^/]*$', '$1') FROM " + schemaName + "." + tableName)
                 .getMaterializedRows();
-        assertThat(materializedRows.size()).isEqualTo(1);
+        assertThat(materializedRows).hasSize(1);
         assertThat((String) materializedRows.get(0).getField(0)).matches(format("%s/%s.*", schemaLocation, tableName));
     }
 
     @Test
     @Override
     public void testRenameTable()
+            throws Exception
     {
-        assertThatThrownBy(super::testRenameTable)
-                .hasMessage("Renaming managed tables is not allowed with current metastore configuration")
-                .hasStackTraceContaining("SQL: ALTER TABLE test_rename_");
+        if (supportsManagedTableRename()) {
+            super.testRenameTable();
+        }
+        else {
+            assertThatThrownBy(super::testRenameTable)
+                    .hasMessage("Renaming managed tables is not allowed with current metastore configuration")
+                    .hasStackTraceContaining("SQL: ALTER TABLE test_rename_");
+        }
     }
 
     @Test
@@ -803,10 +888,21 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     @Test
     @Override
     public void testRenameTableAcrossSchemas()
+            throws Exception
     {
-        assertThatThrownBy(super::testRenameTableAcrossSchemas)
-                .hasMessage("Renaming managed tables is not allowed with current metastore configuration")
-                .hasStackTraceContaining("SQL: ALTER TABLE test_rename_");
+        if (supportsManagedTableRename()) {
+            super.testRenameTableAcrossSchemas();
+        }
+        else {
+            assertThatThrownBy(super::testRenameTableAcrossSchemas)
+                    .hasMessage("Renaming managed tables is not allowed with current metastore configuration")
+                    .hasStackTraceContaining("SQL: ALTER TABLE test_rename_");
+        }
+    }
+
+    protected boolean supportsManagedTableRename()
+    {
+        return false;
     }
 
     @Test
@@ -886,7 +982,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                 "SELECT count(*) FROM nation");
         int fileCount = getTableFiles(tableName).size();
         assertUpdate(format("DROP TABLE %s.%s", schemaName, tableName));
-        assertThat(getTableFiles(tableName).size()).isEqualTo(fileCount);
+        assertThat(getTableFiles(tableName)).hasSize(fileCount);
     }
 
     @Test
@@ -924,7 +1020,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         assertUpdate("CREATE TABLE " + tableName + " (id int, data array(timestamp with time zone)) " +
                 "WITH (location = '" + getLocationForTable(bucketName, tableName) + "') ");
 
-        String values = """
+        String values =
+                """
                 (1, ARRAY[timestamp '2012-01-01 01:02:03.123 UTC']),
                 (2, ARRAY[NULL]),
                 (3, NULL)
@@ -946,7 +1043,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         assertUpdate("CREATE TABLE " + tableName + " (id int, data map(timestamp with time zone, timestamp with time zone)) " +
                 "WITH (location = '" + getLocationForTable(bucketName, tableName) + "') ");
 
-        String values = """
+        String values =
+                """
                 (1, MAP(ARRAY[timestamp '2012-01-01 01:02:03.123 UTC'], ARRAY[timestamp '2012-02-01 01:02:03.123 UTC'])),
                 (2, MAP(ARRAY[timestamp '2023-12-31 03:02:01.321 UTC'], ARRAY[NULL])),
                 (3, MAP(NULL, NULL)),
@@ -969,7 +1067,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         assertUpdate("CREATE TABLE " + tableName + " (id int, data row(ts_tz timestamp with time zone)) " +
                 "WITH (location = '" + getLocationForTable(bucketName, tableName) + "') ");
 
-        String values = """
+        String values =
+                """
                 (1, CAST(ROW(timestamp '2012-01-01 01:02:03.123 UTC') AS ROW(ts_tz timestamp with time zone))),
                 (2, CAST(ROW(NULL) AS ROW(ts_tz timestamp with time zone))),
                 (3, CAST(NULL AS ROW(ts_tz timestamp with time zone)))
@@ -991,7 +1090,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         assertUpdate("CREATE TABLE " + tableName + " (id int, parent row(child row(grandchild timestamp with time zone))) " +
                 "WITH (location = '" + getLocationForTable(bucketName, tableName) + "') ");
 
-        String values = """
+        String values =
+                """
                 (1, CAST(ROW(ROW(timestamp '2012-01-01 01:02:03.123 UTC')) AS ROW(child ROW(grandchild timestamp with time zone)))),
                 (2, CAST(ROW(ROW(NULL)) AS ROW(child ROW(grandchild timestamp with time zone)))),
                 (3, CAST(NULL AS ROW(child ROW(grandchild timestamp with time zone))))
@@ -1073,7 +1173,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         // The first two entries created by Databricks have column stats.
         // The last one doesn't have column stats because the connector doesn't support collecting it on row columns.
-        List<AddFileEntry> addFileEntries = getTableActiveFiles(transactionLogAccess, tableLocation).stream()
+        List<AddFileEntry> addFileEntries = getTableActiveFiles(transactionLogAccess, fileSystemFactory, tableLocation).stream()
                 .sorted(comparing(AddFileEntry::getModificationTime))
                 .toList();
         assertThat(addFileEntries).hasSize(3);
@@ -1170,7 +1270,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                         "(3, NULL, NULL, 'DaTaBrIcKs')," +
                         "(4, NULL, NULL, NULL)");
 
-        assertUpdate("INSERT INTO insert_nested_nonlowercase_columns VALUES " +
+        assertUpdate(
+                "INSERT INTO insert_nested_nonlowercase_columns VALUES " +
                         "(10, ROW('trino', 'TRINO', 'TrInO'))," +
                         "(20, ROW('trino', 'TRINO', NULL))," +
                         "(30, ROW(NULL, NULL, 'TrInO'))," +
@@ -1353,7 +1454,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         assertUpdate(format("DELETE FROM %s WHERE a_string = 'kreta'", tableName), 1);
 
         // sanity check
-        assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(0);
+        assertThat(listCheckpointFiles(transactionLogDirectory)).isEmpty();
         assertQuery("SELECT * FROM " + tableName, "VALUES (1,'ala'),  (3,'psa'), (2, 'bobra')");
 
         // fill to first checkpoint which reads JSON files
@@ -1378,7 +1479,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         testCheckpointWriteStatsAsStruct("smallint", "3", "32767", "0.0", "3", "32767");
         testCheckpointWriteStatsAsStruct("bigint", "1000", "9223372036854775807", "0.0", "1000", "9223372036854775807");
         testCheckpointWriteStatsAsStruct("real", "0.1", "999999.999", "0.0", "0.1", "1000000.0");
-        testCheckpointWriteStatsAsStruct("double", "1.0", "9999999999999.999", "0.0", "1.0", "'1.0E13'");
+        testCheckpointWriteStatsAsStruct("double", "1.0", "9999999999999.999", "0.0", "1.0", "'9.999999999999998E12'");
         testCheckpointWriteStatsAsStruct("decimal(3,2)", "3.14", "9.99", "0.0", "3.14", "9.99");
         testCheckpointWriteStatsAsStruct("decimal(30,1)", "12345", "99999999999999999999999999999.9", "0.0", "12345.0", "'1.0E29'");
         testCheckpointWriteStatsAsStruct("varchar", "'test'", "'ŻŻŻŻŻŻŻŻŻŻ'", "0.0", "null", "null");
@@ -1402,7 +1503,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                         getLocationForTable(bucketName, tableName)));
         assertUpdate(
                 disableStatisticsCollectionOnWrite(getSession()),
-                "INSERT INTO " + tableName + " SELECT " + sampleValue + " UNION ALL SELECT " + highValue, 2);
+                "INSERT INTO " + tableName + " SELECT " + sampleValue + " UNION ALL SELECT " + highValue,
+                2);
 
         // TODO: Open checkpoint parquet file and verify 'stats_parsed' field directly
         assertThat(getTableFiles(tableName))
@@ -1440,7 +1542,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     }
 
     @Test
-    public void testCreateOrReplaceCheckpointing()
+    public void testCreateOrReplaceWithSameSchemaWritesCheckpoint()
     {
         String tableName = "test_create_or_replace_checkpointing_" + randomNameSuffix();
         assertUpdate(
@@ -1454,30 +1556,67 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         String transactionLogDirectory = format("%s/_delta_log", tableName);
 
         assertUpdate(format("INSERT INTO %s VALUES (2, 'kota'), (3, 'psa')", tableName), 2);
-        assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(0);
+        assertThat(listCheckpointFiles(transactionLogDirectory)).isEmpty();
         assertQuery("SELECT * FROM " + tableName, "VALUES (1,'ala'),  (2,'kota'), (3, 'psa')");
 
-        // replace table
+        // replace table with same schema, expect a checkpoint because the checkpoint interval threshold has been reached
         assertUpdate(
-                format("CREATE OR REPLACE TABLE %s (a_number integer) " +
+                format("CREATE OR REPLACE TABLE %s (a_number integer, a_string varchar) " +
                                 " WITH (checkpoint_interval = 2)",
                         tableName));
         assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(1);
         assertThat(query("SELECT * FROM " + tableName)).returnsEmptyResult();
 
-        assertUpdate(format("INSERT INTO " + tableName + " VALUES 1", tableName), 1);
+        assertUpdate(format("INSERT INTO " + tableName + " VALUES (1, 'bobra')", tableName), 1);
         assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(1);
-        assertQuery("SELECT * FROM " + tableName, "VALUES 1");
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 'bobra')");
 
         // replace table with selection
         assertUpdate(
-                format("CREATE OR REPLACE TABLE %s (a_string) " +
+                format("CREATE OR REPLACE TABLE %s (a_number, a_string) " +
                                 " WITH (checkpoint_interval = 2) " +
-                                " AS VALUES 'bobra', 'kreta'",
+                                " AS VALUES (1, 'bobra'), (2, 'kreta')",
                         tableName),
                 2);
         assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(2);
-        assertQuery("SELECT * FROM " + tableName, "VALUES 'bobra', 'kreta'");
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 'bobra'), (2, 'kreta')");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testCreateOrReplaceWithDifferentSchemaWritesCheckpoint()
+    {
+        String tableName = "test_create_or_replace_checkpointing_" + randomNameSuffix();
+        assertUpdate(
+                format("CREATE OR REPLACE TABLE %s (a_number, a_string) " +
+                                " WITH (location = '%s', " +
+                                "       partitioned_by = ARRAY['a_number']) " +
+                                " AS VALUES (1, 'ala')",
+                        tableName,
+                        getLocationForTable(bucketName, tableName)),
+                1);
+        String transactionLogDirectory = format("%s/_delta_log", tableName);
+
+        assertUpdate(format("INSERT INTO %s VALUES (2, 'kota'), (3, 'psa')", tableName), 2);
+        assertThat(listCheckpointFiles(transactionLogDirectory)).isEmpty();
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1,'ala'),  (2,'kota'), (3, 'psa')");
+
+        // replace table with same schema and a large checkpoint_interval, expect no new checkpoint
+        assertUpdate(
+                format("CREATE OR REPLACE TABLE %s (a_number integer, a_string varchar) " +
+                                " WITH (checkpoint_interval = 100)",
+                        tableName));
+        assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(0);
+        assertThat(query("SELECT * FROM " + tableName)).returnsEmptyResult();
+
+        // replace table with a different schema and a large checkpoint_interval, expect a new checkpoint because columns have changed
+        assertUpdate(
+                format("CREATE OR REPLACE TABLE %s (a_number integer, a_string integer) " +
+                                " WITH (checkpoint_interval = 100)",
+                        tableName));
+        assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(1);
+        assertThat(query("SELECT * FROM " + tableName)).returnsEmptyResult();
 
         assertUpdate("DROP TABLE " + tableName);
     }
@@ -1605,7 +1744,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                         + " WITH ("
                         + "location = '" + getLocationForTable(bucketName, tableName) + "'"
                         + ")"
-                        + " AS SELECT * FROM tpch.sf1.nation", 25);
+                        + " AS SELECT * FROM tpch.sf1.nation",
+                25);
 
         assertQuery(
                 "SHOW STATS FOR " + tableName,
@@ -1652,7 +1792,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         assertUpdate(format("INSERT INTO %s VALUES (10, 'kota')", tableName), 1);
 
         // there should not be a checkpoint yet
-        assertThat(listCheckpointFiles(transactionLogDirectory)).hasSize(0);
+        assertThat(listCheckpointFiles(transactionLogDirectory)).isEmpty();
         testCountQuery(format("SELECT count(*) FROM %s WHERE a_number <= 3", tableName), 3, 3);
 
         // perform one more insert to ensure checkpoint
@@ -1733,7 +1873,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(union(initialFiles, updatedFiles));
 
             // vacuum with low retention period
-            MILLISECONDS.sleep(1_000 - timeSinceUpdate.elapsed(MILLISECONDS) + 1);
+            MILLISECONDS.sleep(2_000 - timeSinceUpdate.elapsed(MILLISECONDS) + 1);
             assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(schema_name => CURRENT_SCHEMA, table_name => '" + tableName + "', retention => '1s')");
             // table data shouldn't change
             assertThat(query("SELECT * FROM " + tableName))
@@ -1779,11 +1919,57 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(union(initialFiles, updatedFiles));
 
             // vacuum with low retention period
-            MILLISECONDS.sleep(1_000 - timeSinceUpdate.elapsed(MILLISECONDS) + 1);
+            MILLISECONDS.sleep(2_000 - timeSinceUpdate.elapsed(MILLISECONDS) + 1);
             assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(schema_name => CURRENT_SCHEMA, table_name => '" + tableName + "', retention => '1s')");
             // table data shouldn't change
             assertThat(query("SELECT * FROM " + tableName))
                     .matches("SELECT nationkey + 100, CAST(name AS varchar), regionkey, CAST(comment AS varchar) FROM tpch.tiny.nation");
+            // active files shouldn't change
+            assertThat(getActiveFiles(tableName)).isEqualTo(updatedFiles);
+            // old files should be cleaned up
+            assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(updatedFiles);
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
+    }
+
+    @Test
+    public void testVacuumWithWhiteSpace()
+            throws Exception
+    {
+        String catalog = getSession().getCatalog().orElseThrow();
+        String tableName = "test_vacuum_white_space_" + randomNameSuffix();
+        String tableLocation = getLocationForTable(bucketName, tableName) + "/";
+        Session sessionWithShortRetentionUnlocked = Session.builder(getSession())
+                .setCatalogSessionProperty(catalog, "vacuum_min_retention", "0s")
+                .build();
+
+        assertUpdate(format("CREATE TABLE %s (val int, col_white_space timestamp(6)) WITH (location = '%s', partitioned_by = ARRAY['col_white_space'])", tableName, tableLocation));
+
+        try {
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, TIMESTAMP '2024-12-13 11:00:00.000000'), (2, TIMESTAMP '2024-12-13 12:00:00.000000')", 2);
+
+            Set<String> initialFiles = getActiveFiles(tableName);
+            assertThat(initialFiles).hasSize(2);
+
+            computeActual("UPDATE " + tableName + " SET val = val + 100");
+            Stopwatch timeSinceUpdate = Stopwatch.createStarted();
+            Set<String> updatedFiles = getActiveFiles(tableName);
+            assertThat(updatedFiles).hasSize(2).doesNotContainAnyElementsOf(initialFiles);
+            assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(union(initialFiles, updatedFiles));
+
+            // vacuum with high retention period, nothing should change
+            assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(CURRENT_SCHEMA, '" + tableName + "', '10m')");
+            assertQuery("SELECT * FROM " + tableName, "VALUES (101, TIMESTAMP '2024-12-13 11:00:00.000000'), (102, TIMESTAMP '2024-12-13 12:00:00.000000')");
+            assertThat(getActiveFiles(tableName)).isEqualTo(updatedFiles);
+            assertThat(getAllDataFilesFromTableDirectory(tableName)).isEqualTo(union(initialFiles, updatedFiles));
+
+            // vacuum with low retention period
+            MILLISECONDS.sleep(2_000 - timeSinceUpdate.elapsed(MILLISECONDS) + 1);
+            assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(CURRENT_SCHEMA, '" + tableName + "', '1s')");
+            // table data shouldn't change
+            assertQuery("SELECT * FROM " + tableName, "VALUES (101, TIMESTAMP '2024-12-13 11:00:00.000000'), (102, TIMESTAMP '2024-12-13 12:00:00.000000')");
             // active files shouldn't change
             assertThat(getActiveFiles(tableName)).isEqualTo(updatedFiles);
             // old files should be cleaned up
@@ -2074,7 +2260,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     public void testHistoryTable()
     {
         String tableName = "test_history_table_" + randomNameSuffix();
-        try (TestTable table = new TestTable(getQueryRunner()::execute, tableName, "(int_col INTEGER)")) {
+        try (TestTable table = newTrinoTable(tableName, "(int_col INTEGER)")) {
             assertUpdate("INSERT INTO " + table.getName() + " VALUES 1, 2, 3", 3);
             assertUpdate("INSERT INTO " + table.getName() + " VALUES 4, 5, 6", 3);
             assertUpdate("DELETE FROM " + table.getName() + " WHERE int_col = 1", 1);
@@ -2093,8 +2279,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     @Test
     public void testHistoryTableWithDeletedTransactionLog()
     {
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_history_table_with_deleted_transaction_log",
                 "(int_col INTEGER) WITH (checkpoint_interval = 3)")) {
             assertUpdate("INSERT INTO " + table.getName() + " VALUES 1, 2, 3", 3);
@@ -2278,7 +2463,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
 
         assertUpdate("CREATE TABLE " + tableName +
                 " (id BIGINT, nested1 ROW(child1 BIGINT, child2 VARCHAR, child3 INT), nested2 ROW(child1 DOUBLE, child2 BOOLEAN, child3 DATE))");
-        assertUpdate("INSERT INTO " + tableName + " VALUES" +
+        assertUpdate(
+                "INSERT INTO " + tableName + " VALUES" +
                         " (100, ROW(10, 'a', 100), ROW(10.10, true, DATE '2023-04-19'))," +
                         " (3, ROW(30, 'to_be_deleted', 300), ROW(30.30, false, DATE '2000-04-16'))," +
                         " (2, ROW(20, 'b', 200), ROW(20.20, false, DATE '1990-04-20'))," +
@@ -2319,8 +2505,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                 .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "query_partition_filter_required", "true")
                 .build();
 
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_no_partition_filter",
                 "(x varchar, part varchar) WITH (PARTITIONED_BY = ARRAY['part'])",
                 ImmutableList.of("'a', 'part_a'", "'b', 'part_b'"))) {
@@ -2332,7 +2517,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     @Test
     public void testCreateOrReplaceTable()
     {
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_table", " AS SELECT BIGINT '42' a, DOUBLE '-38.5' b")) {
+        try (TestTable table = newTrinoTable("test_table", " AS SELECT BIGINT '42' a, DOUBLE '-38.5' b")) {
             assertThat(query("SELECT CAST(a AS bigint), b FROM " + table.getName()))
                     .matches("VALUES (BIGINT '42', -385e-1)");
 
@@ -2347,7 +2532,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     @Test
     public void testCreateOrReplaceTableAs()
     {
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_table", " AS SELECT BIGINT '42' a, DOUBLE '-38.5' b")) {
+        try (TestTable table = newTrinoTable("test_table", " AS SELECT BIGINT '42' a, DOUBLE '-38.5' b")) {
             assertThat(query("SELECT CAST(a AS bigint), b FROM " + table.getName()))
                     .matches("VALUES (BIGINT '42', -385e-1)");
 
@@ -2363,7 +2548,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
     @Test
     public void testCreateOrReplaceTableChangeColumnNamesAndTypes()
     {
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_table", " AS SELECT BIGINT '42' a, DOUBLE '-38.5' b")) {
+        try (TestTable table = newTrinoTable("test_table", " AS SELECT BIGINT '42' a, DOUBLE '-38.5' b")) {
             assertThat(query("SELECT CAST(a AS bigint), b FROM " + table.getName()))
                     .matches("VALUES (BIGINT '42', -385e-1)");
 
@@ -2387,7 +2572,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         CyclicBarrier barrier = new CyclicBarrier(threads + 1);
         ExecutorService executor = newFixedThreadPool(threads + 1);
         List<Future<?>> futures = new ArrayList<>();
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_create_or_replace", "(col integer)")) {
+        try (TestTable table = newTrinoTable("test_create_or_replace", "(col integer)")) {
             String tableName = table.getName();
 
             getQueryRunner().execute("CREATE OR REPLACE TABLE " + tableName + " AS SELECT 1 a");
@@ -2396,7 +2581,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             // One thread submits some CREATE OR REPLACE statements
             futures.add(executor.submit(() -> {
                 barrier.await(30, SECONDS);
-                IntStream.range(0, numOfCreateOrReplaceStatements).forEach(index -> {
+                IntStream.range(0, numOfCreateOrReplaceStatements).forEach(_ -> {
                     try {
                         getQueryRunner().execute("CREATE OR REPLACE TABLE " + tableName + " AS SELECT * FROM (VALUES (1), (2)) AS t(a) ");
                     }
@@ -2417,9 +2602,9 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             }));
             // Other 4 threads continue try to read the same table, none of the reads should fail.
             IntStream.range(0, threads)
-                    .forEach(threadNumber -> futures.add(executor.submit(() -> {
+                    .forEach(_ -> futures.add(executor.submit(() -> {
                         barrier.await(30, SECONDS);
-                        IntStream.range(0, numOfReads).forEach(readIndex -> {
+                        IntStream.range(0, numOfReads).forEach(_ -> {
                             try {
                                 MaterializedResult result = computeActual("SELECT * FROM " + tableName);
                                 if (result.getRowCount() == 1) {
@@ -2508,12 +2693,12 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, 10), (11, 20), (21, 30)");
             assertQuery("SELECT version, operation, isolation_level, read_version FROM \"" + tableName + "$history\"",
                     """
-                            VALUES
-                                (0, 'CREATE TABLE', 'WriteSerializable', 0),
-                                (1, 'WRITE', 'WriteSerializable', 0),
-                                (2, 'WRITE', 'WriteSerializable', 1),
-                                (3, 'WRITE', 'WriteSerializable', 2)
-                            """);
+                    VALUES
+                        (0, 'CREATE TABLE', 'WriteSerializable', 0),
+                        (1, 'WRITE', 'WriteSerializable', 0),
+                        (2, 'WRITE', 'WriteSerializable', 1),
+                        (3, 'WRITE', 'WriteSerializable', 2)
+                    """);
         }
         finally {
             assertUpdate("DROP TABLE " + tableName);
@@ -2549,7 +2734,7 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             // T2: (2, 10)
             // T3: (3, 10)
             List<Future<Boolean>> futures = IntStream.range(0, threads)
-                    .mapToObj(threadNumber -> executor.submit(() -> {
+                    .mapToObj(_ -> executor.submit(() -> {
                         barrier.await(10, SECONDS);
                         try {
                             getQueryRunner().execute("INSERT INTO " + tableName + " SELECT COUNT(*), 10 AS part FROM " + tableName);
@@ -2639,12 +2824,12 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
             assertQuery(
                     "SELECT operation, isolation_level, is_blind_append FROM \"" + tableName + "$history\"",
                     """
-                            VALUES
-                                ('CREATE TABLE AS SELECT', 'WriteSerializable', true),
-                                ('WRITE', 'WriteSerializable', false),
-                                ('WRITE', 'WriteSerializable', false),
-                                ('WRITE', 'WriteSerializable', true)
-                            """);
+                    VALUES
+                        ('CREATE TABLE AS SELECT', 'WriteSerializable', true),
+                        ('WRITE', 'WriteSerializable', false),
+                        ('WRITE', 'WriteSerializable', false),
+                        ('WRITE', 'WriteSerializable', true)
+                    """);
         }
         finally {
             assertUpdate("DROP TABLE " + tableName);
@@ -2686,14 +2871,15 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                     .forEach(MoreFutures::getDone);
 
             assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (31, 40)");
-            assertQuery("SELECT version, operation, isolation_level FROM \"" + tableName + "$history\"",
+            assertQuery(
+                    "SELECT version, operation, isolation_level FROM \"" + tableName + "$history\"",
                     """
-                            VALUES
-                                (0, 'CREATE TABLE AS SELECT', 'WriteSerializable'),
-                                (1, 'DELETE', 'WriteSerializable'),
-                                (2, 'DELETE', 'WriteSerializable'),
-                                (3, 'DELETE', 'WriteSerializable')
-                            """);
+                    VALUES
+                        (0, 'CREATE TABLE AS SELECT', 'WriteSerializable'),
+                        (1, 'DELETE', 'WriteSerializable'),
+                        (2, 'DELETE', 'WriteSerializable'),
+                        (3, 'DELETE', 'WriteSerializable')
+                    """);
         }
         finally {
             assertUpdate("DROP TABLE " + tableName);
@@ -2715,14 +2901,14 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
         // Add more files in the partition 30
         assertUpdate("INSERT INTO " + tableName + " VALUES (22, 30)", 1);
 
-
         try {
             // merge data concurrently by using non-overlapping partition predicate
             executor.invokeAll(ImmutableList.<Callable<Void>>builder()
                             .add(() -> {
                                 barrier.await(10, SECONDS);
                                 // No source table handles are employed for this MERGE statement, which causes a blind insert
-                                getQueryRunner().execute("""
+                                getQueryRunner().execute(
+                                        """
                                         MERGE INTO %s t USING (VALUES (12, 20)) AS s(a, part)
                                           ON (FALSE)
                                             WHEN NOT MATCHED THEN INSERT (a, part) VALUES(s.a, s.part)
@@ -2731,7 +2917,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                             })
                             .add(() -> {
                                 barrier.await(10, SECONDS);
-                                getQueryRunner().execute("""
+                                getQueryRunner().execute(
+                                        """
                                         MERGE INTO %s t USING (VALUES (21, 30)) AS s(a, part)
                                           ON (t.part = s.part)
                                             WHEN MATCHED THEN DELETE
@@ -2740,7 +2927,8 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                             })
                             .add(() -> {
                                 barrier.await(10, SECONDS);
-                                getQueryRunner().execute("""
+                                getQueryRunner().execute(
+                                        """
                                         MERGE INTO %s t USING (VALUES (32, 40)) AS s(a, part)
                                           ON (t.part = s.part)
                                             WHEN MATCHED THEN UPDATE SET a = s.a
@@ -2751,15 +2939,16 @@ public abstract class BaseDeltaLakeConnectorSmokeTest
                     .forEach(MoreFutures::getDone);
 
             assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, 10), (11, 20), (12, 20), (32, 40)");
-            assertQuery("SELECT operation, isolation_level, is_blind_append FROM \"" + tableName + "$history\"",
+            assertQuery(
+                    "SELECT operation, isolation_level, is_blind_append FROM \"" + tableName + "$history\"",
                     """
-                            VALUES
-                                ('CREATE TABLE AS SELECT', 'WriteSerializable', true),
-                                ('WRITE', 'WriteSerializable', true),
-                                ('MERGE', 'WriteSerializable', true),
-                                ('MERGE', 'WriteSerializable', false),
-                                ('MERGE', 'WriteSerializable', false)
-                            """);
+                    VALUES
+                        ('CREATE TABLE AS SELECT', 'WriteSerializable', true),
+                        ('WRITE', 'WriteSerializable', true),
+                        ('MERGE', 'WriteSerializable', true),
+                        ('MERGE', 'WriteSerializable', false),
+                        ('MERGE', 'WriteSerializable', false)
+                    """);
         }
         finally {
             assertUpdate("DROP TABLE " + tableName);

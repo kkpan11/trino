@@ -13,14 +13,8 @@
  */
 package io.trino.plugin.opensearch.client;
 
-import com.amazonaws.auth.AWSCredentialsProvider;
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
-import com.amazonaws.auth.STSAssumeRoleSessionCredentialsProvider;
-import com.amazonaws.services.securitytoken.AWSSecurityTokenServiceClientBuilder;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -29,7 +23,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
-import io.airlift.json.ObjectMapperProvider;
+import io.airlift.json.JsonMapperProvider;
 import io.airlift.log.Logger;
 import io.airlift.stats.TimeStat;
 import io.airlift.units.Duration;
@@ -39,20 +33,20 @@ import io.trino.plugin.opensearch.PasswordConfig;
 import io.trino.spi.TrinoException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import org.apache.http.HttpEntity;
-import org.apache.http.HttpHost;
-import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.client.CredentialsProvider;
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.conn.ssl.NoopHostnameVerifier;
-import org.apache.http.entity.ByteArrayEntity;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.BasicCredentialsProvider;
-import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
-import org.apache.http.impl.nio.reactor.IOReactorConfig;
-import org.apache.http.message.BasicHeader;
-import org.apache.http.util.EntityUtils;
+import org.apache.hc.client5.http.auth.AuthScope;
+import org.apache.hc.client5.http.auth.UsernamePasswordCredentials;
+import org.apache.hc.client5.http.impl.auth.BasicCredentialsProvider;
+import org.apache.hc.client5.http.impl.nio.PoolingAsyncClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
+import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
+import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.HttpHost;
+import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.hc.core5.http.io.entity.StringEntity;
+import org.apache.hc.core5.http.message.BasicHeader;
+import org.apache.hc.core5.reactor.IOReactorConfig;
+import org.apache.hc.core5.util.Timeout;
 import org.opensearch.OpenSearchStatusException;
 import org.opensearch.action.search.ClearScrollRequest;
 import org.opensearch.action.search.SearchRequest;
@@ -67,16 +61,26 @@ import org.opensearch.index.query.QueryBuilder;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.sts.StsClient;
+import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
 
 import javax.net.ssl.SSLContext;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URISyntaxException;
 import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -102,6 +106,7 @@ import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.apache.hc.core5.http.ContentType.APPLICATION_JSON;
 import static org.opensearch.action.search.SearchType.QUERY_THEN_FETCH;
 
 public class OpenSearchClient
@@ -111,7 +116,7 @@ public class OpenSearchClient
     private static final JsonCodec<SearchShardsResponse> SEARCH_SHARDS_RESPONSE_CODEC = jsonCodec(SearchShardsResponse.class);
     private static final JsonCodec<NodesResponse> NODES_RESPONSE_CODEC = jsonCodec(NodesResponse.class);
     private static final JsonCodec<CountResponse> COUNT_RESPONSE_CODEC = jsonCodec(CountResponse.class);
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapperProvider().get();
+    private static final JsonMapper JSON_MAPPER = new JsonMapperProvider().get();
 
     private static final Pattern ADDRESS_PATTERN = Pattern.compile("((?<cname>[^/]+)/)?(?<ip>.+):(?<port>\\d+)");
     private static final Set<String> NODE_ROLES = ImmutableSet.of("data", "data_content", "data_hot", "data_warm", "data_cold", "data_frozen");
@@ -176,7 +181,14 @@ public class OpenSearchClient
                     .map(OpenSearchNode::address)
                     .filter(Optional::isPresent)
                     .map(Optional::get)
-                    .map(address -> HttpHost.create(format("%s://%s", tlsEnabled ? "https" : "http", address)))
+                    .map(address -> {
+                        try {
+                            return HttpHost.create(format("%s://%s", tlsEnabled ? "https" : "http", address));
+                        }
+                        catch (URISyntaxException e) {
+                            throw new RuntimeException(e);
+                        }
+                    })
                     .toArray(HttpHost[]::new);
 
             if (hosts.length > 0 && !ignorePublishAddress) {
@@ -192,6 +204,7 @@ public class OpenSearchClient
         }
     }
 
+    @SuppressWarnings("deprecation")
     private static BackpressureRestHighLevelClient createClient(
             OpenSearchConfig config,
             Optional<AwsSecurityConfig> awsSecurityConfig,
@@ -200,42 +213,47 @@ public class OpenSearchClient
     {
         RestClientBuilder builder = RestClient.builder(
                 config.getHosts().stream()
-                        .map(httpHost -> new HttpHost(httpHost, config.getPort(), config.isTlsEnabled() ? "https" : "http"))
+                        .map(httpHost -> new HttpHost(config.isTlsEnabled() ? "https" : "http", httpHost, config.getPort()))
                         .toArray(HttpHost[]::new));
 
-        builder.setHttpClientConfigCallback(_ -> {
-            RequestConfig requestConfig = RequestConfig.custom()
-                    .setConnectTimeout(toIntExact(config.getConnectTimeout().toMillis()))
-                    .setSocketTimeout(toIntExact(config.getRequestTimeout().toMillis()))
-                    .build();
+        builder.setRequestConfigCallback(requestConfigBuilder -> requestConfigBuilder
+                .setConnectTimeout(Timeout.ofMilliseconds(config.getConnectTimeout().toMillis()))
+                .setResponseTimeout(Timeout.ofMilliseconds(config.getRequestTimeout().toMillis())));
 
+        builder.setHttpClientConfigCallback(clientBuilder -> {
             IOReactorConfig reactorConfig = IOReactorConfig.custom()
                     .setIoThreadCount(config.getHttpThreadCount())
                     .build();
 
-            // the client builder passed to the call-back is configured to use system properties, which makes it
-            // impossible to configure concurrency settings, so we need to build a new one from scratch
-            HttpAsyncClientBuilder clientBuilder = HttpAsyncClientBuilder.create()
-                    .setDefaultRequestConfig(requestConfig)
-                    .setDefaultIOReactorConfig(reactorConfig)
-                    .setMaxConnPerRoute(config.getMaxHttpConnections())
-                    .setMaxConnTotal(config.getMaxHttpConnections());
-            if (config.isTlsEnabled()) {
-                buildSslContext(config.getKeystorePath(), config.getKeystorePassword(), config.getTrustStorePath(), config.getTruststorePassword())
-                        .ifPresent(clientBuilder::setSSLContext);
+            clientBuilder.setIOReactorConfig(reactorConfig);
 
+            if (config.isTlsEnabled()) {
+                Optional<SSLContext> sslContext = buildSslContext(config.getKeystorePath(), config.getKeystorePassword(), config.getTrustStorePath(), config.getTruststorePassword());
+                ClientTlsStrategyBuilder tlsStrategyBuilder = ClientTlsStrategyBuilder.create();
+                sslContext.ifPresent(tlsStrategyBuilder::setSslContext);
                 if (!config.isVerifyHostnames()) {
-                    clientBuilder.setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
+                    tlsStrategyBuilder.setHostnameVerifier(NoopHostnameVerifier.INSTANCE);
                 }
+                clientBuilder.setConnectionManager(PoolingAsyncClientConnectionManagerBuilder.create()
+                        .setMaxConnPerRoute(config.getMaxHttpConnections())
+                        .setMaxConnTotal(config.getMaxHttpConnections())
+                        .setTlsStrategy(tlsStrategyBuilder.buildAsync())
+                        .build());
+            }
+            else {
+                clientBuilder.setConnectionManager(PoolingAsyncClientConnectionManagerBuilder.create()
+                        .setMaxConnPerRoute(config.getMaxHttpConnections())
+                        .setMaxConnTotal(config.getMaxHttpConnections())
+                        .build());
             }
 
             passwordConfig.ifPresent(securityConfig -> {
-                CredentialsProvider credentials = new BasicCredentialsProvider();
-                credentials.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(securityConfig.getUser(), securityConfig.getPassword()));
+                BasicCredentialsProvider credentials = new BasicCredentialsProvider();
+                credentials.setCredentials(new AuthScope(null, -1), new UsernamePasswordCredentials(securityConfig.getUser(), securityConfig.getPassword().toCharArray()));
                 clientBuilder.setDefaultCredentialsProvider(credentials);
             });
 
-            awsSecurityConfig.ifPresent(securityConfig -> clientBuilder.addInterceptorLast(new AwsRequestSigner(
+            awsSecurityConfig.ifPresent(securityConfig -> clientBuilder.addExecInterceptorLast("AwsRequestSigner", new AwsRequestSigner(
                     securityConfig.getRegion(),
                     securityConfig.getDeploymentType(),
                     getAwsCredentialsProvider(securityConfig))));
@@ -246,23 +264,28 @@ public class OpenSearchClient
         return new BackpressureRestHighLevelClient(builder, config, backpressureStats);
     }
 
-    private static AWSCredentialsProvider getAwsCredentialsProvider(AwsSecurityConfig config)
+    private static AwsCredentialsProvider getAwsCredentialsProvider(AwsSecurityConfig config)
     {
-        AWSCredentialsProvider credentialsProvider = DefaultAWSCredentialsProviderChain.getInstance();
+        AwsCredentialsProvider credentialsProvider = DefaultCredentialsProvider.builder().build();
 
         if (config.getAccessKey().isPresent() && config.getSecretKey().isPresent()) {
-            credentialsProvider = new AWSStaticCredentialsProvider(new BasicAWSCredentials(
+            credentialsProvider = StaticCredentialsProvider.create(AwsBasicCredentials.create(
                     config.getAccessKey().get(),
                     config.getSecretKey().get()));
         }
 
         if (config.getIamRole().isPresent()) {
-            STSAssumeRoleSessionCredentialsProvider.Builder credentialsProviderBuilder = new STSAssumeRoleSessionCredentialsProvider.Builder(config.getIamRole().get(), "trino-session")
-                    .withStsClient(AWSSecurityTokenServiceClientBuilder.standard()
-                            .withRegion(config.getRegion())
-                            .withCredentials(credentialsProvider)
-                            .build());
-            config.getExternalId().ifPresent(credentialsProviderBuilder::withExternalId);
+            StsAssumeRoleCredentialsProvider.Builder credentialsProviderBuilder = StsAssumeRoleCredentialsProvider.builder()
+                    .stsClient(StsClient.builder()
+                            .region(Region.of(config.getRegion()))
+                            .credentialsProvider(credentialsProvider)
+                            .build())
+                    .refreshRequest(request -> {
+                        request
+                                .roleArn(config.getIamRole().get())
+                                .roleSessionName("trino-session");
+                        config.getExternalId().ifPresent(request::externalId);
+                    });
             credentialsProvider = credentialsProviderBuilder.build();
         }
 
@@ -292,7 +315,7 @@ public class OpenSearchClient
         NodesResponse nodesResponse = doRequest("/_nodes/http", NODES_RESPONSE_CODEC::fromJson);
 
         ImmutableSet.Builder<OpenSearchNode> result = ImmutableSet.builder();
-        for (Map.Entry<String, NodesResponse.Node> entry : nodesResponse.getNodes().entrySet()) {
+        for (Entry<String, NodesResponse.Node> entry : nodesResponse.getNodes().entrySet()) {
             String nodeId = entry.getKey();
             NodesResponse.Node node = entry.getValue();
 
@@ -383,7 +406,7 @@ public class OpenSearchClient
         return doRequest("/_cat/indices?h=index,docs.count,docs.deleted&format=json&s=index:asc", body -> {
             try {
                 ImmutableList.Builder<String> result = ImmutableList.builder();
-                JsonNode root = OBJECT_MAPPER.readTree(body);
+                JsonNode root = JSON_MAPPER.readTree(body);
                 for (int i = 0; i < root.size(); i++) {
                     String index = root.get(i).get("index").asText();
                     // make sure the index has mappings we can use to derive the schema
@@ -421,11 +444,9 @@ public class OpenSearchClient
         return doRequest("/_aliases", body -> {
             try {
                 ImmutableMap.Builder<String, List<String>> result = ImmutableMap.builder();
-                JsonNode root = OBJECT_MAPPER.readTree(body);
+                JsonNode root = JSON_MAPPER.readTree(body);
 
-                Iterator<Map.Entry<String, JsonNode>> elements = root.fields();
-                while (elements.hasNext()) {
-                    Map.Entry<String, JsonNode> element = elements.next();
+                for (Entry<String, JsonNode> element : root.properties()) {
                     JsonNode aliases = element.getValue().get("aliases");
                     Iterator<String> aliasNames = aliases.fieldNames();
                     if (aliasNames.hasNext()) {
@@ -446,7 +467,7 @@ public class OpenSearchClient
 
         return doRequest(path, body -> {
             try {
-                JsonNode mappings = OBJECT_MAPPER.readTree(body)
+                JsonNode mappings = JSON_MAPPER.readTree(body)
                         .elements().next()
                         .get("mappings");
 
@@ -468,7 +489,7 @@ public class OpenSearchClient
 
                 JsonNode metaProperties = nullSafeNode(metaNode, "trino");
 
-                //stay backwards compatible with _meta.presto namespace for meta properties for some releases
+                // stay backwards compatible with _meta.presto namespace for meta properties for some releases
                 if (metaProperties.isNull()) {
                     metaProperties = nullSafeNode(metaNode, "presto");
                 }
@@ -483,16 +504,12 @@ public class OpenSearchClient
 
     private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties)
     {
-        Iterator<Map.Entry<String, JsonNode>> entries = properties.fields();
-
         ImmutableList.Builder<IndexMetadata.Field> result = ImmutableList.builder();
-        while (entries.hasNext()) {
-            Map.Entry<String, JsonNode> field = entries.next();
-
+        for (Entry<String, JsonNode> field : properties.properties()) {
             String name = field.getKey();
             JsonNode value = field.getValue();
 
-            //default type is object
+            // default type is object
             String type = "object";
             if (value.has("type")) {
                 type = value.get("type").asText();
@@ -505,33 +522,29 @@ public class OpenSearchClient
             // this route, as it will likely lead to confusion in dealing with array syntax in Trino and potentially nested array and other
             // syntax when parsing the raw json.
             if (isArray && asRawJson) {
-                throw new TrinoException(OPENSEARCH_INVALID_METADATA,
+                throw new TrinoException(
+                        OPENSEARCH_INVALID_METADATA,
                         format("A column, (%s) cannot be declared as a Trino array and also be rendered as json.", name));
             }
 
             switch (type) {
-                case "date":
+                case "date" -> {
                     List<String> formats = ImmutableList.of();
                     if (value.has("format")) {
                         formats = Arrays.asList(value.get("format").asText().split("\\|\\|"));
                     }
                     result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.DateTimeType(formats)));
-                    break;
-                case "scaled_float":
-                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble())));
-                    break;
-                case "nested":
-                case "object":
+                }
+                case "scaled_float" -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble())));
+                case "nested", "object" -> {
                     if (value.has("properties")) {
                         result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode)));
                     }
                     else {
                         LOG.debug("Ignoring empty object field: %s", name);
                     }
-                    break;
-
-                default:
-                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.PrimitiveType(type)));
+                }
+                default -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.PrimitiveType(type)));
             }
         }
 
@@ -557,8 +570,7 @@ public class OpenSearchClient
                             "GET",
                             path,
                             ImmutableMap.of(),
-                            new ByteArrayEntity(query.getBytes(UTF_8)),
-                            new BasicHeader("Content-Type", "application/json"),
+                            new ByteArrayEntity(query.getBytes(UTF_8), APPLICATION_JSON),
                             new BasicHeader("Accept-Encoding", "application/json"));
         }
         catch (IOException e) {
@@ -569,7 +581,7 @@ public class OpenSearchClient
         try {
             body = EntityUtils.toString(response.getEntity());
         }
-        catch (IOException e) {
+        catch (Exception e) {
             throw new TrinoException(OPENSEARCH_INVALID_RESPONSE, e);
         }
 
@@ -581,9 +593,9 @@ public class OpenSearchClient
         SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource()
                 .query(query);
 
-        if (limit.isPresent() && limit.getAsLong() < scrollSize) {
+        if (limit.isPresent() && limit.orElseThrow() < scrollSize) {
             // Safe to cast it to int because scrollSize is int.
-            sourceBuilder.size(toIntExact(limit.getAsLong()));
+            sourceBuilder.size(toIntExact(limit.orElseThrow()));
         }
         else {
             sourceBuilder.size(scrollSize);
@@ -620,8 +632,8 @@ public class OpenSearchClient
             Throwable[] suppressed = e.getSuppressed();
             if (suppressed.length > 0) {
                 Throwable cause = suppressed[0];
-                if (cause instanceof ResponseException) {
-                    throw propagate((ResponseException) cause);
+                if (cause instanceof ResponseException responseException) {
+                    throw propagate(responseException);
                 }
             }
 
@@ -667,7 +679,7 @@ public class OpenSearchClient
                                 "GET",
                                 format("/%s/_count?preference=_shards:%s", index, shard),
                                 ImmutableMap.of(),
-                                new StringEntity(sourceBuilder.toString(), UTF_8),
+                                new StringEntity(sourceBuilder.toString(), APPLICATION_JSON),
                                 new BasicHeader("Content-Type", "application/json"));
             }
             catch (ResponseException e) {
@@ -678,7 +690,7 @@ public class OpenSearchClient
             }
 
             try {
-                return COUNT_RESPONSE_CODEC.fromJson(EntityUtils.toByteArray(response.getEntity()))
+                return COUNT_RESPONSE_CODEC.fromJson(response.getEntity().getContent())
                         .getCount();
             }
             catch (IOException e) {
@@ -743,15 +755,12 @@ public class OpenSearchClient
             throw new TrinoException(OPENSEARCH_CONNECTION_ERROR, e);
         }
 
-        String body;
-        try {
-            body = EntityUtils.toString(response.getEntity());
+        try (InputStream stream = response.getEntity().getContent()) {
+            return handler.process(stream);
         }
         catch (IOException e) {
             throw new TrinoException(OPENSEARCH_INVALID_RESPONSE, e);
         }
-
-        return handler.process(body);
     }
 
     private static TrinoException propagate(ResponseException exception)
@@ -760,7 +769,7 @@ public class OpenSearchClient
 
         if (entity != null && entity.getContentType() != null) {
             try {
-                JsonNode reason = OBJECT_MAPPER.readTree(entity.getContent()).path("error")
+                JsonNode reason = JSON_MAPPER.readTree(entity.getContent()).path("error")
                         .path("root_cause")
                         .path(0)
                         .path("reason");
@@ -801,6 +810,6 @@ public class OpenSearchClient
 
     private interface ResponseHandler<T>
     {
-        T process(String body);
+        T process(InputStream inputStream);
     }
 }

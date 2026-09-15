@@ -17,14 +17,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
-import io.trino.spi.type.BigintType;
 import io.trino.spi.type.Type;
-import io.trino.type.TypeTestUtils;
 
 import java.util.List;
-import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.RowPageBuilder.rowPageBuilder;
 import static java.util.Objects.requireNonNull;
 
@@ -40,32 +38,13 @@ public class RowPagesBuilder
         return new RowPagesBuilder(types);
     }
 
-    public static RowPagesBuilder rowPagesBuilder(boolean hashEnabled, List<Integer> hashChannels, Type... types)
-    {
-        return rowPagesBuilder(hashEnabled, hashChannels, ImmutableList.copyOf(types));
-    }
-
-    public static RowPagesBuilder rowPagesBuilder(boolean hashEnabled, List<Integer> hashChannels, Iterable<Type> types)
-    {
-        return new RowPagesBuilder(hashEnabled, Optional.of(hashChannels), types);
-    }
-
     private final ImmutableList.Builder<Page> pages = ImmutableList.builder();
     private final List<Type> types;
     private RowPageBuilder builder;
-    private final boolean hashEnabled;
-    private final Optional<List<Integer>> hashChannels;
 
-    RowPagesBuilder(Iterable<Type> types)
-    {
-        this(false, Optional.empty(), types);
-    }
-
-    RowPagesBuilder(boolean hashEnabled, Optional<List<Integer>> hashChannels, Iterable<Type> types)
+    private RowPagesBuilder(Iterable<Type> types)
     {
         this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
-        this.hashEnabled = hashEnabled;
-        this.hashChannels = hashChannels.map(ImmutableList::copyOf);
         builder = rowPageBuilder(types);
     }
 
@@ -118,45 +97,16 @@ public class RowPagesBuilder
     public List<Page> build()
     {
         pageBreak();
-        List<Page> resultPages = pages.build();
-        if (hashEnabled) {
-            return pagesWithHash(resultPages);
-        }
-        return resultPages;
+        return pages.build();
     }
 
-    private List<Page> pagesWithHash(List<Page> pages)
+    public Page buildPage()
     {
-        ImmutableList.Builder<Page> resultPages = ImmutableList.builder();
-        for (Page page : pages) {
-            resultPages.add(TypeTestUtils.getHashPage(page, types, hashChannels.get()));
-        }
-        return resultPages.build();
+        return getOnlyElement(build());
     }
 
     public List<Type> getTypes()
     {
-        if (hashEnabled) {
-            return ImmutableList.copyOf(Iterables.concat(types, ImmutableList.of(BigintType.BIGINT)));
-        }
         return types;
-    }
-
-    public List<Type> getTypesWithoutHash()
-    {
-        return types;
-    }
-
-    public Optional<List<Integer>> getHashChannels()
-    {
-        return hashChannels;
-    }
-
-    public Optional<Integer> getHashChannel()
-    {
-        if (hashEnabled) {
-            return Optional.of(types.size());
-        }
-        return Optional.empty();
     }
 }

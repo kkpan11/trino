@@ -75,7 +75,7 @@ http-server.authentication.oauth2.client-secret=CLIENT_SECRET
 ```
 
 To enable OAuth 2.0 authentication for the Web UI, the following
-property must be be added:
+property must be added:
 
 ```properties
 web-ui.authentication.type=oauth2
@@ -106,6 +106,11 @@ The following configuration properties are available:
     order to begin the OAuth 2.0 authorization process. Providing this value
     while OIDC discovery is enabled overrides the value from the OpenID provider
     metadata document.
+* - `http-server.authentication.oauth2.domain-hint`
+  - Domain hint to restrict SSO account selection to a specific domain. When
+    set, it is included in the authorization URL as a `domain_hint` parameter
+    together with `prompt=select_account`, which some IdPs (for example Azure
+    AD) use to filter the account picker shown to users during login.
 * - `http-server.authentication.oauth2.token-url`
   - The URL of the endpoint on the authorization server which Trino uses to
     obtain an access token. Providing this value while OIDC discovery is enabled
@@ -141,9 +146,9 @@ The following configuration properties are available:
     authorization request was not forged. Default is a random string generated
     during the coordinator start.
 * - `http-server.authentication.oauth2.user-mapping.pattern`
-  - Regex to match against user. If matched, the user name is replaced with
+  - Regex to match against user. If matched, the username is replaced with
     first regex group. If not matched, authentication is denied.  Default is
-    `(.*)` which allows any user name.
+    `(.*)` which allows any username.
 * - `http-server.authentication.oauth2.user-mapping.file`
   - File containing rules for mapping user. See [](/security/user-mapping) for
     more information.
@@ -229,11 +234,11 @@ The following configuration properties are available:
     maximum session time for an OAuth2-authenticated client with refresh tokens
     enabled. For more details, see [](trino-oauth2-troubleshooting).
 * - `http-server.authentication.oauth2.refresh-tokens.issued-token.issuer`
-  - Issuer representing the coordinator instance, that is referenced in the
+  - Issuer representing the coordinator instance that is referenced in the
     issued token, defaults to `Trino_coordinator`. The current Trino version is
     appended to the value. This is mainly used for debugging purposes.
 * - `http-server.authentication.oauth2.refresh-tokens.issued-token.audience`
-  - Audience representing this coordinator instance, that is used in the
+  - Audience representing this coordinator instance that is used in the
     issued token. Defaults to `Trino_coordinator`.
 * - `http-server.authentication.oauth2.refresh-tokens.secret-key`
   - Base64-encoded secret key used to encrypt the generated token. By default
@@ -243,7 +248,7 @@ The following configuration properties are available:
 (trino-oauth2-troubleshooting)=
 ## Troubleshooting
 
-To debug issues, change the {ref}`log level <log-levels>` for the OAuth 2.0
+To debug issues, change the [log level <log-levels>` for the OAuth 2.0
 authenticator:
 
 ```none

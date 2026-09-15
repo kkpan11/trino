@@ -13,11 +13,14 @@
  */
 package io.trino.metadata;
 
+import com.google.inject.Inject;
 import io.trino.execution.TaskId;
 import io.trino.operator.scalar.SpecializedSqlScalarFunction;
 import io.trino.spi.function.FunctionId;
 import io.trino.spi.function.InvocationConvention;
+import io.trino.spi.function.LanguageFunctionEngine;
 import io.trino.spi.function.ScalarFunctionImplementation;
+import io.trino.spi.type.TypeManager;
 import io.trino.sql.routine.SqlRoutineCompiler;
 import io.trino.sql.routine.ir.IrRoutine;
 
@@ -25,13 +28,26 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static java.util.Objects.requireNonNull;
+
 public class WorkerLanguageFunctionProvider
         implements LanguageFunctionProvider
 {
-    private final Map<TaskId, Map<FunctionId, IrRoutine>> queryFunctions = new ConcurrentHashMap<>();
+    private final LanguageFunctionEngineManager languageFunctionEngineManager;
+    private final Metadata metadata;
+    private final TypeManager typeManager;
+    private final Map<TaskId, Map<FunctionId, LanguageFunctionData>> queryFunctions = new ConcurrentHashMap<>();
+
+    @Inject
+    public WorkerLanguageFunctionProvider(LanguageFunctionEngineManager languageFunctionEngineManager, Metadata metadata, TypeManager typeManager)
+    {
+        this.languageFunctionEngineManager = requireNonNull(languageFunctionEngineManager, "languageFunctionEngineManager is null");
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
+    }
 
     @Override
-    public void registerTask(TaskId taskId, Map<FunctionId, IrRoutine> functions)
+    public void registerTask(TaskId taskId, Map<FunctionId, LanguageFunctionData> functions)
     {
         queryFunctions.computeIfAbsent(taskId, _ -> functions);
     }
@@ -45,15 +61,30 @@ public class WorkerLanguageFunctionProvider
     @Override
     public ScalarFunctionImplementation specialize(FunctionId functionId, InvocationConvention invocationConvention, FunctionManager functionManager)
     {
-        IrRoutine routine = queryFunctions.values().stream()
+        LanguageFunctionData data = queryFunctions.values().stream()
                 .map(queryFunctions -> queryFunctions.get(functionId))
                 .filter(Objects::nonNull)
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("Unknown function implementation: " + functionId));
 
+        if (data.definition().isPresent()) {
+            LanguageFunctionDefinition definition = data.definition().get();
+
+            LanguageFunctionEngine engine = languageFunctionEngineManager.getLanguageFunctionEngine(definition.language())
+                    .orElseThrow(() -> new IllegalStateException("No language function engine for language: " + definition.language()));
+
+            return engine.getScalarFunctionImplementation(
+                    definition.returnType(),
+                    definition.argumentTypes(),
+                    definition.definition(),
+                    definition.properties(),
+                    invocationConvention);
+        }
+
         // Recompile every time this function is called as the function dependencies may have changed.
         // The caller caches, so this should not be a problem.
-        SpecializedSqlScalarFunction function = new SqlRoutineCompiler(functionManager).compile(routine);
+        IrRoutine routine = data.irRoutine().orElseThrow();
+        SpecializedSqlScalarFunction function = new SqlRoutineCompiler(functionManager, metadata, typeManager).compile(data.charVarcharCoercion(), routine);
         return function.getScalarFunctionImplementation(invocationConvention);
     }
 }

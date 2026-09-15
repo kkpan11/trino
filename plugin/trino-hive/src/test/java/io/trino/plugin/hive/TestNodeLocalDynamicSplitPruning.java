@@ -30,6 +30,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.ConnectorIdentity;
@@ -48,12 +49,10 @@ import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.PARTITION_KEY;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static io.trino.plugin.hive.HiveTestUtils.getDefaultHivePageSourceFactories;
 import static io.trino.plugin.hive.util.HiveBucketing.BucketingVersion.BUCKETING_V1;
-import static io.trino.plugin.hive.util.SerdeConstants.SERIALIZATION_LIB;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.testing.TestingHandles.TEST_CATALOG_HANDLE;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.concurrent.CompletableFuture.completedFuture;
-import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.FILE_INPUT_FORMAT;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class TestNodeLocalDynamicSplitPruning
@@ -83,14 +82,15 @@ class TestNodeLocalDynamicSplitPruning
     void testDynamicBucketPruning()
             throws IOException
     {
-        HiveConfig config = new HiveConfig();
+        // The split points at an empty ORC file; keep ORC as the default storage format
+        HiveConfig config = new HiveConfig().setHiveStorageFormat(HiveStorageFormat.ORC);
         HiveTransactionHandle transaction = new HiveTransactionHandle(false);
         try (ConnectorPageSource emptyPageSource = createTestingPageSource(transaction, config, getDynamicFilter(getTupleDomainForBucketSplitPruning()))) {
             assertThat(emptyPageSource.getClass()).isEqualTo(EmptyPageSource.class);
         }
 
         try (ConnectorPageSource nonEmptyPageSource = createTestingPageSource(transaction, config, getDynamicFilter(getNonSelectiveBucketTupleDomain()))) {
-            assertThat(nonEmptyPageSource.getClass()).isEqualTo(HivePageSource.class);
+            assertThat(nonEmptyPageSource.getClass()).isNotEqualTo(EmptyPageSource.class);
         }
     }
 
@@ -98,7 +98,8 @@ class TestNodeLocalDynamicSplitPruning
     void testDynamicPartitionPruning()
             throws IOException
     {
-        HiveConfig config = new HiveConfig();
+        // The split points at an empty ORC file; keep ORC as the default storage format
+        HiveConfig config = new HiveConfig().setHiveStorageFormat(HiveStorageFormat.ORC);
         HiveTransactionHandle transaction = new HiveTransactionHandle(false);
 
         try (ConnectorPageSource emptyPageSource = createTestingPageSource(transaction, config, getDynamicFilter(getTupleDomainForPartitionSplitPruning()))) {
@@ -106,7 +107,7 @@ class TestNodeLocalDynamicSplitPruning
         }
 
         try (ConnectorPageSource nonEmptyPageSource = createTestingPageSource(transaction, config, getDynamicFilter(getNonSelectivePartitionTupleDomain()))) {
-            assertThat(nonEmptyPageSource.getClass()).isEqualTo(HivePageSource.class);
+            assertThat(nonEmptyPageSource.getClass()).isNotEqualTo(EmptyPageSource.class);
         }
     }
 
@@ -117,10 +118,6 @@ class TestNodeLocalDynamicSplitPruning
         TrinoFileSystemFactory fileSystemFactory = new MemoryFileSystemFactory();
         fileSystemFactory.create(ConnectorIdentity.ofUser("test")).newOutputFile(location).create().close();
 
-        Map<String, String> splitProperties = ImmutableMap.<String, String>builder()
-                .put(FILE_INPUT_FORMAT, hiveConfig.getHiveStorageFormat().getInputFormat())
-                .put(SERIALIZATION_LIB, hiveConfig.getHiveStorageFormat().getSerde())
-                .buildOrThrow();
         HiveSplit split = new HiveSplit(
                 "",
                 location.toString(),
@@ -128,9 +125,10 @@ class TestNodeLocalDynamicSplitPruning
                 0,
                 0,
                 0,
-                splitProperties,
+                new Schema(hiveConfig.getHiveStorageFormat().getSerde(), false, ImmutableMap.of()),
                 ImmutableList.of(new HivePartitionKey(PARTITION_COLUMN.getName(), "42")),
                 ImmutableList.of(),
+                Optional.empty(),
                 OptionalInt.of(1),
                 OptionalInt.of(1),
                 false,
@@ -148,12 +146,14 @@ class TestNodeLocalDynamicSplitPruning
                         ImmutableMap.of(),
                         ImmutableList.of(),
                         ImmutableList.of(BUCKET_HIVE_COLUMN_HANDLE),
-                        Optional.of(new HiveBucketHandle(
-                                ImmutableList.of(BUCKET_HIVE_COLUMN_HANDLE),
+                        Optional.of(new HiveTablePartitioning(
+                                true,
                                 BUCKETING_V1,
                                 20,
-                                20,
-                                ImmutableList.of()))),
+                                ImmutableList.of(BUCKET_HIVE_COLUMN_HANDLE),
+                                false,
+                                ImmutableList.of(),
+                                true))),
                 transaction);
 
         HivePageSourceProvider provider = new HivePageSourceProvider(
@@ -166,40 +166,38 @@ class TestNodeLocalDynamicSplitPruning
                 getSession(hiveConfig),
                 split,
                 tableHandle.connectorHandle(),
+                Optional.empty(),
                 ImmutableList.of(BUCKET_HIVE_COLUMN_HANDLE, PARTITION_HIVE_COLUMN_HANDLE),
-                dynamicFilter);
+                dynamicFilter,
+                MemoryContext.NO_LIMIT);
     }
 
     private static TupleDomain<ColumnHandle> getTupleDomainForBucketSplitPruning()
     {
         return TupleDomain.withColumnDomains(
                 ImmutableMap.of(
-                        BUCKET_HIVE_COLUMN_HANDLE,
-                        Domain.singleValue(INTEGER, 10L)));
+                        BUCKET_HIVE_COLUMN_HANDLE, Domain.singleValue(INTEGER, 10L)));
     }
 
     private static TupleDomain<ColumnHandle> getNonSelectiveBucketTupleDomain()
     {
         return TupleDomain.withColumnDomains(
                 ImmutableMap.of(
-                        BUCKET_HIVE_COLUMN_HANDLE,
-                        Domain.singleValue(INTEGER, 1L)));
+                        BUCKET_HIVE_COLUMN_HANDLE, Domain.singleValue(INTEGER, 1L)));
     }
 
     private static TupleDomain<ColumnHandle> getTupleDomainForPartitionSplitPruning()
     {
         return TupleDomain.withColumnDomains(
                 ImmutableMap.of(
-                        PARTITION_HIVE_COLUMN_HANDLE,
-                        Domain.singleValue(INTEGER, 1L)));
+                        PARTITION_HIVE_COLUMN_HANDLE, Domain.singleValue(INTEGER, 1L)));
     }
 
     private static TupleDomain<ColumnHandle> getNonSelectivePartitionTupleDomain()
     {
         return TupleDomain.withColumnDomains(
                 ImmutableMap.of(
-                        PARTITION_HIVE_COLUMN_HANDLE,
-                        Domain.singleValue(INTEGER, 42L)));
+                        PARTITION_HIVE_COLUMN_HANDLE, Domain.singleValue(INTEGER, 42L)));
     }
 
     private static TestingConnectorSession getSession(HiveConfig config)

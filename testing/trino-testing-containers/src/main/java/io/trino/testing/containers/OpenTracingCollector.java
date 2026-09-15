@@ -34,22 +34,21 @@ import static io.airlift.units.DataSize.Unit.GIGABYTE;
 public class OpenTracingCollector
         extends BaseTestContainer
 {
-    private static final int COLLECTOR_PORT = 4317;
+    private static final int COLLECTOR_PORT = 4318;
     private static final int HTTP_PORT = 16686;
 
     private final Path storageDirectory;
 
     public OpenTracingCollector()
     {
-        super(
-                "jaegertracing/all-in-one:latest",
+        super("jaegertracing/all-in-one:1.75.0",
                 "opentracing-collector",
                 Set.of(COLLECTOR_PORT, HTTP_PORT),
                 Map.of(),
                 Map.of(
-                    "COLLECTOR_OTLP_ENABLED", "true",
-                    "SPAN_STORAGE_TYPE", "badger", // KV that stores spans to the disk
-                    "GOMAXPROCS", "2"), // limit number of threads used for goroutines
+                        "COLLECTOR_OTLP_ENABLED", "true",
+                        "SPAN_STORAGE_TYPE", "badger", // KV that stores spans to the disk
+                        "GOMAXPROCS", "2"), // limit number of threads used for goroutines
                 Optional.empty(),
                 1);
 
@@ -77,8 +76,8 @@ public class OpenTracingCollector
     {
         super.close();
         try (Stream<File> files = Files.walk(storageDirectory)
-                    .sorted(Comparator.reverseOrder())
-                    .map(Path::toFile)) {
+                .sorted(Comparator.reverseOrder())
+                .map(Path::toFile)) {
             files.forEach(File::delete);
         }
         catch (IOException e) {
@@ -88,7 +87,7 @@ public class OpenTracingCollector
 
     public URI getExporterEndpoint()
     {
-        return URI.create("http://" + getMappedHostAndPortForExposedPort(COLLECTOR_PORT));
+        return URI.create("http://" + getMappedHostAndPortForExposedPort(COLLECTOR_PORT) + "/v1/traces");
     }
 
     public URI searchForQueryId(String queryId)

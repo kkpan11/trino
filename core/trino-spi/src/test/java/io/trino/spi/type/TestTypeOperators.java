@@ -38,7 +38,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static java.lang.invoke.MethodHandles.exactInvoker;
 import static org.assertj.core.api.Assertions.assertThat;
 
-class TestTypeOperators
+final class TestTypeOperators
 {
     @Test
     void testIdenticalGenerator()
@@ -81,7 +81,7 @@ class TestTypeOperators
                 callArguments.add(value == null);
             }
             case BLOCK_POSITION, BLOCK_POSITION_NOT_NULL -> {
-                BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, 1);
+                BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(1);
                 if (value == null) {
                     verify(convention == BLOCK_POSITION);
                     blockBuilder.appendNull();
@@ -102,6 +102,7 @@ class TestTypeOperators
                 callArguments.add(fixedSlice);
                 callArguments.add(0);
                 callArguments.add(new byte[0]);
+                callArguments.add(0);
             }
             default -> throw new UnsupportedOperationException();
         }

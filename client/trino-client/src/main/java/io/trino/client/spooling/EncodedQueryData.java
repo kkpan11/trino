@@ -19,21 +19,12 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import io.trino.client.QueryData;
-import io.trino.client.QueryDataDecoder;
-import io.trino.client.RawQueryData;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
-import static com.google.common.collect.Iterables.concat;
-import static com.google.common.collect.Iterables.transform;
-import static com.google.common.collect.Iterables.unmodifiableIterable;
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class EncodedQueryData
@@ -85,43 +76,6 @@ public class EncodedQueryData
     }
 
     @Override
-    public Iterable<List<Object>> getData()
-    {
-        throw new UnsupportedOperationException("EncodedQueryData required decoding via matching QueryDataDecoder");
-    }
-
-    public QueryData toRawData(QueryDataDecoder decoder, SegmentLoader segmentLoader)
-    {
-        if (!decoder.encoding().equals(encoding)) {
-            throw new IllegalArgumentException(format("Invalid decoder supplied, expected %s, got %s", encoding, decoder.encoding()));
-        }
-
-        return RawQueryData.of(unmodifiableIterable(concat(transform(segments, segment -> {
-            if (segment instanceof InlineSegment) {
-                InlineSegment inline = (InlineSegment) segment;
-                try {
-                    return decoder.decode(new ByteArrayInputStream(inline.getData()), inline.getMetadata());
-                }
-                catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            }
-
-            if (segment instanceof SpooledSegment) {
-                SpooledSegment spooled = (SpooledSegment) segment;
-                try (InputStream stream = segmentLoader.load(spooled)) {
-                    return decoder.decode(stream, segment.getMetadata());
-                }
-                catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            }
-
-            throw new IllegalArgumentException("Unexpected segment type: " + segment.getClass().getSimpleName());
-        }))));
-    }
-
-    @Override
     public String toString()
     {
         return toStringHelper(this)
@@ -131,9 +85,41 @@ public class EncodedQueryData
                 .toString();
     }
 
-    public static Builder builder(String format)
+    @Override
+    public boolean equals(Object o)
     {
-        return new Builder(format);
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        EncodedQueryData that = (EncodedQueryData) o;
+        return Objects.equals(encoding, that.encoding)
+                && Objects.equals(metadata, that.metadata)
+                && Objects.equals(segments, that.segments);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(encoding, metadata, segments);
+    }
+
+    public static Builder builder(String encoding)
+    {
+        return new Builder(encoding);
+    }
+
+    @Override
+    public boolean isNull()
+    {
+        return segments.isEmpty();
+    }
+
+    @Override
+    public long getRowsCount()
+    {
+        return segments.stream()
+                .mapToLong(Segment::getRowsCount)
+                .sum();
     }
 
     public static class Builder
@@ -150,6 +136,12 @@ public class EncodedQueryData
         public Builder withSegment(Segment segment)
         {
             this.segments.add(segment);
+            return this;
+        }
+
+        public Builder withSegments(List<Segment> segments)
+        {
+            this.segments.addAll(segments);
             return this;
         }
 

@@ -14,8 +14,8 @@
 package io.trino.sql.gen.columnar;
 
 import io.trino.operator.project.InputChannels;
-import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.SourcePage;
 
 /**
  * Implementations of this interface evaluate a filter on the input Page.
@@ -29,7 +29,6 @@ import io.trino.spi.connector.ConnectorSession;
  * don't explicitly handle NULLs or indeterminate values, and just return FALSE for those cases.
  * This will need to change to allow ColumnarFilter implementations to be composed in all cases (e.g. NOT filters).
  * ColumnarFilter implementations are never composed, {@link FilterEvaluator} implementations may be composed.
- * <p>
  */
 public interface ColumnarFilter
 {
@@ -40,7 +39,7 @@ public interface ColumnarFilter
      * @param loadedPage input Page after using {@link ColumnarFilter#getInputChannels} to load only the required channels
      * @return count of positions active after evaluating this filter on the input loadedPage
      */
-    int filterPositionsRange(ConnectorSession session, int[] outputPositions, int offset, int size, Page loadedPage);
+    int filterPositionsRange(ConnectorSession session, int[] outputPositions, int offset, int size, SourcePage loadedPage);
 
     /**
      * @param outputPositions list of positions active after evaluating this filter on the input loadedPage
@@ -50,7 +49,7 @@ public interface ColumnarFilter
      * @param loadedPage input Page after using {@link ColumnarFilter#getInputChannels} to load only the required channels
      * @return count of positions active after evaluating this filter on the input loadedPage
      */
-    int filterPositionsList(ConnectorSession session, int[] outputPositions, int[] activePositions, int offset, int size, Page loadedPage);
+    int filterPositionsList(ConnectorSession session, int[] outputPositions, int[] activePositions, int offset, int size, SourcePage loadedPage);
 
     /**
      * @return InputChannels of input Page that this filter operates on

@@ -24,14 +24,13 @@ import org.junit.jupiter.api.Test;
 import java.security.Principal;
 import java.util.concurrent.TimeUnit;
 
-import static com.google.common.base.Strings.emptyToNull;
 import static com.google.common.net.MediaType.ANY_TEXT_TYPE;
 import static io.airlift.http.client.HttpStatus.OK;
 import static io.airlift.http.client.testing.TestingResponse.mockResponse;
+import static io.trino.testing.SystemEnvironmentUtils.requireEnv;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Fail.fail;
 import static org.junit.jupiter.api.Assumptions.abort;
 
 public class TestSalesforceBasicAuthenticator
@@ -61,7 +60,7 @@ public class TestSalesforceBasicAuthenticator
 
         String xmlResponse = format(successResponse, org, username);
 
-        HttpClient testHttpClient = new TestingHttpClient(request -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
+        HttpClient testHttpClient = new TestingHttpClient(_ -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
         SalesforceBasicAuthenticator authenticator = new SalesforceBasicAuthenticator(config, testHttpClient);
 
         Principal principal = authenticator.createAuthenticatedPrincipal(username, password);
@@ -93,7 +92,7 @@ public class TestSalesforceBasicAuthenticator
 
         String xmlResponse = format(successResponse, "NotMyOrg", username);
 
-        HttpClient testHttpClient = new TestingHttpClient(request -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
+        HttpClient testHttpClient = new TestingHttpClient(_ -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
         SalesforceBasicAuthenticator authenticator = new SalesforceBasicAuthenticator(config, testHttpClient);
         assertThatThrownBy(() -> authenticator.createAuthenticatedPrincipal(username, password))
                 .isInstanceOf(AccessDeniedException.class)
@@ -112,7 +111,7 @@ public class TestSalesforceBasicAuthenticator
 
         String xmlResponse = failedResponse;
 
-        HttpClient testHttpClient = new TestingHttpClient(request -> mockResponse(HttpStatus.INTERNAL_SERVER_ERROR, ANY_TEXT_TYPE, xmlResponse));
+        HttpClient testHttpClient = new TestingHttpClient(_ -> mockResponse(HttpStatus.INTERNAL_SERVER_ERROR, ANY_TEXT_TYPE, xmlResponse));
         SalesforceBasicAuthenticator authenticator = new SalesforceBasicAuthenticator(config, testHttpClient);
         assertThatThrownBy(() -> authenticator.createAuthenticatedPrincipal(username, password))
                 .isInstanceOf(AccessDeniedException.class)
@@ -131,7 +130,7 @@ public class TestSalesforceBasicAuthenticator
 
         String xmlResponse = format(successResponse, "some18CharOrgId", username);
 
-        HttpClient testHttpClient = new TestingHttpClient(request -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
+        HttpClient testHttpClient = new TestingHttpClient(_ -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
         SalesforceBasicAuthenticator authenticator = new SalesforceBasicAuthenticator(config, testHttpClient);
 
         Principal principal = authenticator.createAuthenticatedPrincipal(username, password);
@@ -152,7 +151,7 @@ public class TestSalesforceBasicAuthenticator
 
         String xmlResponse = format(successResponse, "my18CharOrgId", username);
 
-        HttpClient testHttpClient = new TestingHttpClient(request -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
+        HttpClient testHttpClient = new TestingHttpClient(_ -> mockResponse(OK, ANY_TEXT_TYPE, xmlResponse));
         SalesforceBasicAuthenticator authenticator = new SalesforceBasicAuthenticator(config, testHttpClient);
 
         Principal principal = authenticator.createAuthenticatedPrincipal(username, password);
@@ -182,15 +181,9 @@ public class TestSalesforceBasicAuthenticator
             abort("Skipping real tests.");
         }
 
-        String org = System.getenv("SALESFORCE_TEST_ORG");
-        if (emptyToNull(org) == null) {
-            fail("Must set SALESFORCE_TEST_ORG environment variable.");
-        }
-        String username = System.getenv("SALESFORCE_TEST_USERNAME");
-        String password = System.getenv("SALESFORCE_TEST_PASSWORD");
-        if (emptyToNull(username) == null || emptyToNull(password) == null) {
-            fail("Must set SALESFORCE_TEST_USERNAME and SALESFORCE_TEST_PASSWORD environment variables.");
-        }
+        String org = requireEnv("SALESFORCE_TEST_ORG");
+        String username = requireEnv("SALESFORCE_TEST_USERNAME");
+        String password = requireEnv("SALESFORCE_TEST_PASSWORD");
 
         SalesforceConfig config = new SalesforceConfig()
                 .setAllowedOrganizations(org);
@@ -213,11 +206,8 @@ public class TestSalesforceBasicAuthenticator
             abort("Skipping real tests.");
         }
 
-        String username = System.getenv("SALESFORCE_TEST_USERNAME");
-        String password = System.getenv("SALESFORCE_TEST_PASSWORD");
-        if (emptyToNull(username) == null || emptyToNull(password) == null) {
-            fail("Must set SALESFORCE_TEST_USERNAME and SALESFORCE_TEST_PASSWORD environment variables.");
-        }
+        String username = requireEnv("SALESFORCE_TEST_USERNAME");
+        String password = requireEnv("SALESFORCE_TEST_PASSWORD");
 
         String org = "NotMyOrg";
         SalesforceConfig config = new SalesforceConfig()
@@ -240,11 +230,8 @@ public class TestSalesforceBasicAuthenticator
             abort("Skipping real tests.");
         }
 
-        String username = System.getenv("SALESFORCE_TEST_USERNAME");
-        String password = System.getenv("SALESFORCE_TEST_PASSWORD");
-        if (emptyToNull(username) == null || emptyToNull(password) == null) {
-            fail("Must set SALESFORCE_TEST_USERNAME and SALESFORCE_TEST_PASSWORD environment variables.");
-        }
+        String username = requireEnv("SALESFORCE_TEST_USERNAME");
+        String password = requireEnv("SALESFORCE_TEST_PASSWORD");
 
         SalesforceConfig config = new SalesforceConfig()
                 .setAllowedOrganizations("all");
@@ -268,15 +255,8 @@ public class TestSalesforceBasicAuthenticator
             abort("Skipping real tests.");
         }
 
-        String org = System.getenv("SALESFORCE_TEST_ORG");
-        if (emptyToNull(org) == null) {
-            fail("Must set SALESFORCE_TEST_ORG environment variable.");
-        }
-        String username = System.getenv("SALESFORCE_TEST_USERNAME");
-        String password = System.getenv("SALESFORCE_TEST_PASSWORD");
-        if (emptyToNull(username) == null || emptyToNull(password) == null) {
-            fail("Must set SALESFORCE_TEST_USERNAME and SALESFORCE_TEST_PASSWORD environment variables.");
-        }
+        String org = requireEnv("SALESFORCE_TEST_ORG");
+        String username = requireEnv("SALESFORCE_TEST_USERNAME");
 
         SalesforceConfig config = new SalesforceConfig()
                 .setAllowedOrganizations(org);

@@ -13,9 +13,15 @@
  */
 package io.trino.split;
 
-import io.trino.spi.connector.CatalogHandle;
+import io.trino.connector.CatalogHandle;
+import io.trino.memory.context.AggregatedMemoryContext;
 
 public interface PageSourceProviderFactory
 {
-    PageSourceProvider createPageSourceProvider(CatalogHandle catalogHandle);
+    /**
+     * Creates a page source provider for a single table scan.
+     *
+     * @param memoryContext accounts for state which the connector shares across the page sources of the scan
+     */
+    PageSourceProvider createPageSourceProvider(CatalogHandle catalogHandle, AggregatedMemoryContext memoryContext);
 }

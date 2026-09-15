@@ -23,6 +23,7 @@ import io.trino.operator.aggregation.AggregatorFactory;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
@@ -33,7 +34,6 @@ import java.util.Deque;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
-import java.util.OptionalInt;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -114,10 +114,10 @@ public class StreamingAggregationOperator
         }
 
         @Override
-        public WorkProcessorOperator create(ProcessorContext processorContext, WorkProcessor<Page> sourcePages)
+        public WorkProcessorOperator create(OperatorContext operatorContext, WorkProcessor<Page> sourcePages)
         {
             checkState(!closed, "Factory is already closed");
-            return new StreamingAggregationOperator(processorContext, sourcePages, sourceTypes, groupByTypes, groupByChannels, aggregatorFactories, joinCompiler);
+            return new StreamingAggregationOperator(operatorContext, sourcePages, sourceTypes, groupByTypes, groupByChannels, aggregatorFactories, joinCompiler);
         }
 
         @Override
@@ -134,9 +134,10 @@ public class StreamingAggregationOperator
     }
 
     private final WorkProcessor<Page> pages;
+    private final AggregationMetrics aggregationMetrics = new AggregationMetrics();
 
     private StreamingAggregationOperator(
-            ProcessorContext processorContext,
+            OperatorContext operatorContext,
             WorkProcessor<Page> sourcePages,
             List<Type> sourceTypes,
             List<Type> groupByTypes,
@@ -146,18 +147,25 @@ public class StreamingAggregationOperator
     {
         pages = sourcePages
                 .transform(new StreamingAggregation(
-                        processorContext,
+                        operatorContext,
                         sourceTypes,
                         groupByTypes,
                         groupByChannels,
                         aggregatorFactories,
-                        joinCompiler));
+                        joinCompiler,
+                        aggregationMetrics));
     }
 
     @Override
     public WorkProcessor<Page> getOutputPages()
     {
         return pages;
+    }
+
+    @Override
+    public Metrics getMetrics()
+    {
+        return aggregationMetrics.getMetrics();
     }
 
     private static class StreamingAggregation
@@ -168,6 +176,7 @@ public class StreamingAggregationOperator
         private final int[] groupByChannels;
         private final List<AggregatorFactory> aggregatorFactories;
         private final PagesHashStrategy pagesHashStrategy;
+        private final AggregationMetrics aggregationMetrics;
 
         private List<Aggregator> aggregates;
         private final PageBuilder pageBuilder;
@@ -175,21 +184,21 @@ public class StreamingAggregationOperator
         private Page currentGroup;
 
         private StreamingAggregation(
-                ProcessorContext processorContext,
+                OperatorContext operatorContext,
                 List<Type> sourceTypes,
                 List<Type> groupByTypes,
                 List<Integer> groupByChannels,
                 List<AggregatorFactory> aggregatorFactories,
-                JoinCompiler joinCompiler)
+                JoinCompiler joinCompiler,
+                AggregationMetrics aggregationMetrics)
         {
-            requireNonNull(processorContext, "processorContext is null");
-            this.userMemoryContext = processorContext.getMemoryTrackingContext().localUserMemoryContext();
+            this.userMemoryContext = operatorContext.newLocalUserMemoryContext(StreamingAggregationOperator.class.getSimpleName());
             this.groupByTypes = ImmutableList.copyOf(requireNonNull(groupByTypes, "groupByTypes is null"));
             this.groupByChannels = Ints.toArray(requireNonNull(groupByChannels, "groupByChannels is null"));
             this.aggregatorFactories = requireNonNull(aggregatorFactories, "aggregatorFactories is null");
 
             this.aggregates = aggregatorFactories.stream()
-                    .map(AggregatorFactory::createAggregator)
+                    .map(factory -> factory.createAggregator(aggregationMetrics))
                     .collect(toImmutableList());
             this.pageBuilder = new PageBuilder(toTypes(groupByTypes, aggregates));
             requireNonNull(joinCompiler, "joinCompiler is null");
@@ -198,8 +207,9 @@ public class StreamingAggregationOperator
             pagesHashStrategy = joinCompiler.compilePagesHashStrategyFactory(sourceTypes, groupByChannels, Optional.empty())
                     .createPagesHashStrategy(
                             sourceTypes.stream()
-                                    .map(type -> new ObjectArrayList<Block>())
-                                    .collect(toImmutableList()), OptionalInt.empty());
+                                    .map(_ -> new ObjectArrayList<Block>())
+                                    .collect(toImmutableList()));
+            this.aggregationMetrics = requireNonNull(aggregationMetrics, "aggregationMetrics is null");
         }
 
         @Override
@@ -217,6 +227,7 @@ public class StreamingAggregationOperator
                 }
 
                 if (outputPages.isEmpty()) {
+                    userMemoryContext.close();
                     return finished();
                 }
 
@@ -241,7 +252,7 @@ public class StreamingAggregationOperator
             return ofResult(outputPage, outputPages.isEmpty());
         }
 
-        private void updateMemoryUsage()
+        private boolean updateMemoryUsage()
         {
             long memorySize = pageBuilder.getRetainedSizeInBytes();
             for (Page output : outputPages) {
@@ -255,7 +266,7 @@ public class StreamingAggregationOperator
                 memorySize += currentGroup.getRetainedSizeInBytes();
             }
 
-            userMemoryContext.setBytes(memorySize);
+            return userMemoryContext.setBytes(memorySize).isDone();
         }
 
         private void processInput(Page page)
@@ -283,8 +294,7 @@ public class StreamingAggregationOperator
                     startPosition = nextGroupStart;
                 }
                 else {
-                    // late materialization requires that page being locally stored is materialized before the next one is fetched
-                    currentGroup = page.getRegion(page.getPositionCount() - 1, 1).getLoadedPage();
+                    currentGroup = page.getRegion(page.getPositionCount() - 1, 1);
                     return;
                 }
             }
@@ -303,12 +313,11 @@ public class StreamingAggregationOperator
             pageBuilder.declarePosition();
             for (int i = 0; i < groupByTypes.size(); i++) {
                 Block block = page.getBlock(groupByChannels[i]);
-                Type type = groupByTypes.get(i);
-                type.appendTo(block, position, pageBuilder.getBlockBuilder(i));
+                pageBuilder.getBlockBuilder(i).append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
             }
             int offset = groupByTypes.size();
             for (int i = 0; i < aggregates.size(); i++) {
-                aggregates.get(i).evaluate(pageBuilder.getBlockBuilder(offset + i));
+                aggregates.get(i).evaluate(pageBuilder.getBlockBuilder(offset + i), this::updateMemoryUsage);
             }
 
             if (pageBuilder.isFull()) {
@@ -317,7 +326,7 @@ public class StreamingAggregationOperator
             }
 
             aggregates = aggregatorFactories.stream()
-                    .map(AggregatorFactory::createAggregator)
+                    .map(factory -> factory.createAggregator(aggregationMetrics))
                     .collect(toImmutableList());
         }
 

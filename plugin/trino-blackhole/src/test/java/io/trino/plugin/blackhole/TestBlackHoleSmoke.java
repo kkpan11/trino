@@ -32,7 +32,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
-import static io.airlift.testing.Assertions.assertGreaterThan;
 import static io.trino.plugin.blackhole.BlackHoleConnector.FIELD_LENGTH_PROPERTY;
 import static io.trino.plugin.blackhole.BlackHoleConnector.PAGES_PER_SPLIT_PROPERTY;
 import static io.trino.plugin.blackhole.BlackHoleConnector.PAGE_PROCESSING_DELAY;
@@ -250,12 +249,6 @@ final class TestBlackHoleSmoke
         assertUpdate("DROP VIEW " + viewName);
     }
 
-    private String getTableComment(String tableName)
-    {
-        return (String) computeScalar("SELECT comment FROM system.metadata.table_comments " +
-                "WHERE catalog_name = CURRENT_CATALOG AND schema_name = CURRENT_SCHEMA AND table_name = '" + tableName + "'");
-    }
-
     @Test
     void testFieldLength()
     {
@@ -305,7 +298,8 @@ final class TestBlackHoleSmoke
                         "TIMESTAMP '2014-01-02 12:12', " +
                         "cast('bar' as varbinary), " +
                         "DECIMAL '3.14', " +
-                        "DECIMAL '1234567890.123456789')", 1);
+                        "DECIMAL '1234567890.123456789')",
+                1);
         dropBlackholeAllTypesTable();
     }
 
@@ -399,7 +393,7 @@ final class TestBlackHoleSmoke
         assertUpdate(session, "INSERT INTO nation SELECT CAST(null AS BIGINT), CAST(null AS VARCHAR(25)), CAST(null AS BIGINT), CAST(null AS VARCHAR(152))", 1);
 
         stopwatch.stop();
-        assertGreaterThan(stopwatch.elapsed(MILLISECONDS), pageProcessingDelay.toMillis());
+        assertThat(stopwatch.elapsed(MILLISECONDS)).isGreaterThan(pageProcessingDelay.toMillis());
 
         assertUpdate("DROP TABLE nation");
     }
@@ -413,7 +407,7 @@ final class TestBlackHoleSmoke
                 .matches("SELECT 0 FROM TABLE(sequence(1, 2 * 3 * 5))");
 
         assertThat(query(range(0, 7)
-                .mapToObj(i -> "SELECT * FROM table_multiple_splits")
+                .mapToObj(_ -> "SELECT * FROM table_multiple_splits")
                 .collect(joining(" UNION ALL "))))
                 .matches("SELECT 0 FROM TABLE(sequence(1, 2 * 3 * 5 * 7))");
 

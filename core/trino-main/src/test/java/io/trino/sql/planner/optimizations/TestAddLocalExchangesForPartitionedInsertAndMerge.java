@@ -85,7 +85,7 @@ public class TestAddLocalExchangesForPartitionedInsertAndMerge
     private MockConnectorFactory createMergeConnectorFactory()
     {
         return MockConnectorFactory.builder()
-                .withGetTableHandle((session, schemaTableName) -> {
+                .withGetTableHandle((_, schemaTableName) -> {
                     if (schemaTableName.getTableName().equals("source_table")) {
                         return new MockConnectorTableHandle(schemaTableName);
                     }
@@ -94,10 +94,10 @@ public class TestAddLocalExchangesForPartitionedInsertAndMerge
                     }
                     return null;
                 })
-                .withGetColumns(schemaTableName -> ImmutableList.of(
+                .withGetColumns(_ -> ImmutableList.of(
                         new ColumnMetadata("customer", INTEGER),
                         new ColumnMetadata("year", INTEGER)))
-                .withGetInsertLayout((session, tableName) -> {
+                .withGetInsertLayout((_, tableName) -> {
                     if (tableName.getTableName().equals("source_table") || tableName.getTableName().equals("target_table")) {
                         return Optional.of(new ConnectorTableLayout(ImmutableList.of("year")));
                     }
@@ -111,7 +111,8 @@ public class TestAddLocalExchangesForPartitionedInsertAndMerge
     @Test
     public void testTaskWriterCountHasNoEffectOnMergeOperation()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 MERGE INTO target_table t USING source_table s
                     ON t.customer = s.customer
                     WHEN MATCHED
@@ -161,7 +162,9 @@ public class TestAddLocalExchangesForPartitionedInsertAndMerge
                                 ImmutableList.of("customer", "year"),
                                 ImmutableList.of("customer", "year"),
                                 exchange(LOCAL, GATHER, SINGLE_DISTRIBUTION,
-                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION,
+                                        exchange(REMOTE,
+                                                REPARTITION,
+                                                FIXED_HASH_DISTRIBUTION,
                                                 tableScan("source_table", ImmutableMap.of("customer", "customer", "year", "year")))))));
 
         assertDistributedPlan(
@@ -175,7 +178,9 @@ public class TestAddLocalExchangesForPartitionedInsertAndMerge
                                 ImmutableList.of("customer", "year"),
                                 ImmutableList.of("customer", "year"),
                                 exchange(LOCAL, REPARTITION, FIXED_HASH_DISTRIBUTION,
-                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION,
+                                        exchange(REMOTE,
+                                                REPARTITION,
+                                                FIXED_HASH_DISTRIBUTION,
                                                 tableScan("source_table", ImmutableMap.of("customer", "customer", "year", "year")))))));
     }
 }

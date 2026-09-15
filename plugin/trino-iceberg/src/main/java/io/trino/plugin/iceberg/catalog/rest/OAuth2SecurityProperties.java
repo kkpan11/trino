@@ -15,6 +15,7 @@ package io.trino.plugin.iceberg.catalog.rest;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
+import org.apache.iceberg.rest.auth.AuthProperties;
 import org.apache.iceberg.rest.auth.OAuth2Properties;
 
 import java.util.Map;
@@ -27,11 +28,12 @@ public class OAuth2SecurityProperties
     private final Map<String, String> securityProperties;
 
     @Inject
-    public OAuth2SecurityProperties(OAuth2SecurityConfig securityConfig)
+    public OAuth2SecurityProperties(OAuth2SecurityConfig securityConfig, IcebergRestCatalogConfig catalogConfig)
     {
         requireNonNull(securityConfig, "securityConfig is null");
 
         ImmutableMap.Builder<String, String> propertiesBuilder = ImmutableMap.builder();
+        propertiesBuilder.put(AuthProperties.AUTH_TYPE, resolveAuthType(catalogConfig));
         securityConfig.getCredential().ifPresent(
                 credential -> {
                     propertiesBuilder.put(OAuth2Properties.CREDENTIAL, credential);
@@ -40,6 +42,10 @@ public class OAuth2SecurityProperties
                 });
         securityConfig.getToken().ifPresent(
                 value -> propertiesBuilder.put(OAuth2Properties.TOKEN, value));
+        securityConfig.getServerUri().ifPresent(
+                value -> propertiesBuilder.put(OAuth2Properties.OAUTH2_SERVER_URI, value.toString()));
+        propertiesBuilder.put(OAuth2Properties.TOKEN_REFRESH_ENABLED, String.valueOf(securityConfig.isTokenRefreshEnabled()));
+        propertiesBuilder.put(OAuth2Properties.TOKEN_EXCHANGE_ENABLED, String.valueOf(securityConfig.isTokenExchangeEnabled()));
 
         this.securityProperties = propertiesBuilder.buildOrThrow();
     }
@@ -48,5 +54,13 @@ public class OAuth2SecurityProperties
     public Map<String, String> get()
     {
         return securityProperties;
+    }
+
+    private static String resolveAuthType(IcebergRestCatalogConfig catalogConfig)
+    {
+        return switch (catalogConfig.getSessionType()) {
+            case NONE -> SharedSessionOAuth2Manager.class.getName();
+            case USER -> AuthProperties.AUTH_TYPE_OAUTH2;
+        };
     }
 }

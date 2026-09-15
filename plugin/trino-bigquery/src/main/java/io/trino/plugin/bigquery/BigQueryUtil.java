@@ -22,6 +22,7 @@ import io.grpc.StatusRuntimeException;
 
 import java.util.Arrays;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 
 import static com.google.cloud.bigquery.TableDefinition.Type.TABLE;
@@ -50,11 +51,29 @@ public final class BigQueryUtil
     private static boolean isRetryableInternalError(Throwable t)
     {
         if (t instanceof StatusRuntimeException statusRuntimeException) {
-            return statusRuntimeException.getStatus().getCode() == Status.Code.INTERNAL &&
+            return (statusRuntimeException.getStatus().getCode() == Status.Code.INTERNAL &&
                     INTERNAL_ERROR_MESSAGES.stream()
-                            .anyMatch(message -> statusRuntimeException.getMessage().contains(message));
+                            .anyMatch(message -> statusRuntimeException.getMessage().contains(message))) ||
+                    // from Google documentation: UNAVAILABLE - This is most likely a transient condition, which can be corrected by retrying with a backoff.
+                    // https://docs.cloud.google.com/bigquery/docs/reference/datatransfer/rest/v1/Code
+                    statusRuntimeException.getStatus().getCode() == Status.Code.UNAVAILABLE;
+        }
+        // Handle HTTP-level retryable errors (e.g. 503 Service Unavailable) from BigQuery REST API
+        if (t instanceof BigQueryException bigQueryException) {
+            return bigQueryException.isRetryable();
         }
         return false;
+    }
+
+    public static String buildNativeQuery(String nativeQuery, Optional<String> filter, OptionalLong limit)
+    {
+        // projected column names can not be used for generating select sql because the query fails if it does not
+        // include a column name. eg: query => 'SELECT 1'
+        String queryString = filter.map(s -> "SELECT * FROM (" + nativeQuery + ") WHERE " + s).orElse(nativeQuery);
+        if (limit.isPresent()) {
+            return "SELECT * FROM (" + queryString + ") LIMIT " + limit.orElseThrow();
+        }
+        return queryString;
     }
 
     public static BigQueryException convertToBigQueryException(BigQueryError error)

@@ -21,6 +21,7 @@ import io.trino.metadata.SqlScalarFunction;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionDependencies;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.ScalarFunction;
@@ -59,6 +60,8 @@ public final class ConcatWsFunction
     @ScalarFunction("concat_ws")
     public static final class ConcatArrayWs
     {
+        private ConcatArrayWs() {}
+
         @SqlType("varchar")
         public static Slice concatWsArray(@SqlType("varchar") Slice separator, @SqlType("array(varchar)") Block elements)
         {
@@ -99,7 +102,7 @@ public final class ConcatWsFunction
     }
 
     @Override
-    protected SpecializedSqlScalarFunction specialize(BoundSignature boundSignature)
+    public SpecializedSqlScalarFunction specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
         int valueCount = boundSignature.getArity() - 1;
         if (valueCount < 1) {

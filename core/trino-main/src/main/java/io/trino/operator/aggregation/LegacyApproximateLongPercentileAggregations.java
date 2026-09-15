@@ -15,6 +15,7 @@ package io.trino.operator.aggregation;
 
 import io.airlift.stats.QuantileDigest;
 import io.trino.operator.aggregation.state.QuantileDigestAndPercentileState;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.AggregationFunction;
 import io.trino.spi.function.AggregationState;
@@ -22,6 +23,7 @@ import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.Description;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
 
@@ -50,7 +52,7 @@ public final class LegacyApproximateLongPercentileAggregations
                 digest = new QuantileDigest(accuracy);
             }
             else {
-                throw new IllegalArgumentException("Percentile accuracy must be strictly between 0 and 1");
+                throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Percentile accuracy must be strictly between 0 and 1");
             }
             state.setDigest(digest);
             state.addMemoryUsage(digest.estimatedInMemorySizeInBytes());
@@ -82,6 +84,7 @@ public final class LegacyApproximateLongPercentileAggregations
         state.setPercentile(otherState.getPercentile());
     }
 
+    @SqlNullable
     @OutputFunction(StandardTypes.BIGINT)
     public static void output(@AggregationState QuantileDigestAndPercentileState state, BlockBuilder out)
     {

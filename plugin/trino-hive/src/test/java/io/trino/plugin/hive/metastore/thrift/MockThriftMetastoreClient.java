@@ -28,6 +28,7 @@ import io.trino.hive.thrift.metastore.HiveObjectPrivilege;
 import io.trino.hive.thrift.metastore.HiveObjectRef;
 import io.trino.hive.thrift.metastore.LockRequest;
 import io.trino.hive.thrift.metastore.LockResponse;
+import io.trino.hive.thrift.metastore.LockState;
 import io.trino.hive.thrift.metastore.LongColumnStatsData;
 import io.trino.hive.thrift.metastore.NoSuchObjectException;
 import io.trino.hive.thrift.metastore.Partition;
@@ -49,6 +50,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -77,6 +79,7 @@ public class MockThriftMetastoreClient
             new RolePrincipalGrant("role1", "user", USER, false, 0, "grantor1", USER),
             new RolePrincipalGrant("role2", "role1", ROLE, true, 0, "grantor2", ROLE));
     public static final List<String> PARTITION_COLUMN_NAMES = ImmutableList.of(TEST_COLUMN);
+    public static final String TEST_EXCEPTION_LOCK_MESSAGE = "Fail to connect to metastore. LockId = %s";
 
     private static final StorageDescriptor DEFAULT_STORAGE_DESCRIPTOR =
             new StorageDescriptor(ImmutableList.of(new FieldSchema(TEST_COLUMN, "bigint", "")), "", null, null, false, 0, new SerDeInfo(TEST_TABLE, null, ImmutableMap.of()), null, null, ImmutableMap.of());
@@ -87,6 +90,9 @@ public class MockThriftMetastoreClient
 
     private boolean throwException;
     private boolean returnTable = true;
+
+    private long testLockId;
+    private LockState testLockState;
 
     public MockThriftMetastoreClient()
     {
@@ -108,7 +114,7 @@ public class MockThriftMetastoreClient
 
     public void mockPartitionColumnStats(String database, String table, String partitionName, Map<String, ColumnStatisticsData> columnStatistics)
     {
-        Map<String, Map<String, ColumnStatisticsObj>> tablePartitionColumnStatistics = databaseTablePartitionColumnStatistics.computeIfAbsent(new SchemaTableName(database, table), key -> new HashMap<>());
+        Map<String, Map<String, ColumnStatisticsObj>> tablePartitionColumnStatistics = databaseTablePartitionColumnStatistics.computeIfAbsent(new SchemaTableName(database, table), _ -> new HashMap<>());
         tablePartitionColumnStatistics.put(
                 partitionName,
                 Maps.transformEntries(columnStatistics, (columnName, stats) -> {
@@ -141,6 +147,16 @@ public class MockThriftMetastoreClient
         return accessCount.get();
     }
 
+    public void setTestLockId(long testLockId)
+    {
+        this.testLockId = testLockId;
+    }
+
+    public void setTestLockState(LockState testLockState)
+    {
+        this.testLockState = testLockState;
+    }
+
     @Override
     public List<String> getAllDatabases()
     {
@@ -162,6 +178,12 @@ public class MockThriftMetastoreClient
             return ImmutableList.of(); // As specified by Hive specification
         }
         return ImmutableList.of(new TableMeta(TEST_DATABASE, TEST_TABLE, MANAGED_TABLE.name()));
+    }
+
+    @Override
+    public List<String> getTableNamesWithParameters(String databaseName, String parameterKey, Set<String> parameterValues)
+    {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -239,6 +261,7 @@ public class MockThriftMetastoreClient
 
     @Override
     public void deleteTableColumnStatistics(String databaseName, String tableName, String columnName)
+            throws TException
     {
         throw new UnsupportedOperationException();
     }
@@ -273,6 +296,13 @@ public class MockThriftMetastoreClient
 
     @Override
     public void setPartitionColumnStatistics(String databaseName, String tableName, String partitionName, List<ColumnStatisticsObj> statistics)
+    {
+        accessCount.incrementAndGet();
+        // No-op
+    }
+
+    @Override
+    public void setPartitionsColumnStatistics(String databaseName, String tableName, Map<String, List<ColumnStatisticsObj>> partitionStatistics)
     {
         accessCount.incrementAndGet();
         // No-op
@@ -516,19 +546,24 @@ public class MockThriftMetastoreClient
     @Override
     public LockResponse acquireLock(LockRequest lockRequest)
     {
-        throw new UnsupportedOperationException();
+        return new LockResponse(testLockId, testLockState);
     }
 
     @Override
     public LockResponse checkLock(long lockId)
+            throws TException
     {
-        throw new UnsupportedOperationException();
+        accessCount.incrementAndGet();
+        if (throwException) {
+            throw new MetaException(TEST_EXCEPTION_LOCK_MESSAGE.formatted(lockId));
+        }
+        return new LockResponse(testLockId, testLockState);
     }
 
     @Override
     public void unlock(long lockId)
     {
-        throw new UnsupportedOperationException();
+        accessCount.incrementAndGet();
     }
 
     @Override
@@ -541,6 +576,13 @@ public class MockThriftMetastoreClient
     public String getConfigValue(String name, String defaultValue)
     {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void alterPartitions(String databaseName, String tableName, List<Partition> partitions)
+    {
+        accessCount.incrementAndGet();
+        // No-op
     }
 
     @Override

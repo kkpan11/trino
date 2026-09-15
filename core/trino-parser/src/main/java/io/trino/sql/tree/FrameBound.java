@@ -31,38 +31,26 @@ public class FrameBound
         PRECEDING,
         CURRENT_ROW,
         FOLLOWING,
-        UNBOUNDED_FOLLOWING
+        UNBOUNDED_FOLLOWING,
     }
 
     private final Type type;
     private final Optional<Expression> value;
 
-    public FrameBound(Type type)
-    {
-        this(Optional.empty(), type);
-    }
-
     public FrameBound(NodeLocation location, Type type)
-    {
-        this(Optional.of(location), type);
-    }
-
-    public FrameBound(Type type, Expression value)
-    {
-        this(Optional.empty(), type, value);
-    }
-
-    private FrameBound(Optional<NodeLocation> location, Type type)
     {
         this(location, type, null);
     }
 
-    public FrameBound(NodeLocation location, Type type, Expression value)
+    @Deprecated
+    public FrameBound(Type type, Expression value)
     {
-        this(Optional.of(location), type, value);
+        super(Optional.empty());
+        this.type = requireNonNull(type, "type is null");
+        this.value = Optional.ofNullable(value);
     }
 
-    private FrameBound(Optional<NodeLocation> location, Type type, Expression value)
+    public FrameBound(NodeLocation location, Type type, Expression value)
     {
         super(location);
         this.type = requireNonNull(type, "type is null");

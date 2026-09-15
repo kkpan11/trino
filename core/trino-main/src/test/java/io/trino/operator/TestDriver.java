@@ -14,7 +14,6 @@
 package io.trino.operator;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
@@ -29,7 +28,6 @@ import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSplit;
-import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedPageSource;
 import io.trino.spi.type.Type;
 import io.trino.split.PageSourceProvider;
@@ -44,7 +42,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.Timeout;
 
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -170,14 +168,15 @@ public class TestDriver
     {
         PlanNodeId sourceId = new PlanNodeId("source");
         List<Type> types = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
-        TableScanOperator source = new TableScanOperator(driverContext.addOperatorContext(99, new PlanNodeId("test"), "values"),
+        TableScanOperator source = new TableScanOperator(
+                driverContext.addOperatorContext(99, new PlanNodeId("test"), "values"),
                 sourceId,
-                (session, split, table, columns, dynamicFilter) -> new FixedPageSource(rowPagesBuilder(types)
+                (_, _, _, _, _, _, _) -> new FixedPageSource(rowPagesBuilder(types)
                         .addSequencePage(10, 20, 30, 40)
                         .build()),
                 TEST_TABLE_HANDLE,
-                ImmutableList.of(),
-                DynamicFilter.EMPTY);
+                Optional.empty(),
+                ImmutableList.of());
 
         PageConsumerOperator sink = createSinkOperator(types);
         Driver driver = Driver.createDriver(driverContext, source, sink);
@@ -250,9 +249,10 @@ public class TestDriver
     public void testMemoryRevocationRace()
     {
         List<Type> types = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
-        TableScanOperator source = new AlwaysBlockedMemoryRevokingTableScanOperator(driverContext.addOperatorContext(99, new PlanNodeId("test"), "scan"),
+        TableScanOperator source = new AlwaysBlockedMemoryRevokingTableScanOperator(
+                driverContext.addOperatorContext(99, new PlanNodeId("test"), "scan"),
                 new PlanNodeId("source"),
-                (session, split, table, columns, dynamicFilter) -> new FixedPageSource(rowPagesBuilder(types)
+                (_, _, _, _, _, _, _) -> new FixedPageSource(rowPagesBuilder(types)
                         .addSequencePage(10, 20, 30, 40)
                         .build()),
                 TEST_TABLE_HANDLE,
@@ -272,7 +272,7 @@ public class TestDriver
         TableScanOperator source = new AlwaysBlockedTableScanOperator(
                 driverContext.addOperatorContext(99, new PlanNodeId("test"), "scan"),
                 new PlanNodeId("source"),
-                (session, split, table, columns, dynamicFilter) -> new FixedPageSource(rowPagesBuilder(types)
+                (_, _, _, _, _, _, _) -> new FixedPageSource(rowPagesBuilder(types)
                         .addSequencePage(10, 20, 30, 40)
                         .build()),
                 TEST_TABLE_HANDLE,
@@ -340,9 +340,10 @@ public class TestDriver
         PlanNodeId sourceId = new PlanNodeId("source");
         List<Type> types = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
         // create a table scan operator that does not block, which will cause the driver loop to busy wait
-        TableScanOperator source = new NotBlockedTableScanOperator(driverContext.addOperatorContext(99, new PlanNodeId("test"), "values"),
+        TableScanOperator source = new NotBlockedTableScanOperator(
+                driverContext.addOperatorContext(99, new PlanNodeId("test"), "values"),
                 sourceId,
-                (session, split, table, columns, dynamicFilter) -> new FixedPageSource(rowPagesBuilder(types)
+                (_, _, _, _, _, _, _) -> new FixedPageSource(rowPagesBuilder(types)
                         .addSequencePage(10, 20, 30, 40)
                         .build()),
                 TEST_TABLE_HANDLE,
@@ -581,9 +582,9 @@ public class TestDriver
                 PlanNodeId planNodeId,
                 PageSourceProvider pageSourceProvider,
                 TableHandle table,
-                Iterable<ColumnHandle> columns)
+                List<ColumnHandle> columns)
         {
-            super(operatorContext, planNodeId, pageSourceProvider, table, columns, DynamicFilter.EMPTY);
+            super(operatorContext, planNodeId, pageSourceProvider, table, Optional.empty(), columns);
         }
 
         @Override
@@ -601,9 +602,9 @@ public class TestDriver
                 PlanNodeId planNodeId,
                 PageSourceProvider pageSourceProvider,
                 TableHandle table,
-                Iterable<ColumnHandle> columns)
+                List<ColumnHandle> columns)
         {
-            super(operatorContext, planNodeId, pageSourceProvider, table, columns, DynamicFilter.EMPTY);
+            super(operatorContext, planNodeId, pageSourceProvider, table, Optional.empty(), columns);
         }
 
         @Override
@@ -626,9 +627,9 @@ public class TestDriver
                 PlanNodeId planNodeId,
                 PageSourceProvider pageSourceProvider,
                 TableHandle table,
-                Iterable<ColumnHandle> columns)
+                List<ColumnHandle> columns)
         {
-            super(operatorContext, planNodeId, pageSourceProvider, table, columns, DynamicFilter.EMPTY);
+            super(operatorContext, planNodeId, pageSourceProvider, table, Optional.empty(), columns);
         }
 
         @Override
@@ -641,12 +642,6 @@ public class TestDriver
     private static class MockSplit
             implements ConnectorSplit
     {
-        @Override
-        public Map<String, String> getSplitInfo()
-        {
-            return ImmutableMap.of();
-        }
-
         @Override
         public long getRetainedSizeInBytes()
         {

@@ -13,17 +13,22 @@
  */
 package io.trino.testing;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.spi.connector.CatalogSchemaTableName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.Arrays;
 import java.util.List;
 
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
+// createParquetTableWithBloomFilter creates test data at fixed location
+@Execution(SAME_THREAD)
 public abstract class BaseTestParquetWithBloomFilters
         extends AbstractTestQueryFramework
 {
@@ -51,13 +56,19 @@ public abstract class BaseTestParquetWithBloomFilters
         testBloomFilterRowGroupPruning(tableName, COLUMN_NAME);
     }
 
+    @Test
+    void testBloomFilterColumnWithDictionaryPage()
+    {
+        createParquetTableWithBloomFilter(COLUMN_NAME, ImmutableList.of(1, 1));
+    }
+
     protected void testBloomFilterRowGroupPruning(CatalogSchemaTableName tableName, String columnName)
     {
         // assert table is populated with data
         assertQueryStats(
                 getSession(),
                 "SELECT " + columnName + " FROM " + tableName,
-                queryStats -> {},
+                _ -> {},
                 results -> assertThat(results.getOnlyColumnAsSet()).isEqualTo(ImmutableSet.copyOf(TEST_VALUES)));
 
         // When reading bloom filter is enabled, row groups are pruned when searching for a missing value

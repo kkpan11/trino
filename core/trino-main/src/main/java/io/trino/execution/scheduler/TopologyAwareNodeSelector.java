@@ -21,9 +21,8 @@ import io.airlift.log.Logger;
 import io.airlift.stats.CounterStat;
 import io.trino.execution.NodeTaskMap;
 import io.trino.execution.RemoteTask;
-import io.trino.metadata.InternalNode;
-import io.trino.metadata.InternalNodeManager;
 import io.trino.metadata.Split;
+import io.trino.node.InternalNode;
 import io.trino.spi.HostAddress;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
@@ -54,7 +53,7 @@ public class TopologyAwareNodeSelector
 {
     private static final Logger log = Logger.get(TopologyAwareNodeSelector.class);
 
-    private final InternalNodeManager nodeManager;
+    private final InternalNode currentNode;
     private final NodeTaskMap nodeTaskMap;
     private final boolean includeCoordinator;
     private final AtomicReference<Supplier<NodeMap>> nodeMap;
@@ -64,9 +63,10 @@ public class TopologyAwareNodeSelector
     private final int maxUnacknowledgedSplitsPerTask;
     private final List<CounterStat> topologicalSplitCounters;
     private final NetworkTopology networkTopology;
+    private final StableHostAddressProvider stableHostAddressProvider;
 
     public TopologyAwareNodeSelector(
-            InternalNodeManager nodeManager,
+            InternalNode currentNode,
             NodeTaskMap nodeTaskMap,
             boolean includeCoordinator,
             Supplier<NodeMap> nodeMap,
@@ -75,9 +75,10 @@ public class TopologyAwareNodeSelector
             long maxPendingSplitsWeightPerTask,
             int maxUnacknowledgedSplitsPerTask,
             List<CounterStat> topologicalSplitCounters,
-            NetworkTopology networkTopology)
+            NetworkTopology networkTopology,
+            StableHostAddressProvider stableHostAddressProvider)
     {
-        this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
+        this.currentNode = requireNonNull(currentNode, "currentNode is null");
         this.nodeTaskMap = requireNonNull(nodeTaskMap, "nodeTaskMap is null");
         this.includeCoordinator = includeCoordinator;
         this.nodeMap = new AtomicReference<>(nodeMap);
@@ -88,6 +89,7 @@ public class TopologyAwareNodeSelector
         checkArgument(maxUnacknowledgedSplitsPerTask > 0, "maxUnacknowledgedSplitsPerTask must be > 0, found: %s", maxUnacknowledgedSplitsPerTask);
         this.topologicalSplitCounters = requireNonNull(topologicalSplitCounters, "topologicalSplitCounters is null");
         this.networkTopology = requireNonNull(networkTopology, "networkTopology is null");
+        this.stableHostAddressProvider = requireNonNull(stableHostAddressProvider, "stableHostAddressProvider is null");
     }
 
     @Override
@@ -106,7 +108,7 @@ public class TopologyAwareNodeSelector
     public InternalNode selectCurrentNode()
     {
         // TODO: this is a hack to force scheduling on the coordinator
-        return nodeManager.getCurrentNode();
+        return currentNode;
     }
 
     @Override
@@ -150,7 +152,10 @@ public class TopologyAwareNodeSelector
             int depth = topologicalSplitCounters.size() - 1;
             int chosenDepth = 0;
             Set<NetworkLocation> locations = new HashSet<>();
-            for (HostAddress host : split.getAddresses()) {
+            List<HostAddress> preferredAddresses = split.getConnectorSplit().getAffinityKey()
+                    .map(stableHostAddressProvider::getHosts)
+                    .orElseGet(split::getAddresses);
+            for (HostAddress host : preferredAddresses) {
                 locations.add(networkTopology.locate(host));
             }
             if (locations.isEmpty()) {

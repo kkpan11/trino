@@ -57,7 +57,7 @@ import static io.trino.sql.tree.PatternRecognitionRelation.RowsPerMatch.WINDOW;
 import static io.trino.sql.tree.ProcessingMode.Mode.FINAL;
 import static io.trino.sql.util.AstUtils.preOrder;
 
-public class PatternRecognitionAnalyzer
+public final class PatternRecognitionAnalyzer
 {
     private PatternRecognitionAnalyzer() {}
 
@@ -164,10 +164,10 @@ public class PatternRecognitionAnalyzer
 
         // check no prohibited nesting: cannot nest one row pattern recognition within another
         List<Expression> expressions = Streams.concat(
-                measures.stream()
-                        .map(MeasureDefinition::getExpression),
-                variableDefinitions.stream()
-                        .map(VariableDefinition::getExpression))
+                        measures.stream()
+                                .map(MeasureDefinition::getExpression),
+                        variableDefinitions.stream()
+                                .map(VariableDefinition::getExpression))
                 .collect(toImmutableList());
         expressions.forEach(expression -> preOrder(expression)
                 .filter(child -> child instanceof PatternRecognitionRelation || child instanceof RowPattern)

@@ -13,7 +13,7 @@
  */
 package io.trino.spi.function;
 
-import io.trino.spi.Experimental;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
@@ -21,7 +21,6 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-@Experimental(eta = "2022-10-31")
 public class ScalarFunctionImplementation
 {
     private final MethodHandle methodHandle;
@@ -58,23 +57,33 @@ public class ScalarFunctionImplementation
     public static class Builder
     {
         private MethodHandle methodHandle;
-        private MethodHandle instanceFactory;
+        private Optional<MethodHandle> instanceFactory = Optional.empty();
         private List<Class<?>> lambdaInterfaces = List.of();
 
         private Builder() {}
 
+        @CanIgnoreReturnValue
         public Builder methodHandle(MethodHandle methodHandle)
         {
             this.methodHandle = requireNonNull(methodHandle, "methodHandle is null");
             return this;
         }
 
+        @CanIgnoreReturnValue
         public Builder instanceFactory(MethodHandle instanceFactory)
+        {
+            this.instanceFactory = Optional.of(requireNonNull(instanceFactory, "instanceFactory is null"));
+            return this;
+        }
+
+        @CanIgnoreReturnValue
+        public Builder instanceFactory(Optional<MethodHandle> instanceFactory)
         {
             this.instanceFactory = requireNonNull(instanceFactory, "instanceFactory is null");
             return this;
         }
 
+        @CanIgnoreReturnValue
         public Builder lambdaInterfaces(List<Class<?>> lambdaInterfaces)
         {
             this.lambdaInterfaces = List.copyOf(requireNonNull(lambdaInterfaces, "lambdaInterfaces is null"));
@@ -83,7 +92,7 @@ public class ScalarFunctionImplementation
 
         public ScalarFunctionImplementation build()
         {
-            return new ScalarFunctionImplementation(methodHandle, Optional.ofNullable(instanceFactory), lambdaInterfaces);
+            return new ScalarFunctionImplementation(methodHandle, instanceFactory, lambdaInterfaces);
         }
     }
 }

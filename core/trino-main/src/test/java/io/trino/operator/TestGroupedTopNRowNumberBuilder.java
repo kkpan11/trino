@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.operator.UpdateMemory.NOOP;
@@ -39,7 +40,7 @@ public class TestGroupedTopNRowNumberBuilder
     {
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRowNumberBuilder(
                 ImmutableList.of(BIGINT),
-                (left, leftPosition, right, rightPosition) -> {
+                (_, _, _, _) -> {
                     throw new UnsupportedOperationException();
                 },
                 5,
@@ -83,7 +84,7 @@ public class TestGroupedTopNRowNumberBuilder
         GroupByHash groupByHash = createGroupByHash(ImmutableList.of(types.get(0)), NOOP);
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRowNumberBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
                 2,
                 produceRowNumbers,
                 new int[] {0},
@@ -102,7 +103,7 @@ public class TestGroupedTopNRowNumberBuilder
         assertThat(groupedTopNBuilder.processPage(input.get(3)).process()).isTrue();
 
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertThat(output.size()).isEqualTo(1);
+        assertThat(output).hasSize(1);
 
         Page expected = rowPagesBuilder(BIGINT, DOUBLE, BIGINT)
                 .row(1L, 0.3, 1)
@@ -112,13 +113,12 @@ public class TestGroupedTopNRowNumberBuilder
                 .row(3L, 0.1, 1)
                 .row(3L, 0.9, 2)
                 .row(4L, 0.6, 1)
-                .build()
-                .get(0);
+                .buildPage();
         if (produceRowNumbers) {
-            assertPageEquals(ImmutableList.of(BIGINT, DOUBLE, BIGINT), output.get(0), expected);
+            assertPageEquals(ImmutableList.of(BIGINT, DOUBLE, BIGINT), getOnlyElement(output), expected);
         }
         else {
-            assertPageEquals(types, output.get(0), new Page(expected.getBlock(0), expected.getBlock(1)));
+            assertPageEquals(types, getOnlyElement(output), new Page(expected.getBlock(0), expected.getBlock(1)));
         }
     }
 
@@ -155,7 +155,7 @@ public class TestGroupedTopNRowNumberBuilder
 
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRowNumberBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
                 5,
                 produceRowNumbers,
                 new int[0],
@@ -174,7 +174,7 @@ public class TestGroupedTopNRowNumberBuilder
         assertThat(groupedTopNBuilder.processPage(input.get(3)).process()).isTrue();
 
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertThat(output.size()).isEqualTo(1);
+        assertThat(output).hasSize(1);
 
         Page expected = rowPagesBuilder(BIGINT, DOUBLE, BIGINT)
                 .row(3L, 0.1, 1)
@@ -182,13 +182,12 @@ public class TestGroupedTopNRowNumberBuilder
                 .row(1L, 0.3, 3)
                 .row(1L, 0.4, 4)
                 .row(1L, 0.5, 5)
-                .build()
-                .get(0);
+                .buildPage();
         if (produceRowNumbers) {
-            assertPageEquals(ImmutableList.of(BIGINT, DOUBLE, BIGINT), output.get(0), expected);
+            assertPageEquals(ImmutableList.of(BIGINT, DOUBLE, BIGINT), getOnlyElement(output), expected);
         }
         else {
-            assertPageEquals(types, output.get(0), new Page(expected.getBlock(0), expected.getBlock(1)));
+            assertPageEquals(types, getOnlyElement(output), new Page(expected.getBlock(0), expected.getBlock(1)));
         }
     }
 
@@ -201,15 +200,14 @@ public class TestGroupedTopNRowNumberBuilder
                 .row(1L, 0.2)
                 .row(1L, 0.9)
                 .row(1L, 0.1)
-                .build()
-                .get(0);
+                .buildPage();
         input.compact();
 
         AtomicBoolean unblock = new AtomicBoolean();
         GroupByHash groupByHash = createGroupByHash(ImmutableList.of(types.get(0)), unblock::get);
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRowNumberBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
                 5,
                 false,
                 new int[] {0},
@@ -221,26 +219,24 @@ public class TestGroupedTopNRowNumberBuilder
         unblock.set(true);
         assertThat(work.process()).isTrue();
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertThat(output.size()).isEqualTo(1);
 
         Page expected = rowPagesBuilder(types)
                 .row(1L, 0.1)
                 .row(1L, 0.2)
                 .row(1L, 0.3)
                 .row(1L, 0.9)
-                .build()
-                .get(0);
-        assertPageEquals(types, output.get(0), expected);
+                .buildPage();
+        assertPageEquals(types, getOnlyElement(output), expected);
     }
 
     private static GroupByHash createGroupByHash(List<Type> partitionTypes, UpdateMemory updateMemory)
     {
         return GroupByHash.createGroupByHash(
                 partitionTypes,
-                false,
+                GroupByHash.shouldCacheHashValue(false, partitionTypes),
                 1,
                 false,
-                new FlatHashStrategyCompiler(new TypeOperators()),
+                new FlatHashStrategyCompiler(new TypeOperators(), new NullSafeHashCompiler(new TypeOperators())),
                 updateMemory);
     }
 }

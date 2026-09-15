@@ -37,6 +37,7 @@ import org.apache.thrift.TException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
@@ -90,6 +91,13 @@ public class FailureAwareThriftMetastoreClient
             throws TException
     {
         return runWithHandle(() -> delegate.getTableMeta(databaseName));
+    }
+
+    @Override
+    public List<String> getTableNamesWithParameters(String databaseName, String parameterKey, Set<String> parameterValues)
+            throws TException
+    {
+        return runWithHandle(() -> delegate.getTableNamesWithParameters(databaseName, parameterKey, parameterValues));
     }
 
     @Override
@@ -181,6 +189,13 @@ public class FailureAwareThriftMetastoreClient
             throws TException
     {
         runWithHandle(() -> delegate.setPartitionColumnStatistics(databaseName, tableName, partitionName, statistics));
+    }
+
+    @Override
+    public void setPartitionsColumnStatistics(String databaseName, String tableName, Map<String, List<ColumnStatisticsObj>> partitionStatistics)
+            throws TException
+    {
+        runWithHandle(() -> delegate.setPartitionsColumnStatistics(databaseName, tableName, partitionStatistics));
     }
 
     @Override
@@ -391,6 +406,13 @@ public class FailureAwareThriftMetastoreClient
             throws TException
     {
         return runWithHandle(() -> delegate.allocateTableWriteIds(database, tableName, transactionIds));
+    }
+
+    @Override
+    public void alterPartitions(String databaseName, String tableName, List<Partition> partitions)
+            throws TException
+    {
+        runWithHandle(() -> delegate.alterPartitions(databaseName, tableName, partitions));
     }
 
     @Override

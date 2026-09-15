@@ -28,7 +28,8 @@ public final class ByteBitUnpackers
             new Unpacker6(),
             new Unpacker7(),
             new Unpacker8(),
-            new Unpacker9()};
+            new Unpacker9(),
+    };
 
     // Byte unpacker also exists for the out-of-range 9 value.
     // This unpacker truncates the most significant bit of the resulted numbers.
@@ -55,9 +56,7 @@ public final class ByteBitUnpackers
         return UNPACKERS[bitWidth - 1];
     }
 
-    private ByteBitUnpackers()
-    {
-    }
+    private ByteBitUnpackers() {}
 
     private static final class Unpacker1
             implements ByteBitUnpacker

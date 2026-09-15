@@ -129,7 +129,7 @@ to `PASSWORD`. Additionally the following options must be configured:
 * - Property name
   - Description
 * - `opensearch.auth.user`
-  - User name to use to connect to OpenSearch.
+  - Username to use to connect to OpenSearch.
 * - `opensearch.auth.password`
   - Password to use to connect to OpenSearch.
 :::
@@ -141,7 +141,7 @@ clusters with TLS enabled.
 
 If your cluster uses globally-trusted certificates, you only need to
 enable TLS. If you require custom configuration for certificates, the connector
-supports key stores and trust stores in PEM or Java Key Store (JKS) format.
+supports key stores and trust stores in P12 (PKCS) or Java Key Store (JKS) format.
 
 The available configuration values are listed in the following table:
 
@@ -154,10 +154,10 @@ The available configuration values are listed in the following table:
 * - `opensearch.tls.enabled`
   - Enable TLS security. Defaults to `false`.
 * - `opensearch.tls.keystore-path`
-  - The path to the [PEM](/security/inspect-pem) or [JKS](/security/inspect-jks)
+  - The path to the P12 (PKCS) or [JKS](/security/inspect-jks)
     key store.
 * - `opensearch.tls.truststore-path`
-  - The path to [PEM](/security/inspect-pem) or [JKS](/security/inspect-jks)
+  - The path to P12 (PKCS) or [JKS](/security/inspect-jks)
     trust store.
 * - `opensearch.tls.keystore-password`
   - The password for the key store specified by
@@ -243,7 +243,7 @@ following structure:
     "array_string_field": ["trino","the","lean","machine-ohs"],
     "long_field": 314159265359,
     "id_field": "564e6982-88ee-4498-aa98-df9e3f6b6109",
-    "timestamp_field": "1987-09-17T06:22:48.000Z",
+    "timestamp_field": "2025-09-17T06:22:48.000Z",
     "object_field": {
         "array_int_field": [86,75,309],
         "int_field": 2
@@ -396,6 +396,17 @@ The following hidden columns are available:
 The connector provides [globally available](sql-globally-available) and
 [read operation](sql-read-operations) statements to access data and
 metadata in the OpenSearch catalog.
+
+### Wildcard table
+
+The connector provides support to query multiple tables using a concise
+[wildcard table](https://opensearch.org/docs/latest/api-reference/multi-search/#metadata-only-options)
+notation.
+
+```sql
+SELECT *
+FROM example.web."page_views_*";
+```
 
 ### Table functions
 

@@ -17,10 +17,11 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
 import io.trino.Session;
+import io.trino.connector.CatalogHandle;
 import io.trino.security.AccessControl;
 import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.CatalogHandle;
+import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.RelationType;
 import io.trino.spi.connector.SchemaTableName;
@@ -55,6 +56,21 @@ public final class MetadataListing
 
     public static SortedSet<String> listCatalogNames(Session session, Metadata metadata, AccessControl accessControl, Domain catalogDomain)
     {
+        Set<String> catalogs = metadata.listCatalogs(session).stream()
+                .filter(CatalogInfo::isOperational)
+                .map(CatalogInfo::catalogName)
+                .filter(stringFilter(catalogDomain))
+                .collect(toImmutableSet());
+        return ImmutableSortedSet.copyOf(accessControl.filterCatalogs(session.toSecurityContext(), catalogs));
+    }
+
+    /**
+     * Like {@link #listCatalogNames(Session, Metadata, AccessControl, Domain)} but also includes catalogs
+     * that failed to load. Use this only when the caller does not access the catalog's connector —
+     * for example, when displaying a catalog list to the user.
+     */
+    public static SortedSet<String> listAllCatalogNames(Session session, Metadata metadata, AccessControl accessControl, Domain catalogDomain)
+    {
         Optional<String> catalogName = tryGetSingleVarcharValue(catalogDomain);
         Set<String> catalogs;
         if (catalogName.isPresent()) {
@@ -83,6 +99,22 @@ public final class MetadataListing
         return catalogs.stream()
                 .filter(catalogInfo -> allowedCatalogs.contains(catalogInfo.catalogName()))
                 .collect(toImmutableList());
+    }
+
+    public static Set<CatalogSchemaName> listAllAvailableSchemas(
+            Session session,
+            Metadata metadata,
+            AccessControl accessControl,
+            Domain catalogDomain,
+            Domain schemaDomain)
+    {
+        Set<String> catalogNames = listCatalogNames(session, metadata, accessControl, catalogDomain);
+        Optional<String> schemaName = tryGetSingleVarcharValue(schemaDomain);
+        return catalogNames.stream()
+                .flatMap(catalogName ->
+                        listSchemas(session, metadata, accessControl, catalogName, schemaName).stream()
+                                .map(name -> new CatalogSchemaName(catalogName, name)))
+                .collect(toImmutableSet());
     }
 
     public static SortedSet<String> listSchemas(Session session, Metadata metadata, AccessControl accessControl, String catalogName)
@@ -332,8 +364,7 @@ public final class MetadataListing
                                     actualTableName.asCatalogSchemaTableName().getCatalogName(),
                                     ImmutableMap.of(
                                             // Use redirected table name for applying column filters, since the source does not know the column metadata
-                                            actualTableName.asSchemaTableName(),
-                                            columns.stream()
+                                            actualTableName.asSchemaTableName(), columns.stream()
                                                     .map(ColumnMetadata::getName)
                                                     .collect(toImmutableSet())))
                             .getOrDefault(actualTableName.asSchemaTableName(), ImmutableSet.of());
@@ -347,7 +378,7 @@ public final class MetadataListing
         return result.buildOrThrow();
     }
 
-    private static TrinoException handleListingException(RuntimeException exception, String type, String catalogName)
+    public static TrinoException handleListingException(RuntimeException exception, String type, String catalogName)
     {
         ErrorCodeSupplier result = GENERIC_INTERNAL_ERROR;
         if (exception instanceof TrinoException trinoException) {
@@ -363,7 +394,7 @@ public final class MetadataListing
     {
         checkArgument(varcharDomain.getType() instanceof VarcharType, "Invalid domain type: %s", varcharDomain.getType());
         if (varcharDomain.isAll()) {
-            return value -> true;
+            return _ -> true;
         }
         return value -> varcharDomain.includesNullableValue(value == null ? null : utf8Slice(value));
     }

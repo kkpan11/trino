@@ -13,123 +13,34 @@
  */
 package io.trino.execution.buffer;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.base.metrics.TDigestHistogram;
+import io.trino.spi.metrics.Metrics;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 
-import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 
-public final class OutputBufferInfo
+public record OutputBufferInfo(
+        String type,
+        BufferState state,
+        boolean canAddBuffers,
+        boolean canAddPages,
+        long totalBufferedBytes,
+        long totalBufferedPages,
+        long totalRowsSent,
+        long totalPagesSent,
+        Optional<List<PipelinedBufferInfo>> pipelinedBufferStates,
+        Optional<TDigestHistogram> utilization,
+        Optional<SpoolingOutputStats.Snapshot> spoolingOutputStats,
+        Optional<Metrics> metrics)
 {
-    private final String type;
-    private final BufferState state;
-    private final boolean canAddBuffers;
-    private final boolean canAddPages;
-    private final long totalBufferedBytes;
-    private final long totalBufferedPages;
-    private final long totalRowsSent;
-    private final long totalPagesSent;
-    private final Optional<List<PipelinedBufferInfo>> pipelinedBufferStates;
-    private final Optional<TDigestHistogram> utilization;
-    private final Optional<SpoolingOutputStats.Snapshot> spoolingOutputStats;
-
-    @JsonCreator
-    public OutputBufferInfo(
-            @JsonProperty("type") String type,
-            @JsonProperty("state") BufferState state,
-            @JsonProperty("canAddBuffers") boolean canAddBuffers,
-            @JsonProperty("canAddPages") boolean canAddPages,
-            @JsonProperty("totalBufferedBytes") long totalBufferedBytes,
-            @JsonProperty("totalBufferedPages") long totalBufferedPages,
-            @JsonProperty("totalRowsSent") long totalRowsSent,
-            @JsonProperty("totalPagesSent") long totalPagesSent,
-            @JsonProperty("pipelinedBufferStates") Optional<List<PipelinedBufferInfo>> pipelinedBufferStates,
-            @JsonProperty("utilization") Optional<TDigestHistogram> utilization,
-            @JsonProperty("spoolingOutputStats") Optional<SpoolingOutputStats.Snapshot> spoolingOutputStats)
+    public OutputBufferInfo
     {
-        this.type = type;
-        this.state = state;
-        this.canAddBuffers = canAddBuffers;
-        this.canAddPages = canAddPages;
-        this.totalBufferedBytes = totalBufferedBytes;
-        this.totalBufferedPages = totalBufferedPages;
-        this.totalRowsSent = totalRowsSent;
-        this.totalPagesSent = totalPagesSent;
-        this.pipelinedBufferStates = requireNonNull(pipelinedBufferStates, "pipelinedBufferStates is null").map(ImmutableList::copyOf);
-        this.utilization = utilization;
-        this.spoolingOutputStats = requireNonNull(spoolingOutputStats, "spoolingOutputStats is null");
-    }
-
-    @JsonProperty
-    public String getType()
-    {
-        return type;
-    }
-
-    @JsonProperty
-    public BufferState getState()
-    {
-        return state;
-    }
-
-    @JsonProperty
-    public Optional<List<PipelinedBufferInfo>> getPipelinedBufferStates()
-    {
-        return pipelinedBufferStates;
-    }
-
-    @JsonProperty
-    public boolean isCanAddBuffers()
-    {
-        return canAddBuffers;
-    }
-
-    @JsonProperty
-    public boolean isCanAddPages()
-    {
-        return canAddPages;
-    }
-
-    @JsonProperty
-    public long getTotalBufferedBytes()
-    {
-        return totalBufferedBytes;
-    }
-
-    @JsonProperty
-    public long getTotalBufferedPages()
-    {
-        return totalBufferedPages;
-    }
-
-    @JsonProperty
-    public long getTotalRowsSent()
-    {
-        return totalRowsSent;
-    }
-
-    @JsonProperty
-    public long getTotalPagesSent()
-    {
-        return totalPagesSent;
-    }
-
-    @JsonProperty
-    public Optional<TDigestHistogram> getUtilization()
-    {
-        return utilization;
-    }
-
-    @JsonProperty
-    public Optional<SpoolingOutputStats.Snapshot> getSpoolingOutputStats()
-    {
-        return spoolingOutputStats;
+        pipelinedBufferStates = requireNonNull(pipelinedBufferStates, "pipelinedBufferStates is null").map(ImmutableList::copyOf);
+        requireNonNull(spoolingOutputStats, "spoolingOutputStats is null");
+        requireNonNull(metrics, "metrics is null");
     }
 
     public OutputBufferInfo summarize()
@@ -143,6 +54,7 @@ public final class OutputBufferInfo
                 totalBufferedPages,
                 totalRowsSent,
                 totalPagesSent,
+                Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
@@ -161,7 +73,8 @@ public final class OutputBufferInfo
                 totalPagesSent,
                 Optional.empty(),
                 utilization,
-                spoolingOutputStats);
+                spoolingOutputStats,
+                metrics);
     }
 
     public OutputBufferInfo pruneSpoolingOutputStats()
@@ -177,51 +90,7 @@ public final class OutputBufferInfo
                 totalPagesSent,
                 pipelinedBufferStates,
                 utilization,
-                Optional.empty());
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        OutputBufferInfo that = (OutputBufferInfo) o;
-        return Objects.equals(type, that.type) &&
-                canAddBuffers == that.canAddBuffers &&
-                canAddPages == that.canAddPages &&
-                totalBufferedBytes == that.totalBufferedBytes &&
-                totalBufferedPages == that.totalBufferedPages &&
-                totalRowsSent == that.totalRowsSent &&
-                totalPagesSent == that.totalPagesSent &&
-                state == that.state &&
-                Objects.equals(pipelinedBufferStates, that.pipelinedBufferStates) &&
-                Objects.equals(utilization, that.utilization);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(state, canAddBuffers, canAddPages, totalBufferedBytes, totalBufferedPages, totalRowsSent, totalPagesSent, pipelinedBufferStates, utilization);
-    }
-
-    @Override
-    public String toString()
-    {
-        return toStringHelper(this)
-                .add("type", type)
-                .add("state", state)
-                .add("canAddBuffers", canAddBuffers)
-                .add("canAddPages", canAddPages)
-                .add("totalBufferedBytes", totalBufferedBytes)
-                .add("totalBufferedPages", totalBufferedPages)
-                .add("totalRowsSent", totalRowsSent)
-                .add("totalPagesSent", totalPagesSent)
-                .add("pipelinedBufferStates", pipelinedBufferStates)
-                .add("bufferUtilization", utilization)
-                .toString();
+                Optional.empty(),
+                metrics);
     }
 }

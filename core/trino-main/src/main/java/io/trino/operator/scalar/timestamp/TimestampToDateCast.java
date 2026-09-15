@@ -13,7 +13,6 @@
  */
 package io.trino.operator.scalar.timestamp;
 
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.LiteralParameters;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.ScalarOperator;
@@ -22,26 +21,26 @@ import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.StandardTypes;
 
 import static io.trino.spi.function.OperatorType.CAST;
-import static io.trino.type.DateTimes.MICROSECONDS_PER_DAY;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_DAY;
 import static java.lang.Math.floorDiv;
 
-@ScalarOperator(CAST)
-@ScalarFunction("date")
+@ScalarOperator(value = CAST, neverFails = true)
+@ScalarFunction(value = "date", neverFails = true)
 public final class TimestampToDateCast
 {
     private TimestampToDateCast() {}
 
     @LiteralParameters("p")
     @SqlType(StandardTypes.DATE)
-    public static long cast(ConnectorSession session, @SqlType("timestamp(p)") long timestamp)
+    public static long cast(@SqlType("timestamp(p)") long timestamp)
     {
         return floorDiv(timestamp, MICROSECONDS_PER_DAY);
     }
 
     @LiteralParameters("p")
     @SqlType(StandardTypes.DATE)
-    public static long cast(ConnectorSession session, @SqlType("timestamp(p)") LongTimestamp timestamp)
+    public static long cast(@SqlType("timestamp(p)") LongTimestamp timestamp)
     {
-        return cast(session, timestamp.getEpochMicros());
+        return cast(timestamp.getEpochMicros());
     }
 }

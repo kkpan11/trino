@@ -19,7 +19,6 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.cost.TaskCountEstimator;
 import io.trino.spi.connector.SortOrder;
 import io.trino.sql.ir.Cast;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.RuleStatsRecorder;
@@ -37,7 +36,8 @@ import java.util.List;
 
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
-import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.sort;
@@ -81,21 +81,22 @@ public class TestEliminateSorts
     @Test
     public void testNotEliminateSortsIfFilterExists()
     {
-        @Language("SQL") String sql = """
-            SELECT * FROM (
-                SELECT quantity, row_number() OVER (ORDER BY quantity) 
-                FROM lineitem
-            )
-            WHERE quantity > 10 
-            ORDER BY quantity
-            """;
+        @Language("SQL") String sql =
+                """
+                SELECT * FROM (
+                    SELECT quantity, row_number() OVER (ORDER BY quantity)
+                    FROM lineitem
+                )
+                WHERE quantity > 10
+                ORDER BY quantity
+                """;
 
         PlanMatchPattern pattern =
                 anyTree(
                         sort(
                                 anyTree(
                                         filter(
-                                                new Comparison(GREATER_THAN, new Reference(DOUBLE, "QUANTITY"), new Cast(new Constant(INTEGER, 10L), DOUBLE)),
+                                                comparison(GREATER_THAN, new Reference(DOUBLE, "QUANTITY"), new Cast(new Constant(INTEGER, 10L), DOUBLE)),
                                                 window(windowMatcherBuilder -> windowMatcherBuilder
                                                                 .specification(windowSpec)
                                                                 .addFunction(windowFunction("row_number", ImmutableList.of(), DEFAULT_FRAME)),
@@ -108,6 +109,7 @@ public class TestEliminateSorts
     {
         List<PlanOptimizer> optimizers = ImmutableList.of(
                 new IterativeOptimizer(
+                        "TestEliminateSorts",
                         getPlanTester().getPlannerContext(),
                         new RuleStatsRecorder(),
                         getPlanTester().getStatsCalculator(),
@@ -115,7 +117,11 @@ public class TestEliminateSorts
                         ImmutableSet.of(
                                 new RemoveRedundantIdentityProjections(),
                                 new DetermineTableScanNodePartitioning(getPlanTester().getPlannerContext().getMetadata(), getPlanTester().getNodePartitioningManager(), new TaskCountEstimator(() -> 10)))),
-                new AddExchanges(getPlanTester().getPlannerContext(), getPlanTester().getStatsCalculator(), getPlanTester().getTaskCountEstimator()));
+                new AddExchanges(
+                        getPlanTester().getPlannerContext(),
+                        getPlanTester().getStatsCalculator(),
+                        getPlanTester().getTaskCountEstimator(),
+                        getPlanTester().getNodePartitioningManager()));
 
         assertPlan(sql, pattern, optimizers);
     }

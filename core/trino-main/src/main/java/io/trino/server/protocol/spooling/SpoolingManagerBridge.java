@@ -15,12 +15,15 @@ package io.trino.server.protocol.spooling;
 
 import com.google.inject.Inject;
 import io.airlift.slice.Slice;
-import io.airlift.units.DataSize;
+import io.trino.server.protocol.spooling.SpoolingConfig.SegmentRetrievalMode;
 import io.trino.spi.TrinoException;
-import io.trino.spi.protocol.SpooledLocation;
-import io.trino.spi.protocol.SpooledSegmentHandle;
-import io.trino.spi.protocol.SpoolingContext;
-import io.trino.spi.protocol.SpoolingManager;
+import io.trino.spi.spool.SpooledLocation;
+import io.trino.spi.spool.SpooledLocation.CoordinatorLocation;
+import io.trino.spi.spool.SpooledLocation.DirectLocation;
+import io.trino.spi.spool.SpooledSegmentHandle;
+import io.trino.spi.spool.SpoolingContext;
+import io.trino.spi.spool.SpoolingManager;
+import jakarta.ws.rs.ServiceUnavailableException;
 
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
@@ -29,14 +32,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.security.GeneralSecurityException;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.spi.StandardErrorCode.CONFIGURATION_INVALID;
-import static io.trino.spi.protocol.SpooledLocation.CoordinatorLocation;
-import static io.trino.spi.protocol.SpooledLocation.DirectLocation;
-import static io.trino.spi.protocol.SpooledLocation.coordinatorLocation;
+import static io.trino.spi.spool.SpooledLocation.coordinatorLocation;
 import static java.util.Base64.getUrlDecoder;
 import static java.util.Base64.getUrlEncoder;
 import static java.util.Objects.requireNonNull;
@@ -47,43 +50,16 @@ public class SpoolingManagerBridge
         implements SpoolingManager
 {
     private final SpoolingManagerRegistry registry;
-    private final DataSize initialSegmentSize;
-    private final DataSize maximumSegmentSize;
-    private final boolean inlineSegments;
     private final SecretKey secretKey;
-    private final boolean directStorageAccess;
-    private final boolean directStorageFallback;
+    private final SegmentRetrievalMode retrievalMode;
 
     @Inject
     public SpoolingManagerBridge(SpoolingConfig spoolingConfig, SpoolingManagerRegistry registry)
     {
         this.registry = requireNonNull(registry, "registry is null");
         requireNonNull(spoolingConfig, "spoolingConfig is null");
-        this.initialSegmentSize = spoolingConfig.getInitialSegmentSize();
-        this.maximumSegmentSize = spoolingConfig.getMaximumSegmentSize();
-        this.inlineSegments = spoolingConfig.isInlineSegments();
-        this.directStorageAccess = spoolingConfig.isDirectStorageAccess();
-        this.directStorageFallback = spoolingConfig.isDirectStorageFallback();
-        this.secretKey = spoolingConfig.getSharedEncryptionKey()
-                .orElseThrow(() -> new IllegalArgumentException("protocol.spooling.shared-secret-key is not set"));
-    }
-
-    @Override
-    public long maximumSegmentSize()
-    {
-        return maximumSegmentSize.toBytes();
-    }
-
-    @Override
-    public long initialSegmentSize()
-    {
-        return initialSegmentSize.toBytes();
-    }
-
-    @Override
-    public boolean allowSegmentInlining()
-    {
-        return inlineSegments && delegate().allowSegmentInlining();
+        this.retrievalMode = spoolingConfig.getRetrievalMode();
+        this.secretKey = spoolingConfig.getSharedSecretKey();
     }
 
     @Override
@@ -115,11 +91,15 @@ public class SpoolingManagerBridge
 
     @Override
     public SpooledLocation location(SpooledSegmentHandle handle)
+            throws IOException
     {
-        return switch (delegate().location(handle)) {
-            case DirectLocation directLocation -> directLocation;
-            case CoordinatorLocation coordinatorLocation ->
-                    coordinatorLocation(toUri(secretKey, coordinatorLocation.identifier()), coordinatorLocation.headers());
+        return switch (retrievalMode) {
+            case STORAGE -> toUri(secretKey, directLocation(handle)
+                    .orElseThrow(() -> new ServiceUnavailableException("Retrieval mode is DIRECT but cannot generate pre-signed URI")));
+            case COORDINATOR_STORAGE_REDIRECT, WORKER_PROXY, COORDINATOR_PROXY -> switch (delegate().location(handle)) {
+                case DirectLocation _ -> throw new IllegalStateException("Expected coordinator location but got direct one");
+                case CoordinatorLocation coordinatorLocation -> coordinatorLocation(toUri(secretKey, coordinatorLocation.identifier()), coordinatorLocation.headers());
+            };
         };
     }
 
@@ -127,35 +107,22 @@ public class SpoolingManagerBridge
     public Optional<DirectLocation> directLocation(SpooledSegmentHandle handle)
             throws IOException
     {
-        if (!directStorageAccess) {
-            // Disabled - client fetches data through the coordinator
-            return Optional.empty();
-        }
-
-        try {
-            return delegate().directLocation(handle);
-        }
-        catch (UnsupportedOperationException e) {
-            throw new TrinoException(CONFIGURATION_INVALID, "Direct storage access is enabled but not supported by " + delegate().getClass().getSimpleName(), e);
-        }
-        catch (IOException e) {
-            if (directStorageFallback) {
-                return Optional.empty();
-            }
-            throw e;
-        }
+        return switch (retrievalMode) {
+            case STORAGE, COORDINATOR_STORAGE_REDIRECT -> delegate().directLocation(handle);
+            case COORDINATOR_PROXY, WORKER_PROXY -> throw new TrinoException(CONFIGURATION_INVALID, "Retrieval mode doesn't allow for direct storage access");
+        };
     }
 
     @Override
-    public SpooledSegmentHandle handle(SpooledLocation location)
+    public SpooledSegmentHandle handle(Slice identifier, Map<String, List<String>> headers)
     {
-        switch (location) {
-            case DirectLocation _ -> throw new IllegalArgumentException("Cannot convert direct location to handle");
-            case CoordinatorLocation coordinatorLocation -> {
-                return delegate()
-                        .handle(coordinatorLocation(fromUri(secretKey, coordinatorLocation.identifier()), coordinatorLocation.headers()));
-            }
-        }
+        return delegate().handle(fromUri(secretKey, identifier), headers);
+    }
+
+    @Override
+    public boolean isRecoverableException(IOException exception)
+    {
+        return delegate().isRecoverableException(exception);
     }
 
     private SpoolingManager delegate()
@@ -175,6 +142,11 @@ public class SpoolingManagerBridge
         catch (GeneralSecurityException e) {
             throw new RuntimeException("Could not encode segment identifier to URI", e);
         }
+    }
+
+    private static DirectLocation toUri(SecretKey secretKey, DirectLocation location)
+    {
+        return new DirectLocation(toUri(secretKey, location.identifier()), location.directUri(), location.headers());
     }
 
     private static Slice fromUri(SecretKey secretKey, Slice input)

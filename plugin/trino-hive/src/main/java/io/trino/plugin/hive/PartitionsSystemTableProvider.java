@@ -34,7 +34,7 @@ import static io.trino.plugin.hive.HiveSessionProperties.getTimestampPrecision;
 import static io.trino.plugin.hive.SystemTableHandler.PARTITIONS;
 import static io.trino.plugin.hive.metastore.MetastoreUtil.getProtectMode;
 import static io.trino.plugin.hive.metastore.MetastoreUtil.verifyOnline;
-import static io.trino.plugin.hive.util.HiveBucketing.getHiveBucketHandle;
+import static io.trino.plugin.hive.util.HiveBucketing.getHiveTablePartitioningForRead;
 import static io.trino.plugin.hive.util.HiveUtil.getPartitionKeyColumnHandles;
 import static io.trino.plugin.hive.util.HiveUtil.getRegularColumnHandles;
 import static io.trino.plugin.hive.util.HiveUtil.isDeltaLakeTable;
@@ -87,7 +87,7 @@ public class PartitionsSystemTableProvider
                 sourceTable.getParameters(),
                 getPartitionKeyColumnHandles(sourceTable, typeManager),
                 getRegularColumnHandles(sourceTable, typeManager, getTimestampPrecision(session)),
-                getHiveBucketHandle(session, sourceTable, typeManager));
+                getHiveTablePartitioningForRead(session, sourceTable, typeManager));
 
         List<HiveColumnHandle> partitionColumns = sourceTableHandle.getPartitionColumns();
         if (partitionColumns.isEmpty()) {
@@ -112,7 +112,7 @@ public class PartitionsSystemTableProvider
                 constraint -> {
                     Constraint targetConstraint = new Constraint(constraint.transformKeys(partitionColumns::get));
                     Iterable<List<Object>> records = () ->
-                            stream(partitionManager.getPartitions(metadata.getMetastore(), sourceTableHandle, targetConstraint).getPartitions())
+                            stream(partitionManager.getPartitions(metadata.getMetastore(), sourceTableHandle, targetConstraint, session).getPartitions())
                                     .map(hivePartition ->
                                             partitionColumns.stream()
                                                     .map(columnHandle -> hivePartition.getKeys().get(columnHandle).getValue())

@@ -15,19 +15,16 @@ package io.trino.verifier;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableSet;
-import io.airlift.event.client.EventClient;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.TrinoException;
 import jakarta.annotation.Nullable;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -87,17 +84,17 @@ public class Verifier
     private final String skipCorrectnessRegex;
     private final boolean simplifiedControlQueriesGenerationEnabled;
     private final String simplifiedControlQueriesOutputDirectory;
-    private final Set<EventClient> eventClients;
+    private final Set<EventConsumer> eventConsumers;
     private final int threadCount;
     private final Set<String> allowedQueries;
     private final Set<String> bannedQueries;
     private final int precision;
 
-    public Verifier(PrintStream out, VerifierConfig config, Set<EventClient> eventClients)
+    public Verifier(PrintStream out, VerifierConfig config, Set<EventConsumer> eventConsumers)
     {
         requireNonNull(out, "out is null");
         requireNonNull(config, "config is null");
-        this.eventClients = requireNonNull(eventClients, "eventClients is null");
+        this.eventConsumers = requireNonNull(eventConsumers, "eventConsumers is null");
         this.allowedQueries = requireNonNull(config.getAllowedQueries(), "allowedQueries is null");
         this.bannedQueries = requireNonNull(config.getBannedQueries(), "bannedQueries is null");
         this.runId = config.getRunId();
@@ -201,7 +198,7 @@ public class Verifier
             QueryResult controlResult = validator.getControlResult();
             if (simplifiedControlQueriesGenerationEnabled && controlResult.getState() == SUCCESS) {
                 QueryPair queryPair = validator.getQueryPair();
-                Path path = Paths.get(format(
+                Path path = Path.of(format(
                         "%s/%s/%s/%s.sql",
                         simplifiedControlQueriesOutputDirectory,
                         runId,
@@ -224,10 +221,10 @@ public class Verifier
                 failed++;
             }
 
-            for (EventClient eventClient : eventClients) {
-                eventClient.post(buildEvent(validator));
+            VerifierQueryEvent queryEvent = buildEvent(validator);
+            for (EventConsumer eventConsumer : eventConsumers) {
+                eventConsumer.postEvent(queryEvent);
             }
-
             double progress = (((double) total) / totalQueries) * 100;
             if (!isQuiet || (progress - lastProgress) > 1) {
                 log.info("Progress: %s valid, %s failed, %s skipped, %.2f%% done", valid, failed, skipped, progress);
@@ -238,15 +235,13 @@ public class Verifier
         log.info("Results: %s / %s (%s skipped)", valid, failed, skipped);
         log.info("");
 
-        for (EventClient eventClient : eventClients) {
-            if (eventClient instanceof Closeable) {
-                try {
-                    ((Closeable) eventClient).close();
-                }
-                catch (IOException _) {
-                }
-                log.info("");
+        for (EventConsumer eventConsumer : eventConsumers) {
+            try {
+                eventConsumer.close();
             }
+            catch (IOException _) {
+            }
+            log.info("");
         }
 
         return failed;
@@ -333,7 +328,7 @@ public class Verifier
         if (result.isEmpty()) {
             return null;
         }
-        return result.getAsDouble();
+        return result.orElseThrow();
     }
 
     private static <T> T takeUnchecked(CompletionService<T> completionService)
@@ -349,8 +344,8 @@ public class Verifier
 
     private static boolean shouldAddStackTrace(Exception e)
     {
-        if (e instanceof TrinoException) {
-            ErrorCode errorCode = ((TrinoException) e).getErrorCode();
+        if (e instanceof TrinoException trinoException) {
+            ErrorCode errorCode = trinoException.getErrorCode();
             if (EXPECTED_ERRORS.contains(errorCode)) {
                 return false;
             }
@@ -399,27 +394,14 @@ public class Verifier
     private static String getLiteral(String type, Optional<String> value)
     {
         String baseType = getBaseType(type);
-        switch (baseType) {
-            case "TINYINT":
-            case "SMALLINT":
-            case "INTEGER":
-            case "BIGINT":
-            case "DECIMAL":
-            case "DATE":
-            case "TIME":
-            case "REAL":
-            case "DOUBLE":
-                return value.map(v -> baseType + " '" + v + "'").orElse("NULL");
-            case "CHAR":
-            case "VARCHAR":
-                return value.map(v -> baseType + " '" + v.replaceAll("'", "''") + "'").orElse("NULL");
-            case "VARBINARY":
-                return value.map(v -> "X'" + v + "'").orElse("NULL");
-            case "UNKNOWN":
-                return "NULL";
-            default:
-                throw new IllegalArgumentException(format("Unexpected type: %s", type));
-        }
+        return switch (baseType) {
+            case "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "DECIMAL",
+                 "DATE", "TIME", "REAL", "DOUBLE" -> value.map(v -> baseType + " '" + v + "'").orElse("NULL");
+            case "CHAR", "VARCHAR" -> value.map(v -> baseType + " '" + v.replaceAll("'", "''") + "'").orElse("NULL");
+            case "VARBINARY" -> value.map(v -> "X'" + v + "'").orElse("NULL");
+            case "UNKNOWN" -> "NULL";
+            default -> throw new IllegalArgumentException(format("Unexpected type: %s", type));
+        };
     }
 
     private static String getBaseType(String type)

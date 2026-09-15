@@ -26,7 +26,6 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
@@ -53,12 +52,14 @@ import java.util.regex.Pattern;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_FILE_SYSTEM_FACTORY;
+import static io.trino.hdfs.HdfsTestUtils.HDFS_FILE_SYSTEM_FACTORY;
 import static io.trino.plugin.hive.metastore.file.TestingFileHiveMetastore.createTestingFileHiveMetastore;
 import static io.trino.plugin.iceberg.IcebergQueryRunner.ICEBERG_CATALOG;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getFileSystemFactory;
 import static io.trino.plugin.iceberg.IcebergUtil.METADATA_FOLDER_NAME;
 import static io.trino.plugin.iceberg.IcebergUtil.getLatestMetadataLocation;
+import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.CREATE_TABLE;
+import static io.trino.testing.TestingAccessControlManager.privilege;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -93,7 +94,7 @@ public class TestIcebergRegisterTableProcedure
         queryRunner.createCatalog("tpch", "tpch");
 
         dataDir = queryRunner.getCoordinator().getBaseDataDir().resolve("iceberg_data");
-        queryRunner.installPlugin(new TestingIcebergPlugin(dataDir, Optional.of(new TestingIcebergFileMetastoreCatalogModule(metastore))));
+        queryRunner.installPlugin(new TestingIcebergPlugin(dataDir, () -> Optional.of(new TestingIcebergFileMetastoreCatalogModule(metastore))));
         queryRunner.createCatalog(ICEBERG_CATALOG, "iceberg", ImmutableMap.of("fs.hadoop.enabled", "true", "iceberg.register-table-procedure.enabled", "true"));
         queryRunner.execute("CREATE SCHEMA iceberg.tpch");
         return queryRunner;
@@ -444,14 +445,18 @@ public class TestIcebergRegisterTableProcedure
 
         assertQueryFails(format("CALL iceberg.system.register_table (CURRENT_SCHEMA, '%s')", tableName),
                 ".*'TABLE_LOCATION' is missing.*");
-        assertQueryFails("CALL iceberg.system.register_table (CURRENT_SCHEMA)",
+        assertQueryFails(
+                "CALL iceberg.system.register_table (CURRENT_SCHEMA)",
                 ".*'TABLE_NAME' is missing.*");
-        assertQueryFails("CALL iceberg.system.register_table ()",
+        assertQueryFails(
+                "CALL iceberg.system.register_table ()",
                 ".*'SCHEMA_NAME' is missing.*");
 
-        assertQueryFails("CALL iceberg.system.register_table (null, null, null)",
+        assertQueryFails(
+                "CALL iceberg.system.register_table (null, null, null)",
                 ".*schema_name cannot be null or empty.*");
-        assertQueryFails("CALL iceberg.system.register_table (CURRENT_SCHEMA, null, null)",
+        assertQueryFails(
+                "CALL iceberg.system.register_table (CURRENT_SCHEMA, null, null)",
                 ".*table_name cannot be null or empty.*");
         assertQueryFails("CALL iceberg.system.register_table (CURRENT_SCHEMA, '" + tableName + "', null)",
                 ".*table_location cannot be null or empty.*");
@@ -497,7 +502,7 @@ public class TestIcebergRegisterTableProcedure
         // create hadoop table
         String hadoopTableName = "hadoop_table_" + randomNameSuffix();
         String hadoopTableLocation = metastoreDir.getPath() + "/" + hadoopTableName;
-        HadoopTables hadoopTables = new HadoopTables(new Configuration(false));
+        HadoopTables hadoopTables = new HadoopTables();
         Schema schema = new Schema(ImmutableList.of(
                 Types.NestedField.optional(1, "id", Types.IntegerType.get()),
                 Types.NestedField.optional(2, "name", Types.StringType.get())));
@@ -541,6 +546,20 @@ public class TestIcebergRegisterTableProcedure
         assertUpdate("DROP TABLE " + tempTableName);
     }
 
+    @Test
+    void testRegisterTableAccessControl()
+    {
+        String tableName = "test_register_table_access_control_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " AS SELECT 1 a", 1);
+        String tableLocation = getTableLocation(tableName);
+        assertUpdate("CALL system.unregister_table(CURRENT_SCHEMA, '" + tableName + "')");
+
+        assertAccessDenied(
+                "CALL system.register_table(CURRENT_SCHEMA, '" + tableName + "', '" + tableLocation + "')",
+                "Cannot create table .*",
+                privilege(tableName, CREATE_TABLE));
+    }
+
     private String getTableLocation(String tableName)
     {
         Pattern locationPattern = Pattern.compile(".*location = '(.*?)'.*", Pattern.DOTALL);
@@ -557,11 +576,6 @@ public class TestIcebergRegisterTableProcedure
     {
         metastore.dropTable(getSession().getSchema().orElseThrow(), tableName, false);
         assertThat(metastore.getTable(getSession().getSchema().orElseThrow(), tableName)).as("Table in metastore should be dropped").isEmpty();
-    }
-
-    private String getTableComment(String tableName)
-    {
-        return (String) computeScalar("SELECT comment FROM system.metadata.table_comments WHERE catalog_name = 'iceberg' AND schema_name = '" + getSession().getSchema().orElseThrow() + "' AND table_name = '" + tableName + "'");
     }
 
     private String getColumnComment(String tableName, String columnName)

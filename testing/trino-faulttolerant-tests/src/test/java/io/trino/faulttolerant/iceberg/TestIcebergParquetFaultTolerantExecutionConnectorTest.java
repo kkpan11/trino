@@ -14,10 +14,9 @@
 package io.trino.faulttolerant.iceberg;
 
 import io.trino.filesystem.Location;
-import io.trino.plugin.exchange.filesystem.FileSystemExchangePlugin;
 import io.trino.plugin.exchange.filesystem.containers.MinioStorage;
+import io.trino.plugin.iceberg.BaseIcebergParquetConnectorTest;
 import io.trino.plugin.iceberg.IcebergQueryRunner;
-import io.trino.plugin.iceberg.TestIcebergParquetConnectorTest;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -34,9 +33,14 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 @Isolated
 @TestInstance(PER_CLASS)
 public class TestIcebergParquetFaultTolerantExecutionConnectorTest
-        extends TestIcebergParquetConnectorTest
+        extends BaseIcebergParquetConnectorTest
 {
     private MinioStorage minioStorage;
+
+    public TestIcebergParquetFaultTolerantExecutionConnectorTest()
+    {
+        super(2);
+    }
 
     @Override
     protected IcebergQueryRunner.Builder createQueryRunnerBuilder()
@@ -46,10 +50,7 @@ public class TestIcebergParquetFaultTolerantExecutionConnectorTest
 
         return super.createQueryRunnerBuilder()
                 .addExtraProperties(getExtraProperties())
-                .setAdditionalSetup(runner -> {
-                    runner.installPlugin(new FileSystemExchangePlugin());
-                    runner.loadExchangeManager("filesystem", getExchangeManagerProperties(minioStorage));
-                });
+                .withExchange("filesystem", getExchangeManagerProperties(minioStorage));
     }
 
     @Test
@@ -78,10 +79,29 @@ public class TestIcebergParquetFaultTolerantExecutionConnectorTest
         abort("We always get 3 partitions with FTE");
     }
 
+    @Test
+    @Override
+    public void testMaxWriterTaskCount()
+    {
+        abort("Max writer task count is not supported with FTE");
+    }
+
     @Override
     protected boolean isFileSorted(String path, String sortColumnName)
     {
         return checkParquetFileSorting(fileSystem.newInputFile(Location.of(path)), sortColumnName);
+    }
+
+    @Override
+    protected String getTableChangesParquetRowGroupSize()
+    {
+        return "16kB";
+    }
+
+    @Override
+    protected int getTableChangesSplitBatchSize()
+    {
+        return 2;
     }
 
     @AfterAll

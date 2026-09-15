@@ -45,10 +45,12 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.util.ArrayList;
@@ -68,13 +70,13 @@ import static io.trino.jdbc.AbstractTrinoResultSet.TIMESTAMP_FORMATTER;
 import static io.trino.jdbc.AbstractTrinoResultSet.TIME_FORMATTER;
 import static io.trino.jdbc.ColumnInfo.setTypeInfo;
 import static io.trino.jdbc.ObjectCasts.castToBigDecimal;
+import static io.trino.jdbc.ObjectCasts.castToBigint;
 import static io.trino.jdbc.ObjectCasts.castToBinary;
 import static io.trino.jdbc.ObjectCasts.castToBoolean;
 import static io.trino.jdbc.ObjectCasts.castToByte;
 import static io.trino.jdbc.ObjectCasts.castToDouble;
 import static io.trino.jdbc.ObjectCasts.castToFloat;
 import static io.trino.jdbc.ObjectCasts.castToInt;
-import static io.trino.jdbc.ObjectCasts.castToLong;
 import static io.trino.jdbc.ObjectCasts.castToShort;
 import static io.trino.jdbc.ObjectCasts.invalidConversion;
 import static java.lang.Long.parseLong;
@@ -92,6 +94,14 @@ public class TrinoPreparedStatement
                     .append(ISO_LOCAL_DATE)
                     .appendLiteral(' ')
                     .append(ISO_LOCAL_TIME)
+                    .toFormatter();
+
+    private static final DateTimeFormatter OFFSET_DATE_TIME_FORMATTER =
+            new DateTimeFormatterBuilder()
+                    .append(ISO_LOCAL_DATE)
+                    .appendLiteral(' ')
+                    .append(ISO_LOCAL_TIME)
+                    .appendOffset("+HH:mm", "+00:00")
                     .toFormatter();
 
     private static final DateTimeFormatter OFFSET_TIME_FORMATTER =
@@ -242,7 +252,7 @@ public class TrinoPreparedStatement
             setNull(parameterIndex, Types.DECIMAL);
         }
         else {
-            setParameter(parameterIndex, formatLiteral("DECIMAL", x.toString()));
+            setParameter(parameterIndex, formatLiteral("DECIMAL", x.toPlainString()));
         }
     }
 
@@ -432,6 +442,9 @@ public class TrinoPreparedStatement
             // TODO validate proper format
             return (String) value;
         }
+        else if (value instanceof Instant) {
+            return OFFSET_DATE_TIME_FORMATTER.format(((Instant) value).atOffset(ZoneOffset.UTC));
+        }
         throw invalidConversion(value, "timestamp with time zone");
     }
 
@@ -502,7 +515,7 @@ public class TrinoPreparedStatement
                 setInt(parameterIndex, castToInt(x, targetSqlType));
                 return;
             case Types.BIGINT:
-                setLong(parameterIndex, castToLong(x, targetSqlType));
+                setLong(parameterIndex, castToBigint(x, targetSqlType));
                 return;
             case Types.FLOAT:
             case Types.REAL:
@@ -597,6 +610,12 @@ public class TrinoPreparedStatement
         }
         else if (x instanceof LocalDate) {
             setAsDate(parameterIndex, x);
+        }
+        else if (x instanceof LocalDateTime) {
+            setAsTimestamp(parameterIndex, x);
+        }
+        else if (x instanceof Instant) {
+            setAsTimestampWithTimeZone(parameterIndex, x);
         }
         else if (x instanceof Time) {
             setTime(parameterIndex, (Time) x);

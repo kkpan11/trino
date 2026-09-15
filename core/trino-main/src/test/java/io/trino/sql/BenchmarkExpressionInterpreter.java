@@ -83,10 +83,10 @@ public class BenchmarkExpressionInterpreter
         BenchmarkData data = new BenchmarkData();
         data.setup();
         BenchmarkExpressionInterpreter benchmark = new BenchmarkExpressionInterpreter();
-        assertThat(benchmark.optimize(data).size()).isEqualTo(data.expressions.size());
+        assertThat(benchmark.optimize(data)).hasSize(data.expressions.size());
     }
 
-    public static void main(String[] args)
+    static void main()
             throws Exception
     {
         benchmark(BenchmarkExpressionInterpreter.class, WarmupMode.BULK).run();

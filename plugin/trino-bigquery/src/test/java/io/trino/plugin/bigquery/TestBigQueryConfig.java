@@ -15,6 +15,7 @@ package io.trino.plugin.bigquery;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
+import jakarta.validation.constraints.AssertTrue;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -22,11 +23,12 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class TestBigQueryConfig
 {
@@ -42,6 +44,7 @@ public class TestBigQueryConfig
                 .setViewMaterializationProject(null)
                 .setViewMaterializationDataset(null)
                 .setMaxReadRowsRetries(3)
+                .setMetadataPageSize(1000)
                 .setCaseInsensitiveNameMatching(false)
                 .setCaseInsensitiveNameMatchingCacheTtl(new Duration(0, MILLISECONDS))
                 .setViewsCacheTtl(new Duration(15, MINUTES))
@@ -55,7 +58,11 @@ public class TestBigQueryConfig
                 .setQueryLabelFormat(null)
                 .setProxyEnabled(false)
                 .setProjectionPushdownEnabled(true)
-                .setMetadataParallelism(2));
+                .setMetadataParallelism(Runtime.getRuntime().availableProcessors())
+                .setMaxParallelism(null)
+                .setWriteRetryMaxAttempts(5)
+                .setWriteRetryInitialDelay(new Duration(500, MILLISECONDS))
+                .setWriteRetryMaxDelay(new Duration(30, SECONDS)));
     }
 
     @Test
@@ -72,6 +79,7 @@ public class TestBigQueryConfig
                 .put("bigquery.view-materialization-project", "vmproject")
                 .put("bigquery.view-materialization-dataset", "vmdataset")
                 .put("bigquery.max-read-rows-retries", "10")
+                .put("bigquery.metadata-page-size", "100")
                 .put("bigquery.case-insensitive-name-matching", "true")
                 .put("bigquery.case-insensitive-name-matching.cache-ttl", "1h")
                 .put("bigquery.views-cache-ttl", "1m")
@@ -83,7 +91,11 @@ public class TestBigQueryConfig
                 .put("bigquery.job.label-format", "$TRACE_TOKEN")
                 .put("bigquery.rpc-proxy.enabled", "true")
                 .put("bigquery.metadata.parallelism", "31")
+                .put("bigquery.max-parallelism", "100")
                 .put("bigquery.projection-pushdown-enabled", "false")
+                .put("bigquery.write-retry-max-attempts", "8")
+                .put("bigquery.write-retry-initial-delay", "1s")
+                .put("bigquery.write-retry-max-delay", "1m")
                 .buildOrThrow();
 
         BigQueryConfig expected = new BigQueryConfig()
@@ -97,6 +109,7 @@ public class TestBigQueryConfig
                 .setViewMaterializationProject("vmproject")
                 .setViewMaterializationDataset("vmdataset")
                 .setMaxReadRowsRetries(10)
+                .setMetadataPageSize(100)
                 .setCaseInsensitiveNameMatching(true)
                 .setCaseInsensitiveNameMatchingCacheTtl(new Duration(1, HOURS))
                 .setViewsCacheTtl(new Duration(1, MINUTES))
@@ -108,7 +121,11 @@ public class TestBigQueryConfig
                 .setQueryLabelFormat("$TRACE_TOKEN")
                 .setProxyEnabled(true)
                 .setProjectionPushdownEnabled(false)
-                .setMetadataParallelism(31);
+                .setMetadataParallelism(31)
+                .setMaxParallelism(100)
+                .setWriteRetryMaxAttempts(8)
+                .setWriteRetryInitialDelay(new Duration(1, SECONDS))
+                .setWriteRetryMaxDelay(new Duration(1, MINUTES));
 
         assertFullMapping(properties, expected);
     }
@@ -116,32 +133,36 @@ public class TestBigQueryConfig
     @Test
     public void testInvalidViewSetting()
     {
-        assertThatThrownBy(() -> new BigQueryConfig()
-                .setViewExpireDuration(new Duration(5, MINUTES))
-                .setViewsCacheTtl(new Duration(10, MINUTES))
-                .validate())
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("View expiration duration must be longer than view cache TTL");
+        assertFailsValidation(
+                new BigQueryConfig()
+                        .setViewExpireDuration(new Duration(5, MINUTES))
+                        .setViewsCacheTtl(new Duration(10, MINUTES)),
+                "validViewExpireDuration",
+                "View expiration duration must be longer than view cache TTL",
+                AssertTrue.class);
 
-        assertThatThrownBy(() -> new BigQueryConfig()
-                .setSkipViewMaterialization(true)
-                .setViewsEnabled(false)
-                .validate())
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("bigquery.views-enabled config property must be enabled when skipping view materialization");
+        assertFailsValidation(
+                new BigQueryConfig()
+                        .setSkipViewMaterialization(true)
+                        .setViewsEnabled(false),
+                "validViewsWhenEnabledSkipViewMaterialization",
+                "bigquery.views-enabled config property must be enabled when bigquery.skip-view-materialization is enabled",
+                AssertTrue.class);
 
-        assertThatThrownBy(() -> new BigQueryConfig()
-                .setViewMaterializationWithFilter(true)
-                .setViewsEnabled(false)
-                .validate())
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("bigquery.views-enabled config property must be enabled when view materialization with filter is enabled");
+        assertFailsValidation(
+                new BigQueryConfig()
+                        .setViewMaterializationWithFilter(true)
+                        .setViewsEnabled(false),
+                "validViewsEnableWhenViewMaterializationWithFilter",
+                "bigquery.views-enabled config property must be enabled when bigquery.view-materialization-with-filter is enabled",
+                AssertTrue.class);
 
-        assertThatThrownBy(() -> new BigQueryConfig()
-                .setCaseInsensitiveNameMatching(false)
-                .setCaseInsensitiveNameMatchingCacheTtl(new Duration(30, MINUTES))
-                .validate())
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("bigquery.case-insensitive-name-matching config must be enabled when case insensitive name matching cache TTL is set");
+        assertFailsValidation(
+                new BigQueryConfig()
+                        .setCaseInsensitiveNameMatching(false)
+                        .setCaseInsensitiveNameMatchingCacheTtl(new Duration(30, MINUTES)),
+                "validCaseInsensitiveNameMatchingCacheTtl",
+                "bigquery.case-insensitive-name-matching config must be enabled when bigquery.case-insensitive-name-matching.cache-ttl is set",
+                AssertTrue.class);
     }
 }

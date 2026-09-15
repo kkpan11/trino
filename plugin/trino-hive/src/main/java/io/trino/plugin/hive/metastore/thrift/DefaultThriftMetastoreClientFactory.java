@@ -17,7 +17,7 @@ import com.google.common.net.HostAndPort;
 import com.google.inject.Inject;
 import io.airlift.units.Duration;
 import io.trino.plugin.hive.metastore.thrift.ThriftHiveMetastoreClient.TransportSupplier;
-import io.trino.spi.NodeManager;
+import io.trino.spi.Node;
 import org.apache.thrift.transport.TTransport;
 import org.apache.thrift.transport.TTransportException;
 
@@ -49,8 +49,10 @@ public class DefaultThriftMetastoreClientFactory
 
     private final MetastoreSupportsDateStatistics metastoreSupportsDateStatistics = new MetastoreSupportsDateStatistics();
     private final AtomicInteger chosenGetTableAlternative = new AtomicInteger(Integer.MAX_VALUE);
+    private final AtomicInteger chosenTableParamAlternative = new AtomicInteger(Integer.MAX_VALUE);
     private final AtomicInteger chosenAlterTransactionalTableAlternative = new AtomicInteger(Integer.MAX_VALUE);
     private final AtomicInteger chosenAlterPartitionsAlternative = new AtomicInteger(Integer.MAX_VALUE);
+    private final AtomicInteger chosenSetPartitionsColumnStatisticsAlternative = new AtomicInteger(Integer.MAX_VALUE);
 
     public DefaultThriftMetastoreClientFactory(
             Optional<SSLContext> sslContext,
@@ -74,10 +76,9 @@ public class DefaultThriftMetastoreClientFactory
     public DefaultThriftMetastoreClientFactory(
             ThriftMetastoreConfig config,
             HiveMetastoreAuthentication metastoreAuthentication,
-            NodeManager nodeManager)
+            Node currentNode)
     {
-        this(
-                buildSslContext(
+        this(buildSslContext(
                         config.isTlsEnabled(),
                         Optional.ofNullable(config.getKeystorePath()),
                         Optional.ofNullable(config.getKeystorePassword()),
@@ -87,7 +88,7 @@ public class DefaultThriftMetastoreClientFactory
                 config.getConnectTimeout(),
                 config.getReadTimeout(),
                 metastoreAuthentication,
-                nodeManager.getCurrentNode().getHost(),
+                currentNode.getHost(),
                 config.getCatalogName());
     }
 
@@ -113,10 +114,11 @@ public class DefaultThriftMetastoreClientFactory
                 hostname,
                 catalogName,
                 metastoreSupportsDateStatistics,
-                true,
                 chosenGetTableAlternative,
+                chosenTableParamAlternative,
                 chosenAlterTransactionalTableAlternative,
-                chosenAlterPartitionsAlternative);
+                chosenAlterPartitionsAlternative,
+                chosenSetPartitionsColumnStatisticsAlternative);
     }
 
     private TTransport createTransport(HostAndPort address, Optional<String> delegationToken)

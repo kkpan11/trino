@@ -36,6 +36,7 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
@@ -77,7 +78,7 @@ public class TestDeterminePartitionCount
     {
         String catalogName = "mock";
         MockConnectorFactory connectorFactory = MockConnectorFactory.builder()
-                .withGetTableHandle((session, tableName) -> {
+                .withGetTableHandle((_, tableName) -> {
                     if (tableName.getTableName().equals("table_with_stats_a")
                             || tableName.getTableName().equals("table_with_stats_b")
                             || tableName.getTableName().equals("small_table_with_stats")
@@ -87,7 +88,7 @@ public class TestDeterminePartitionCount
                     }
                     return null;
                 })
-                .withGetColumns(schemaTableName -> ImmutableList.of(
+                .withGetColumns(_ -> ImmutableList.of(
                         new ColumnMetadata("column_a", VARCHAR),
                         new ColumnMetadata("column_b", VARCHAR)))
                 .withGetTableStatistics(tableName -> {
@@ -96,19 +97,15 @@ public class TestDeterminePartitionCount
                         return new TableStatistics(
                                 Estimate.of(200),
                                 ImmutableMap.of(
-                                        new MockConnectorColumnHandle("column_a", VARCHAR),
-                                        new ColumnStatistics(Estimate.of(0), Estimate.of(10000), Estimate.of(DataSize.of(100, MEGABYTE).toBytes()), Optional.empty()),
-                                        new MockConnectorColumnHandle("column_b", VARCHAR),
-                                        new ColumnStatistics(Estimate.of(0), Estimate.of(10000), Estimate.of(DataSize.of(100, MEGABYTE).toBytes()), Optional.empty())));
+                                        new MockConnectorColumnHandle("column_a", VARCHAR), new ColumnStatistics(Estimate.of(0), Estimate.of(10000), Estimate.of(DataSize.of(100, MEGABYTE).toBytes()), Optional.empty()),
+                                        new MockConnectorColumnHandle("column_b", VARCHAR), new ColumnStatistics(Estimate.of(0), Estimate.of(10000), Estimate.of(DataSize.of(100, MEGABYTE).toBytes()), Optional.empty())));
                     }
                     if (tableName.getTableName().equals("small_table_with_stats")) {
                         return new TableStatistics(
                                 Estimate.of(20),
                                 ImmutableMap.of(
-                                        new MockConnectorColumnHandle("column_a", VARCHAR),
-                                        new ColumnStatistics(Estimate.of(0), Estimate.of(20), Estimate.of(DataSize.of(1, KILOBYTE).toBytes()), Optional.empty()),
-                                        new MockConnectorColumnHandle("column_b", VARCHAR),
-                                        new ColumnStatistics(Estimate.of(0), Estimate.of(20), Estimate.of(DataSize.of(1, KILOBYTE).toBytes()), Optional.empty())));
+                                        new MockConnectorColumnHandle("column_a", VARCHAR), new ColumnStatistics(Estimate.of(0), Estimate.of(20), Estimate.of(DataSize.of(1, KILOBYTE).toBytes()), Optional.empty()),
+                                        new MockConnectorColumnHandle("column_b", VARCHAR), new ColumnStatistics(Estimate.of(0), Estimate.of(20), Estimate.of(DataSize.of(1, KILOBYTE).toBytes()), Optional.empty())));
                     }
                     return empty();
                 })
@@ -183,7 +180,7 @@ public class TestDeterminePartitionCount
                 output(
                         node(AggregationNode.class,
                                 exchange(LOCAL,
-                                        exchange(REMOTE, GATHER, Optional.empty(),
+                                        exchange(REMOTE, GATHER, OptionalInt.empty(),
                                                 node(AggregationNode.class,
                                                         node(TableScanNode.class)))))));
     }
@@ -191,7 +188,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenTableStatisticsArePresent()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT count(column_a) FROM table_with_stats_a group by column_b
                 """;
 
@@ -208,7 +206,7 @@ public class TestDeterminePartitionCount
                         project(
                                 node(AggregationNode.class,
                                         exchange(LOCAL,
-                                                exchange(REMOTE, REPARTITION, Optional.of(10),
+                                                exchange(REMOTE, REPARTITION, OptionalInt.of(10),
                                                         node(AggregationNode.class,
                                                                 node(TableScanNode.class))))))));
     }
@@ -216,7 +214,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testDoesNotSetPartitionCountWhenNodeCountIsSmall()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT count(column_a) FROM table_with_stats_a group by column_b
                 """;
 
@@ -234,7 +233,52 @@ public class TestDeterminePartitionCount
                         project(
                                 node(AggregationNode.class,
                                         exchange(LOCAL,
-                                                exchange(REMOTE, REPARTITION, Optional.empty(),
+                                                exchange(REMOTE, REPARTITION, OptionalInt.empty(),
+                                                        node(AggregationNode.class,
+                                                                node(TableScanNode.class))))))));
+    }
+
+    @Test
+    public void testDoesNotSetPartitionCountWhenNodeCountIsCloseToMinPartitionCount()
+    {
+        @Language("SQL") String query =
+                """
+                SELECT count(column_a) FROM table_with_stats_a group by column_b
+                """;
+
+        // DeterminePartitionCount shouldn't put partition count when 2 * MIN_HASH_PARTITION_COUNT
+        // is greater or equal to number of workers.
+        assertDistributedPlan(
+                query,
+                Session.builder(getPlanTester().getDefaultSession())
+                        .setSystemProperty(MAX_HASH_PARTITION_COUNT, "8")
+                        .setSystemProperty(MIN_HASH_PARTITION_COUNT, "4")
+                        .setSystemProperty(MIN_INPUT_SIZE_PER_TASK, "20MB")
+                        .setSystemProperty(MIN_INPUT_ROWS_PER_TASK, "400")
+                        .build(),
+                output(
+                        project(
+                                node(AggregationNode.class,
+                                        exchange(LOCAL,
+                                                exchange(REMOTE, REPARTITION, OptionalInt.empty(),
+                                                        node(AggregationNode.class,
+                                                                node(TableScanNode.class))))))));
+
+        // DeterminePartitionCount should still put partition count for FTE
+        assertDistributedPlan(
+                query,
+                Session.builder(getPlanTester().getDefaultSession())
+                        .setSystemProperty(RETRY_POLICY, "task")
+                        .setSystemProperty(MAX_HASH_PARTITION_COUNT, "8")
+                        .setSystemProperty(MIN_HASH_PARTITION_COUNT, "4")
+                        .setSystemProperty(MIN_INPUT_SIZE_PER_TASK, "20MB")
+                        .setSystemProperty(MIN_INPUT_ROWS_PER_TASK, "400")
+                        .build(),
+                output(
+                        project(
+                                node(AggregationNode.class,
+                                        exchange(LOCAL,
+                                                exchange(REMOTE, REPARTITION, OptionalInt.of(10),
                                                         node(AggregationNode.class,
                                                                 node(TableScanNode.class))))))));
     }
@@ -242,7 +286,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenTableStatisticsAreAbsent()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT * FROM table_without_stats_a as a JOIN table_without_stats_b as b ON a.column_a = b.column_a
                 """;
 
@@ -259,9 +304,10 @@ public class TestDeterminePartitionCount
                         join(INNER, builder -> builder
                                 .equiCriteria("column_a", "column_a_0")
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, Optional.empty(),
+                                        exchange(REMOTE,
+                                                OptionalInt.empty(),
                                                 tableScan("table_without_stats_b", ImmutableMap.of("column_a_0", "column_a", "column_b_1", "column_b")))))
-                                .left(exchange(REMOTE, Optional.empty(),
+                                .left(exchange(REMOTE, OptionalInt.empty(),
                                         node(FilterNode.class,
                                                 tableScan("table_without_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b"))))))));
     }
@@ -269,7 +315,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenCrossJoinIsPresent()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT * FROM table_with_stats_a CROSS JOIN table_with_stats_b
                 """;
 
@@ -285,7 +332,8 @@ public class TestDeterminePartitionCount
                 output(
                         join(INNER, builder -> builder
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, Optional.empty(),
+                                        exchange(REMOTE,
+                                                OptionalInt.empty(),
                                                 tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a", "column_b_1", "column_b")))))
                                 .left(tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b"))))));
     }
@@ -293,7 +341,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenCrossJoinIsScalar()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT * FROM table_with_stats_a CROSS JOIN (select max(column_a) from table_with_stats_b) t(a)
                 """;
 
@@ -310,10 +359,10 @@ public class TestDeterminePartitionCount
                         join(INNER, builder -> builder
                                 .right(
                                         exchange(LOCAL,
-                                                exchange(REMOTE, REPLICATE, Optional.empty(),
+                                                exchange(REMOTE, REPLICATE, OptionalInt.empty(),
                                                         node(AggregationNode.class,
                                                                 exchange(LOCAL,
-                                                                        exchange(REMOTE, GATHER, Optional.empty(),
+                                                                        exchange(REMOTE, GATHER, OptionalInt.empty(),
                                                                                 node(AggregationNode.class,
                                                                                         node(TableScanNode.class))))))))
                                 .left(node(TableScanNode.class)))));
@@ -322,7 +371,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenJoinNodeStatsAreAbsent()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT * FROM table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_b = b.column_b
                 """;
 
@@ -339,9 +389,10 @@ public class TestDeterminePartitionCount
                         join(INNER, builder -> builder
                                 .equiCriteria("column_b", "column_b_1")
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, Optional.empty(),
+                                        exchange(REMOTE,
+                                                OptionalInt.empty(),
                                                 tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a", "column_b_1", "column_b")))))
-                                .left(exchange(REMOTE, Optional.empty(),
+                                .left(exchange(REMOTE, OptionalInt.empty(),
                                         node(FilterNode.class,
                                                 tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b"))))))));
     }
@@ -349,7 +400,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenJoinNodeOutputIsBiggerThanRowsScanned()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_a FROM table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a
                 """;
 
@@ -367,9 +419,10 @@ public class TestDeterminePartitionCount
                                 .equiCriteria("column_a", "column_a_0")
                                 .right(exchange(LOCAL,
                                         // partition count should be more than 5 because of the presence of expanding join operation
-                                        exchange(REMOTE, Optional.of(10),
+                                        exchange(REMOTE,
+                                                OptionalInt.of(10),
                                                 tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))
-                                .left(exchange(REMOTE, Optional.of(10),
+                                .left(exchange(REMOTE, OptionalInt.of(10),
                                         node(FilterNode.class,
                                                 tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a"))))))));
     }
@@ -377,7 +430,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testEstimatedPartitionCountShouldNotBeGreaterThanMaxLimit()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT * FROM table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a
                 """;
 
@@ -394,9 +448,10 @@ public class TestDeterminePartitionCount
                         join(INNER, builder -> builder
                                 .equiCriteria("column_a", "column_a_0")
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, Optional.empty(),
+                                        exchange(REMOTE,
+                                                OptionalInt.empty(),
                                                 tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a", "column_b_1", "column_b")))))
-                                .left(exchange(REMOTE, Optional.empty(),
+                                .left(exchange(REMOTE, OptionalInt.empty(),
                                         node(FilterNode.class,
                                                 tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b"))))))));
     }
@@ -404,7 +459,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testEstimatedPartitionCountShouldNotBeLessThanMinLimit()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_a FROM table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a
                 """;
 
@@ -421,9 +477,10 @@ public class TestDeterminePartitionCount
                         join(INNER, builder -> builder
                                 .equiCriteria("column_a", "column_a_0")
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, Optional.of(15),
+                                        exchange(REMOTE,
+                                                OptionalInt.of(15),
                                                 tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))
-                                .left(exchange(REMOTE, Optional.of(15),
+                                .left(exchange(REMOTE, OptionalInt.of(15),
                                         node(FilterNode.class,
                                                 tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a"))))))));
     }
@@ -431,7 +488,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenUnionNodeOutputIsBiggerThanJoinOutput()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_b
                 FROM table_with_stats_a as a
                 JOIN table_with_stats_b as b
@@ -451,15 +509,18 @@ public class TestDeterminePartitionCount
                         .setSystemProperty(MIN_INPUT_ROWS_PER_TASK, "400")
                         .build(),
                 output(
-                        exchange(REMOTE, GATHER,
+                        exchange(REMOTE,
+                                GATHER,
                                 join(INNER, builder -> builder
                                         .equiCriteria("column_a", "column_a_1")
                                         .right(exchange(LOCAL,
                                                 // partition count should be 15 with just join node but since we also have union, it should be 20
-                                                exchange(REMOTE, REPARTITION, Optional.of(20),
+                                                exchange(REMOTE,
+                                                        REPARTITION,
+                                                        OptionalInt.of(20),
                                                         tableScan("table_with_stats_b", ImmutableMap.of("column_a_1", "column_a")))))
                                         // partition count should be 15 with just join node but since we also have union, it should be 20
-                                        .left(exchange(REMOTE, REPARTITION, Optional.of(20),
+                                        .left(exchange(REMOTE, REPARTITION, OptionalInt.of(20),
                                                 node(FilterNode.class,
                                                         tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b_0", "column_b")))))),
                                 tableScan("table_with_stats_b", ImmutableMap.of("column_b_4", "column_b")))));
@@ -468,7 +529,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testPlanWhenEstimatedPartitionCountBasedOnRowsIsMoreThanOutputSize()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT count(column_a) FROM table_with_stats_a group by column_b
                 """;
 
@@ -486,7 +548,7 @@ public class TestDeterminePartitionCount
                         project(
                                 node(AggregationNode.class,
                                         exchange(LOCAL,
-                                                exchange(REMOTE, REPARTITION, Optional.of(10),
+                                                exchange(REMOTE, REPARTITION, OptionalInt.of(10),
                                                         node(AggregationNode.class,
                                                                 node(TableScanNode.class))))))));
     }
@@ -494,7 +556,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testFireWithTaskRetries()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT count(column_a) FROM table_with_stats_a group by column_b
                 """;
         assertDistributedPlan(
@@ -510,7 +573,7 @@ public class TestDeterminePartitionCount
                         project(
                                 node(AggregationNode.class,
                                         exchange(LOCAL,
-                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(10),
+                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(10),
                                                         node(AggregationNode.class,
                                                                 node(TableScanNode.class))))))));
     }
@@ -518,7 +581,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testFireWithTaskRetriesMinEnforced()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT count(column_a) FROM table_with_stats_a group by column_b
                 """;
         assertDistributedPlan(
@@ -526,7 +590,7 @@ public class TestDeterminePartitionCount
                 Session.builder(getPlanTester().getDefaultSession())
                         .setSystemProperty(RETRY_POLICY, "task")
                         .setSystemProperty(FAULT_TOLERANT_EXECUTION_MAX_PARTITION_COUNT, "21")
-                        .setSystemProperty(FAULT_TOLERANT_EXECUTION_MIN_PARTITION_COUNT, "11")
+                        .setSystemProperty(FAULT_TOLERANT_EXECUTION_MIN_PARTITION_COUNT, "10")
                         .setSystemProperty(MIN_INPUT_SIZE_PER_TASK, "20MB")
                         .setSystemProperty(MIN_INPUT_ROWS_PER_TASK, "400")
                         .build(),
@@ -534,7 +598,7 @@ public class TestDeterminePartitionCount
                         project(
                                 node(AggregationNode.class,
                                         exchange(LOCAL,
-                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(11),
+                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(10),
                                                         node(AggregationNode.class,
                                                                 node(TableScanNode.class))))))));
     }
@@ -542,14 +606,15 @@ public class TestDeterminePartitionCount
     @Test
     public void testFireWithTaskRetriesMaxEnforced()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT count(column_a) FROM table_with_stats_a group by column_b
                 """;
         assertDistributedPlan(
                 query,
                 Session.builder(getPlanTester().getDefaultSession())
                         .setSystemProperty(RETRY_POLICY, "task")
-                        .setSystemProperty(FAULT_TOLERANT_EXECUTION_MAX_PARTITION_COUNT, "8")
+                        .setSystemProperty(FAULT_TOLERANT_EXECUTION_MAX_PARTITION_COUNT, "9")
                         .setSystemProperty(FAULT_TOLERANT_EXECUTION_MIN_PARTITION_COUNT, "4")
                         .setSystemProperty(MIN_INPUT_SIZE_PER_TASK, "20MB")
                         .setSystemProperty(MIN_INPUT_ROWS_PER_TASK, "400")
@@ -558,7 +623,7 @@ public class TestDeterminePartitionCount
                         project(
                                 node(AggregationNode.class,
                                         exchange(LOCAL,
-                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.empty(),
+                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.empty(),
                                                         node(AggregationNode.class,
                                                                 node(TableScanNode.class))))))));
     }
@@ -566,7 +631,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testFireWithTaskRetriesJoinHashDistribution()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_a FROM table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a
                 """;
 
@@ -582,11 +648,11 @@ public class TestDeterminePartitionCount
                 output(
                         join(INNER, builder -> builder
                                 .equiCriteria("column_a", "column_a_0")
-                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(10),
+                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(10),
                                         node(FilterNode.class,
                                                 tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a")))))
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(10),
+                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(10),
                                                 node(DynamicFilterSourceNode.class,
                                                         tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))))));
     }
@@ -594,7 +660,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testFireWithTaskRetriesJoinBroadcastJoin()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_a FROM table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a
                 """;
 
@@ -611,18 +678,19 @@ public class TestDeterminePartitionCount
                 output(
                         join(INNER, builder -> builder
                                 .equiCriteria("column_a", "column_a_0")
-                                        .left(node(FilterNode.class,
-                                                tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a"))))
-                                        .right(exchange(LOCAL,
-                                                exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, Optional.empty(),
-                                                        node(DynamicFilterSourceNode.class,
-                                                                tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))))));
+                                .left(node(FilterNode.class,
+                                        tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a"))))
+                                .right(exchange(LOCAL,
+                                        exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, OptionalInt.empty(),
+                                                node(DynamicFilterSourceNode.class,
+                                                        tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))))));
     }
 
     @Test
     public void testFireWithTaskRetriesTwoPartitionedJoins()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_a FROM
                    (table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a)
                    JOIN
@@ -643,18 +711,18 @@ public class TestDeterminePartitionCount
                 output(
                         join(INNER, builder -> builder
                                 .equiCriteria("column_b", "column_b_3")
-                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
-                                                        join(INNER, builder2 -> builder2
-                                                                .equiCriteria("column_a", "column_a_0")
-                                                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
-                                                                        node(FilterNode.class,
-                                                                                tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b")))))
-                                                                .right(exchange(LOCAL,
-                                                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
-                                                                                node(DynamicFilterSourceNode.class,
-                                                                                        tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))))))
+                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
+                                        join(INNER, builder2 -> builder2
+                                                .equiCriteria("column_a", "column_a_0")
+                                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
+                                                        node(FilterNode.class,
+                                                                tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b")))))
+                                                .right(exchange(LOCAL,
+                                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
+                                                                node(DynamicFilterSourceNode.class,
+                                                                        tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))))))
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
+                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
                                                 node(DynamicFilterSourceNode.class,
                                                         tableScan("small_table_with_stats", ImmutableMap.of("column_b_3", "column_b")))))))));
     }
@@ -662,7 +730,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testFireWithTaskRetriesTwoBroadcastJoins()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_a FROM
                    (table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a)
                    JOIN
@@ -683,21 +752,28 @@ public class TestDeterminePartitionCount
                         join(INNER, builder -> builder
                                 .equiCriteria("column_b", "column_b_3")
                                 .left(join(INNER, builder2 -> builder2
-                                                .equiCriteria("column_a", "column_a_0")
+                                        .equiCriteria("column_a", "column_a_0")
                                         .left(node(FilterNode.class,
                                                 tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b"))))
                                         .right(exchange(LOCAL,
-                                                exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, Optional.empty(),
+                                                exchange(REMOTE,
+                                                        REPLICATE,
+                                                        FIXED_BROADCAST_DISTRIBUTION,
+                                                        OptionalInt.empty(),
                                                         tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a")))))))
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, Optional.empty(),
+                                        exchange(REMOTE,
+                                                REPLICATE,
+                                                FIXED_BROADCAST_DISTRIBUTION,
+                                                OptionalInt.empty(),
                                                 tableScan("small_table_with_stats", ImmutableMap.of("column_b_3", "column_b"))))))));
     }
 
     @Test
     public void testFireWithTaskRetriesBroadcastJoinOverPartitionedJoin()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT a.column_a FROM
                    (table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a)
                    JOIN
@@ -719,15 +795,15 @@ public class TestDeterminePartitionCount
                                 .equiCriteria("column_b", "column_b_3")
                                 .left(join(INNER, builder2 -> builder2
                                         .equiCriteria("column_a", "column_a_0")
-                                        .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
+                                        .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
                                                 node(FilterNode.class,
                                                         tableScan("table_with_stats_a", ImmutableMap.of("column_a", "column_a", "column_b", "column_b")))))
                                         .right(exchange(LOCAL,
-                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
+                                                exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
                                                         node(DynamicFilterSourceNode.class,
                                                                 tableScan("table_with_stats_b", ImmutableMap.of("column_a_0", "column_a"))))))))
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, Optional.empty(),
+                                        exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, OptionalInt.empty(),
                                                 node(DynamicFilterSourceNode.class,
                                                         tableScan("small_table_with_stats", ImmutableMap.of("column_b_3", "column_b")))))))));
     }
@@ -735,7 +811,8 @@ public class TestDeterminePartitionCount
     @Test
     public void testFireWithTaskRetriesArbitraryExchangeOverHashDistributedStage()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 SELECT j.column_a FROM
                    ((SELECT a.column_a, a.column_b FROM table_with_stats_a as a JOIN table_with_stats_b as b ON a.column_a = b.column_a) UNION ALL SELECT * FROM small_table_with_stats s) j
                    JOIN
@@ -755,21 +832,25 @@ public class TestDeterminePartitionCount
                 output(
                         join(INNER, builder -> builder
                                 .ignoreEquiCriteria() // criteria uses new symbols output by exchange left exchange which cannot be expressed in plan matcher
-                                .left(exchange(REMOTE, REPARTITION, FIXED_ARBITRARY_DISTRIBUTION, Optional.empty(),
+                                .left(exchange(
+                                        REMOTE,
+                                        REPARTITION,
+                                        FIXED_ARBITRARY_DISTRIBUTION,
+                                        OptionalInt.empty(),
                                         join(INNER, builder2 -> builder2
                                                 .equiCriteria("column_a_0", "column_a_2")
-                                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
+                                                .left(exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
                                                         node(FilterNode.class,
                                                                 tableScan("table_with_stats_a", ImmutableMap.of("column_a_0", "column_a", "column_b_1", "column_b")))))
                                                 .right(exchange(LOCAL,
-                                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, Optional.of(15),
+                                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION, OptionalInt.of(15),
                                                                 node(DynamicFilterSourceNode.class,
                                                                         tableScan("table_with_stats_b", ImmutableMap.of("column_a_2", "column_a"))))))),
                                         node(FilterNode.class,
                                                 tableScan("small_table_with_stats", ImmutableMap.of("column_a_4", "column_a", "column_b_5", "column_b")))))
 
                                 .right(exchange(LOCAL,
-                                        exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, Optional.empty(),
+                                        exchange(REMOTE, REPLICATE, FIXED_BROADCAST_DISTRIBUTION, OptionalInt.empty(),
                                                 node(DynamicFilterSourceNode.class,
                                                         tableScan("small_table_with_stats", ImmutableMap.of("column_b_7", "column_b")))))))));
     }

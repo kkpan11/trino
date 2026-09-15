@@ -34,6 +34,8 @@ import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcJoinCondition;
+import io.trino.plugin.jdbc.JdbcMergeTableHandle;
+import io.trino.plugin.jdbc.JdbcMetadata;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.JdbcTableHandle;
@@ -43,6 +45,7 @@ import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.ObjectReadFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.PredicatePushdownController;
+import io.trino.plugin.jdbc.PredicatePushdownController.DomainPushdownResult;
 import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
@@ -66,11 +69,13 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.JoinCondition;
 import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
+import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.expression.ConnectorExpression;
@@ -88,8 +93,8 @@ import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarcharType;
 import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
@@ -102,6 +107,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLSyntaxErrorException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Instant;
@@ -113,32 +119,37 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.emptyToNull;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.mysql.cj.exceptions.MysqlErrorNumbers.ER_NO_SUCH_TABLE;
+import static com.mysql.cj.exceptions.MysqlErrorNumbers.ER_TABLE_EXISTS_ERROR;
 import static com.mysql.cj.exceptions.MysqlErrorNumbers.ER_UNKNOWN_TABLE;
-import static com.mysql.cj.exceptions.MysqlErrorNumbers.SQL_STATE_ER_TABLE_EXISTS_ERROR;
 import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
 import static io.trino.plugin.jdbc.CaseSensitivity.CASE_INSENSITIVE;
 import static io.trino.plugin.jdbc.CaseSensitivity.CASE_SENSITIVE;
-import static io.trino.plugin.jdbc.DecimalConfig.DecimalMapping.ALLOW_OVERFLOW;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalDefaultScale;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRounding;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRoundingMode;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.JdbcJoinPushdownUtil.implementJoinCostAware;
 import static io.trino.plugin.jdbc.JdbcMetadataSessionProperties.getDomainCompactionThreshold;
+import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.isNonTransactionalMerge;
 import static io.trino.plugin.jdbc.PredicatePushdownController.CASE_INSENSITIVE_CHARACTER_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
@@ -157,6 +168,7 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longTimestampWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.numberColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintColumnMapping;
@@ -173,9 +185,12 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.varcharReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.plugin.jdbc.TypeHandlingJdbcSessionProperties.getUnsupportedTypeHandling;
 import static io.trino.plugin.jdbc.UnsupportedTypeHandling.CONVERT_TO_VARCHAR;
+import static io.trino.plugin.mysql.MySqlTableProperties.PRIMARY_KEY_PROPERTY;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
+import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.CharType.createCharType;
@@ -208,6 +223,8 @@ import static java.lang.String.join;
 import static java.time.format.DateTimeFormatter.ISO_DATE;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
+import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.joining;
 
 public class MySqlClient
@@ -254,6 +271,27 @@ public class MySqlClient
         return FULL_PUSHDOWN.apply(session, simplifiedDomain);
     };
 
+    private static final PredicatePushdownController MYSQL_VARCHAR_PUSHDOWN = (session, domain) -> {
+        // MySQL's legacy collations compare varchar with PAD SPACE semantics: trailing spaces are not significant, so a
+        // pushed equality or IN predicate can match values that differ only in trailing spaces, returning more rows than
+        // Trino's NO PAD comparison. Push equality / IN down only as a superset pre-filter and keep the engine filter to
+        // re-apply the exact comparison; disable inequality and range, which cannot be expressed as a safe superset.
+        if (domain.isOnlyNull()) {
+            return FULL_PUSHDOWN.apply(session, domain);
+        }
+
+        if (!domain.getValues().isDiscreteSet()) {
+            return DISABLE_PUSHDOWN.apply(session, domain);
+        }
+
+        Domain simplifiedDomain = domain.simplify(getDomainCompactionThreshold(session));
+        if (!simplifiedDomain.getValues().isDiscreteSet()) {
+            // Domain#simplify can turn a discrete set into a range predicate
+            return DISABLE_PUSHDOWN.apply(session, domain);
+        }
+        return new DomainPushdownResult(simplifiedDomain, domain);
+    };
+
     @Inject
     public MySqlClient(
             BaseJdbcConfig config,
@@ -265,7 +303,7 @@ public class MySqlClient
             RemoteQueryModifier queryModifier)
     {
         super("`", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, true);
-        this.jsonType = typeManager.getType(new TypeSignature(StandardTypes.JSON));
+        this.jsonType = typeManager.getType(new TypeDescriptor(StandardTypes.JSON));
         this.statisticsEnabled = statisticsConfig.isEnabled();
 
         this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
@@ -308,12 +346,9 @@ public class MySqlClient
     }
 
     @Override
-    protected Map<String, CaseSensitivity> getCaseSensitivityForColumns(ConnectorSession session, Connection connection, JdbcTableHandle tableHandle)
+    protected Map<String, CaseSensitivity> getCaseSensitivityForColumns(ConnectorSession session, Connection connection, SchemaTableName schemaTableName, RemoteTableName remoteTableName)
     {
-        if (tableHandle.isSynthetic()) {
-            return ImmutableMap.of();
-        }
-        PreparedQuery preparedQuery = new PreparedQuery(format("SELECT * FROM %s", quoted(tableHandle.asPlainTable().getRemoteTableName())), ImmutableList.of());
+        PreparedQuery preparedQuery = new PreparedQuery(format("SELECT * FROM %s", quoted(remoteTableName)), ImmutableList.of());
 
         try (PreparedStatement preparedStatement = queryBuilder.prepareStatement(this, session, connection, preparedQuery, Optional.empty())) {
             ResultSetMetaData metadata = preparedStatement.getMetaData();
@@ -326,9 +361,9 @@ public class MySqlClient
         }
         catch (SQLException e) {
             if (e.getErrorCode() == ER_NO_SUCH_TABLE) {
-                throw new TableNotFoundException(tableHandle.asPlainTable().getSchemaTableName());
+                throw new TableNotFoundException(schemaTableName);
             }
-            throw new TrinoException(JDBC_ERROR, "Failed to get case sensitivity for columns. " + firstNonNull(e.getMessage(), e), e);
+            throw new TrinoException(JDBC_ERROR, "Failed to get case sensitivity for columns. " + requireNonNullElse(e.getMessage(), e), e);
         }
     }
 
@@ -360,7 +395,7 @@ public class MySqlClient
             while (resultSet.next()) {
                 String schemaName = resultSet.getString("TABLE_CAT");
                 // skip internal schemas
-                if (filterSchema(schemaName)) {
+                if (filterRemoteSchema(schemaName)) {
                     schemaNames.add(schemaName);
                 }
             }
@@ -372,13 +407,13 @@ public class MySqlClient
     }
 
     @Override
-    protected boolean filterSchema(String schemaName)
+    protected boolean filterRemoteSchema(String schemaName)
     {
         if (schemaName.equalsIgnoreCase("mysql")
                 || schemaName.equalsIgnoreCase("sys")) {
             return false;
         }
-        return super.filterSchema(schemaName);
+        return super.filterRemoteSchema(schemaName);
     }
 
     @Override
@@ -463,7 +498,7 @@ public class MySqlClient
     }
 
     @Override
-    protected String getTableSchemaName(ResultSet resultSet)
+    protected String getTableRemoteSchemaName(ResultSet resultSet)
             throws SQLException
     {
         // MySQL uses catalogs instead of schemas
@@ -473,8 +508,33 @@ public class MySqlClient
     @Override
     protected List<String> createTableSqls(RemoteTableName remoteTableName, List<String> columns, ConnectorTableMetadata tableMetadata)
     {
-        checkArgument(tableMetadata.getProperties().isEmpty(), "Unsupported table properties: %s", tableMetadata.getProperties());
-        return ImmutableList.of(format("CREATE TABLE %s (%s) COMMENT %s", quoted(remoteTableName), join(", ", columns), mysqlVarcharLiteral(tableMetadata.getComment().orElse(NO_COMMENT))));
+        ImmutableList.Builder<String> columnDefinitions = ImmutableList.builder();
+        columnDefinitions.addAll(columns);
+
+        List<String> primaryKeys = MySqlTableProperties.getPrimaryKey(tableMetadata.getProperties());
+        if (!primaryKeys.isEmpty()) {
+            verifyPrimaryKey(primaryKeys, tableMetadata.getColumns());
+            columnDefinitions.add("PRIMARY KEY (" + primaryKeys.stream().map(this::quoted).collect(joining(", ")) + ")");
+        }
+        return ImmutableList.of(format("CREATE TABLE %s (%s) COMMENT %s", quoted(remoteTableName), join(", ", columnDefinitions.build()), mysqlVarcharLiteral(tableMetadata.getComment().orElse(NO_COMMENT))));
+    }
+
+    private static void verifyPrimaryKey(List<String> primaryKeys, List<ColumnMetadata> columns)
+    {
+        Set<String> columnNames = columns.stream()
+                .map(column -> {
+                    String columnName = column.getName();
+                    if (primaryKeys.contains(columnName) && column.isNullable()) {
+                        throw new TrinoException(NOT_SUPPORTED, "Primary key must be NOT NULL in MySQL");
+                    }
+                    return columnName;
+                })
+                .collect(toImmutableSet());
+        for (String primaryKey : primaryKeys) {
+            if (!columnNames.contains(primaryKey)) {
+                throw new TrinoException(INVALID_TABLE_PROPERTY, format("Column '%s' specified in property '%s' doesn't exist in table", primaryKey, PRIMARY_KEY_PROPERTY));
+            }
+        }
     }
 
     // This is overridden to pass NULL to MySQL for TIMESTAMP column types
@@ -482,7 +542,7 @@ public class MySqlClient
     @Override
     protected String getColumnDefinitionSql(ConnectorSession session, ColumnMetadata column, String columnName)
     {
-        if (column.getComment() != null) {
+        if (column.getComment().isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating tables with column comment");
         }
 
@@ -509,98 +569,92 @@ public class MySqlClient
             return mapping;
         }
 
-        switch (jdbcTypeName.toLowerCase(ENGLISH)) {
-            case "tinyint unsigned":
-                return Optional.of(smallintColumnMapping());
-            case "smallint unsigned":
-                return Optional.of(integerColumnMapping());
-            case "int unsigned":
-                return Optional.of(bigintColumnMapping());
-            case "bigint unsigned":
-                return Optional.of(decimalColumnMapping(createDecimalType(20)));
-            case "json":
-                return Optional.of(jsonColumnMapping());
-            case "enum":
-                return Optional.of(defaultVarcharColumnMapping(typeHandle.requiredColumnSize(), false));
-            case "datetime":
-                return mysqlDateTimeToTrinoTimestamp(typeHandle);
+        Optional<ColumnMapping> jdbcTypeNameMapping = switch (jdbcTypeName.toLowerCase(ENGLISH)) {
+            case "tinyint unsigned" -> Optional.of(smallintColumnMapping());
+            case "smallint unsigned" -> Optional.of(integerColumnMapping());
+            case "int unsigned" -> Optional.of(bigintColumnMapping());
+            case "bigint unsigned" -> Optional.of(decimalColumnMapping(createDecimalType(20)));
+            case "json" -> Optional.of(jsonColumnMapping());
+            case "enum" -> Optional.of(defaultVarcharColumnMapping(typeHandle.requiredColumnSize(), false));
+            case "datetime" -> mysqlDateTimeToTrinoTimestamp(typeHandle);
+            default -> Optional.empty();
+        };
+        if (jdbcTypeNameMapping.isPresent()) {
+            return jdbcTypeNameMapping;
         }
 
-        switch (typeHandle.jdbcType()) {
-            case Types.BIT:
-                return Optional.of(booleanColumnMapping());
+        Optional<ColumnMapping> jdbcTypeMapping = switch (typeHandle.jdbcType()) {
+            case Types.BIT -> {
+                if (typeHandle.requiredColumnSize() == 1) {
+                    yield Optional.of(booleanColumnMapping());
+                }
+                yield Optional.empty();
+            }
 
-            case Types.TINYINT:
-                return Optional.of(tinyintColumnMapping());
+            case Types.TINYINT -> Optional.of(tinyintColumnMapping());
 
-            case Types.SMALLINT:
-                return Optional.of(smallintColumnMapping());
+            case Types.SMALLINT -> Optional.of(smallintColumnMapping());
 
-            case Types.INTEGER:
-                return Optional.of(integerColumnMapping());
+            case Types.INTEGER -> Optional.of(integerColumnMapping());
 
-            case Types.BIGINT:
-                return Optional.of(bigintColumnMapping());
+            case Types.BIGINT -> Optional.of(bigintColumnMapping());
 
-            case Types.REAL:
-                // Disable pushdown because floating-point values are approximate and not stored as exact values,
-                // attempts to treat them as exact in comparisons may lead to problems
-                return Optional.of(ColumnMapping.longMapping(
-                        REAL,
-                        (resultSet, columnIndex) -> floatToRawIntBits(resultSet.getFloat(columnIndex)),
-                        realWriteFunction(),
-                        DISABLE_PUSHDOWN));
+            // Disable pushdown because floating-point values are approximate and not stored as exact values,
+            // attempts to treat them as exact in comparisons may lead to problems
+            case Types.REAL -> Optional.of(ColumnMapping.longMapping(
+                    REAL,
+                    (resultSet, columnIndex) -> floatToRawIntBits(resultSet.getFloat(columnIndex)),
+                    realWriteFunction(),
+                    DISABLE_PUSHDOWN));
 
-            case Types.DOUBLE:
-                return Optional.of(doubleColumnMapping());
+            case Types.DOUBLE -> Optional.of(doubleColumnMapping());
 
-            case Types.NUMERIC:
-            case Types.DECIMAL:
+            case Types.NUMERIC, Types.DECIMAL -> {
                 int decimalDigits = typeHandle.decimalDigits().orElseThrow(() -> new IllegalStateException("decimal digits not present"));
                 int precision = typeHandle.requiredColumnSize();
-                if (getDecimalRounding(session) == ALLOW_OVERFLOW && precision > Decimals.MAX_PRECISION) {
-                    int scale = min(decimalDigits, getDecimalDefaultScale(session));
-                    return Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)));
-                }
                 // TODO does mysql support negative scale?
                 precision = precision + max(-decimalDigits, 0); // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
-                if (precision > Decimals.MAX_PRECISION) {
-                    break;
+                if (precision <= Decimals.MAX_PRECISION) {
+                    yield Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0))));
                 }
-                return Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0))));
+                // precision > MAX_PRECISION
+                yield switch (getDecimalRounding(session)) {
+                    case MAP_TO_NUMBER -> Optional.of(numberColumnMapping());
+                    case STRICT -> Optional.empty();
+                    case ALLOW_OVERFLOW -> {
+                        int scale = min(max(decimalDigits, 0), getDecimalDefaultScale(session));
+                        yield Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)));
+                    }
+                };
+            }
 
-            case Types.CHAR:
-                return Optional.of(mySqlDefaultCharColumnMapping(typeHandle.requiredColumnSize(), typeHandle.caseSensitivity()));
+            case Types.CHAR -> Optional.of(mySqlDefaultCharColumnMapping(typeHandle.requiredColumnSize(), typeHandle.caseSensitivity()));
 
             // TODO not all these type constants are necessarily used by the JDBC driver
-            case Types.VARCHAR:
-            case Types.NVARCHAR:
-            case Types.LONGVARCHAR:
-            case Types.LONGNVARCHAR:
-                return Optional.of(mySqlDefaultVarcharColumnMapping(typeHandle.requiredColumnSize(), typeHandle.caseSensitivity()));
+            case Types.VARCHAR, Types.NVARCHAR, Types.LONGVARCHAR, Types.LONGNVARCHAR -> Optional.of(mySqlDefaultVarcharColumnMapping(typeHandle.requiredColumnSize(), typeHandle.caseSensitivity()));
 
-            case Types.BINARY:
-            case Types.VARBINARY:
-            case Types.LONGVARBINARY:
-                return Optional.of(ColumnMapping.sliceMapping(VARBINARY, varbinaryReadFunction(), varbinaryWriteFunction(), FULL_PUSHDOWN));
+            case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY -> Optional.of(ColumnMapping.sliceMapping(VARBINARY, varbinaryReadFunction(), varbinaryWriteFunction(), FULL_PUSHDOWN));
 
-            case Types.DATE:
-                return Optional.of(ColumnMapping.longMapping(
-                        DATE,
-                        dateReadFunctionUsingLocalDate(),
-                        mySqlDateWriteFunctionUsingLocalDate()));
+            case Types.DATE -> Optional.of(ColumnMapping.longMapping(
+                    DATE,
+                    dateReadFunctionUsingLocalDate(),
+                    mySqlDateWriteFunctionUsingLocalDate()));
 
-            case Types.TIME:
+            case Types.TIME -> {
                 TimeType timeType = createTimeType(getTimePrecision(typeHandle.requiredColumnSize()));
                 requireNonNull(timeType, "timeType is null");
                 checkArgument(timeType.getPrecision() <= 9, "Unsupported type precision: %s", timeType);
-                return Optional.of(ColumnMapping.longMapping(
+                yield Optional.of(ColumnMapping.longMapping(
                         timeType,
                         mySqlTimeReadFunction(timeType),
                         timeWriteFunction(timeType.getPrecision())));
+            }
 
-            case Types.TIMESTAMP:
-                return mysqlTimestampToTrinoTimestampWithTz(typeHandle);
+            case Types.TIMESTAMP -> mysqlTimestampToTrinoTimestampWithTz(typeHandle);
+            default -> Optional.empty();
+        };
+        if (jdbcTypeMapping.isPresent()) {
+            return jdbcTypeMapping;
         }
 
         if (getUnsupportedTypeHandling(session) == CONVERT_TO_VARCHAR) {
@@ -620,7 +674,7 @@ public class MySqlClient
     private static ColumnMapping mySqlVarcharColumnMapping(VarcharType varcharType, Optional<CaseSensitivity> caseSensitivity)
     {
         PredicatePushdownController pushdownController = caseSensitivity.orElse(CASE_INSENSITIVE) == CASE_SENSITIVE
-                ? MYSQL_CHARACTER_PUSHDOWN
+                ? MYSQL_VARCHAR_PUSHDOWN
                 : CASE_INSENSITIVE_CHARACTER_PUSHDOWN;
         return ColumnMapping.sliceMapping(varcharType, varcharReadFunction(varcharType), varcharWriteFunction(), pushdownController);
     }
@@ -901,8 +955,47 @@ public class MySqlClient
             createTable(session, tableMetadata, tableMetadata.getTable().getTableName());
         }
         catch (SQLException e) {
-            boolean exists = SQL_STATE_ER_TABLE_EXISTS_ERROR.equals(e.getSQLState());
-            throw new TrinoException(exists ? ALREADY_EXISTS : JDBC_ERROR, e);
+            if (e.getErrorCode() == ER_TABLE_EXISTS_ERROR) {
+                throw new TrinoException(ALREADY_EXISTS, e);
+            }
+            throw new TrinoException(JDBC_ERROR, e);
+        }
+    }
+
+    @Override
+    public void addColumn(ConnectorSession session, JdbcTableHandle handle, ColumnMetadata column, ColumnPosition position)
+    {
+        verify(handle.getAuthorization().isEmpty(), "Unexpected authorization is required for table: %s", handle);
+
+        RemoteTableName table = handle.asPlainTable().getRemoteTableName();
+
+        switch (position) {
+            case ColumnPosition.First _ -> addColumn(session, table, column, "FIRST");
+            case ColumnPosition.After after -> addColumn(session, table, column, "AFTER " + quoted(after.columnName()));
+            case ColumnPosition.Last _ -> addColumn(session, table, column, "");
+        }
+    }
+
+    private void addColumn(ConnectorSession session, RemoteTableName table, ColumnMetadata column, String position)
+    {
+        if (column.getComment().isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding columns with comments");
+        }
+
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
+            String columnName = column.getName();
+            verifyColumnName(connection.getMetaData(), columnName);
+            String remoteColumnName = getIdentifierMapping().toRemoteColumnName(getRemoteIdentifiers(connection), columnName);
+            String sql = format(
+                    "ALTER TABLE %s ADD %s %s",
+                    quoted(table),
+                    getColumnDefinitionSql(session, column, remoteColumnName),
+                    position);
+            execute(session, connection, sql);
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
@@ -975,6 +1068,52 @@ public class MySqlClient
     public boolean isLimitGuaranteed(ConnectorSession session)
     {
         return true;
+    }
+
+    @Override
+    public boolean supportsMerge()
+    {
+        return true;
+    }
+
+    @Override
+    public Map<String, Object> getTableProperties(ConnectorSession session, JdbcTableHandle tableHandle)
+    {
+        List<String> primaryKeys = getPrimaryKeys(session, tableHandle.getRequiredNamedRelation().getRemoteTableName()).stream()
+                .map(JdbcColumnHandle::getColumnName)
+                .collect(toImmutableList());
+        ImmutableMap.Builder<String, Object> properties = ImmutableMap.builder();
+        if (!primaryKeys.isEmpty()) {
+            properties.put(PRIMARY_KEY_PROPERTY, primaryKeys);
+        }
+        return properties.buildOrThrow();
+    }
+
+    @Override
+    public JdbcMergeTableHandle beginMerge(
+            ConnectorSession session,
+            JdbcTableHandle handle,
+            Map<Integer, Collection<ColumnHandle>> updateColumnHandles,
+            Consumer<Runnable> rollbackActionCollector,
+            RetryMode retryMode)
+    {
+        if (retryMode != NO_RETRIES) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support MERGE with fault-tolerant execution");
+        }
+
+        if (!isNonTransactionalMerge(session)) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support MERGE with transactional execution");
+        }
+
+        return super.beginMerge(session, handle, updateColumnHandles, rollbackActionCollector, retryMode);
+    }
+
+    @Override
+    public void finishMerge(ConnectorSession session, JdbcMergeTableHandle handle, Set<Long> pageSinkIds)
+    {
+        // When the connector retry mode is NO_RETRIES but isNonTransactionalInsert is false
+        // the insert of merge still will first create temporary table
+        finishInsertTable(session, handle.getOutputTableHandle(), pageSinkIds);
     }
 
     @Override
@@ -1127,7 +1266,7 @@ public class MySqlClient
                 return tableStatistics.build();
             }
 
-            for (JdbcColumnHandle column : this.getColumns(session, table)) {
+            for (JdbcColumnHandle column : JdbcMetadata.getColumns(session, this, table)) {
                 ColumnStatistics.Builder columnStatisticsBuilder = ColumnStatistics.builder();
 
                 String columnName = column.getColumnName();
@@ -1149,7 +1288,7 @@ public class MySqlClient
                         // row count from INFORMATION_SCHEMA.TABLES is very inaccurate but rowCount already includes MAX(CARDINALITY) from indexes
                         // This can still happen if table's index statistics change concurrently
                         log.debug("Table %s rowCount calculated so far [%s] is less than index cardinality for %s: %s", table, rowCount, columnName, columnIndexStatistics);
-                        rowCount = max(rowCount, columnIndexStatistics.cardinality());
+                        rowCount = columnIndexStatistics.cardinality();
                     }
                 }
 
@@ -1158,6 +1297,45 @@ public class MySqlClient
 
             tableStatistics.setRowCount(Estimate.of(rowCount));
             return tableStatistics.build();
+        }
+    }
+
+    @Override
+    public List<JdbcColumnHandle> getPrimaryKeys(ConnectorSession session, RemoteTableName remoteTableName)
+    {
+        SchemaTableName tableName = new SchemaTableName(remoteTableName.getCatalogName().orElse(null), remoteTableName.getTableName());
+        Map<String, JdbcColumnHandle> columns = getColumns(session, tableName, remoteTableName).stream()
+                .collect(toImmutableMap(JdbcColumnHandle::getColumnName, identity()));
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            DatabaseMetaData metaData = connection.getMetaData();
+
+            ResultSet primaryKeysResult = metaData.getPrimaryKeys(remoteTableName.getCatalogName().orElse(null), remoteTableName.getSchemaName().orElse(null), remoteTableName.getTableName());
+
+            Map<Short, String> primaryKeys = new TreeMap<>();
+            while (primaryKeysResult.next()) {
+                primaryKeys.put(primaryKeysResult.getShort("KEY_SEQ"), primaryKeysResult.getString("COLUMN_NAME"));
+            }
+            if (primaryKeys.isEmpty()) {
+                return ImmutableList.of();
+            }
+
+            ImmutableList.Builder<JdbcColumnHandle> primaryKeysBuilder = ImmutableList.builder();
+            for (String name : primaryKeys.values()) {
+                JdbcColumnHandle columnHandle = columns.get(name);
+                if (columnHandle == null) {
+                    continue;
+                }
+                JdbcTypeHandle handle = columnHandle.getJdbcTypeHandle();
+                primaryKeysBuilder.add(new JdbcColumnHandle(
+                        name,
+                        // make sure the primary keys that are varchar/char relate types can be pushdown
+                        new JdbcTypeHandle(handle.jdbcType(), handle.jdbcTypeName(), handle.columnSize(), handle.decimalDigits(), handle.arrayDimensions(), Optional.of(CASE_SENSITIVE)),
+                        columnHandle.getColumnType()));
+            }
+            return primaryKeysBuilder.build();
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
@@ -1201,7 +1379,7 @@ public class MySqlClient
 
     private static boolean isGtidMode(Connection connection)
     {
-        try (java.sql.Statement statement = connection.createStatement();
+        try (Statement statement = connection.createStatement();
                 ResultSet resultSet = statement.executeQuery("SHOW VARIABLES LIKE 'gtid_mode'")) {
             if (resultSet.next()) {
                 return !resultSet.getString("Value").equalsIgnoreCase("OFF");
@@ -1226,17 +1404,18 @@ public class MySqlClient
         Long getRowCount(JdbcTableHandle table)
         {
             RemoteTableName remoteTableName = table.getRequiredNamedRelation().getRemoteTableName();
-            return handle.createQuery("""
-                        SELECT max(row_count) FROM (
-                            (SELECT TABLE_ROWS AS row_count FROM INFORMATION_SCHEMA.TABLES
-                            WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name
-                            AND TABLE_TYPE = 'BASE TABLE')
-                            UNION ALL
-                            (SELECT CARDINALITY AS row_count FROM INFORMATION_SCHEMA.STATISTICS
-                            WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name
-                            AND CARDINALITY IS NOT NULL)
-                        ) t
-                        """)
+            return handle.createQuery(
+                            """
+                            SELECT max(row_count) FROM (
+                                (SELECT TABLE_ROWS AS row_count FROM INFORMATION_SCHEMA.TABLES
+                                WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name
+                                AND TABLE_TYPE = 'BASE TABLE')
+                                UNION ALL
+                                (SELECT CARDINALITY AS row_count FROM INFORMATION_SCHEMA.STATISTICS
+                                WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name
+                                AND CARDINALITY IS NOT NULL)
+                            ) t
+                            """)
                     .bind("schema", remoteTableName.getCatalogName().orElse(null))
                     .bind("table_name", remoteTableName.getTableName())
                     .mapTo(Long.class)
@@ -1247,21 +1426,22 @@ public class MySqlClient
         Map<String, ColumnIndexStatistics> getColumnIndexStatistics(JdbcTableHandle table)
         {
             RemoteTableName remoteTableName = table.getRequiredNamedRelation().getRemoteTableName();
-            return handle.createQuery("""
-                        SELECT
-                            COLUMN_NAME,
-                            MAX(NULLABLE) AS NULLABLE,
-                            MAX(CARDINALITY) AS CARDINALITY
-                        FROM INFORMATION_SCHEMA.STATISTICS
-                        WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name
-                        AND SEQ_IN_INDEX = 1 -- first column in the index
-                        AND SUB_PART IS NULL -- ignore cases where only a column prefix is indexed
-                        AND CARDINALITY IS NOT NULL -- CARDINALITY might be null (https://stackoverflow.com/a/42242729/65458)
-                        GROUP BY COLUMN_NAME -- there might be multiple indexes on a column
-                        """)
+            return handle.createQuery(
+                            """
+                            SELECT
+                                COLUMN_NAME,
+                                MAX(NULLABLE) AS NULLABLE,
+                                MAX(CARDINALITY) AS CARDINALITY
+                            FROM INFORMATION_SCHEMA.STATISTICS
+                            WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name
+                            AND SEQ_IN_INDEX = 1 -- first column in the index
+                            AND SUB_PART IS NULL -- ignore cases where only a column prefix is indexed
+                            AND CARDINALITY IS NOT NULL -- CARDINALITY might be null (https://stackoverflow.com/a/42242729/65458)
+                            GROUP BY COLUMN_NAME -- there might be multiple indexes on a column
+                            """)
                     .bind("schema", remoteTableName.getCatalogName().orElse(null))
                     .bind("table_name", remoteTableName.getTableName())
-                    .map((rs, ctx) -> {
+                    .map((rs, _) -> {
                         String columnName = rs.getString("COLUMN_NAME");
 
                         boolean nullable = rs.getString("NULLABLE").equalsIgnoreCase("YES");
@@ -1289,13 +1469,14 @@ public class MySqlClient
             }
 
             RemoteTableName remoteTableName = table.getRequiredNamedRelation().getRemoteTableName();
-            return handle.createQuery("""
-                        SELECT COLUMN_NAME, HISTOGRAM FROM INFORMATION_SCHEMA.COLUMN_STATISTICS
-                        WHERE SCHEMA_NAME = :schema AND TABLE_NAME = :table_name
-                        """)
+            return handle.createQuery(
+                            """
+                            SELECT COLUMN_NAME, HISTOGRAM FROM INFORMATION_SCHEMA.COLUMN_STATISTICS
+                            WHERE SCHEMA_NAME = :schema AND TABLE_NAME = :table_name
+                            """)
                     .bind("schema", remoteTableName.getCatalogName().orElse(null))
                     .bind("table_name", remoteTableName.getTableName())
-                    .map((rs, ctx) -> new SimpleEntry<>(rs.getString("COLUMN_NAME"), rs.getString("HISTOGRAM")))
+                    .map((rs, _) -> new SimpleEntry<>(rs.getString("COLUMN_NAME"), rs.getString("HISTOGRAM")))
                     .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
         }
     }
@@ -1305,13 +1486,13 @@ public class MySqlClient
     // See https://dev.mysql.com/doc/refman/8.0/en/optimizer-statistics.html
     public static class ColumnHistogram
     {
-        private final Optional<Double> nullFraction;
+        private final OptionalDouble nullFraction;
         private final Optional<String> histogramType;
         private final Optional<List<List<Object>>> buckets;
 
         @JsonCreator
         public ColumnHistogram(
-                @JsonProperty("null-values") Optional<Double> nullFraction,
+                @JsonProperty("null-values") OptionalDouble nullFraction,
                 @JsonProperty("histogram-type") Optional<String> histogramType,
                 @JsonProperty("buckets") Optional<List<List<Object>>> buckets)
         {
@@ -1322,27 +1503,27 @@ public class MySqlClient
 
         public void updateColumnStatistics(ColumnStatistics.Builder columnStatistics)
         {
-            nullFraction.map(Estimate::of).ifPresent(columnStatistics::setNullsFraction);
+            nullFraction.ifPresent(value -> columnStatistics.setNullsFraction(Estimate.of(value)));
             getDistinctValuesCount().map(Estimate::of).ifPresent(columnStatistics::setDistinctValuesCount);
         }
 
         private Optional<Long> getDistinctValuesCount()
         {
             if (histogramType.isPresent() && buckets.isPresent()) {
-                switch (histogramType.get()) {
-                    case "singleton":
-                        return Optional.of((long) buckets.get().size());
-
-                    case "equi-height":
+                return switch (histogramType.get()) {
+                    case "singleton" -> Optional.of((long) buckets.get().size());
+                    case "equi-height" -> {
                         long distinctValues = 0;
                         for (List<?> bucket : buckets.get()) {
                             distinctValues += ((Number) bucket.get(3)).longValue();
                         }
-                        return Optional.of(distinctValues);
-
-                    default:
+                        yield Optional.of(distinctValues);
+                    }
+                    default -> {
                         log.debug("Unsupported histogram type: %s", histogramType.get());
-                }
+                        yield Optional.empty();
+                    }
+                };
             }
             else {
                 log.debug("Unsupported histogram: type: %s, bucket count: %s", histogramType, buckets.map(List::size));

@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableList;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
 import io.trino.sql.tree.AssignmentStatement;
 import io.trino.sql.tree.CommentCharacteristic;
-import io.trino.sql.tree.ComparisonExpression;
+import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.CompoundStatement;
 import io.trino.sql.tree.ControlStatement;
 import io.trino.sql.tree.CreateFunction;
@@ -35,6 +35,7 @@ import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.ParameterDeclaration;
+import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
@@ -74,13 +75,15 @@ class TestSqlParserRoutines
                         ImmutableList.of(),
                         returns(type("bigint")),
                         ImmutableList.of(),
-                        new ReturnStatement(location(), literal(42))));
+                        Optional.of(new ReturnStatement(location(), literal(42))),
+                        Optional.empty()));
     }
 
     @Test
     void testInlineFunction()
     {
-        assertThat(statement("""
+        assertThat(statement(
+                """
                 WITH
                   FUNCTION answer()
                   RETURNS BIGINT
@@ -95,14 +98,16 @@ class TestSqlParserRoutines
                                 ImmutableList.of(),
                                 returns(type("BIGINT")),
                                 ImmutableList.of(),
-                                new ReturnStatement(location(), literal(42))),
+                                Optional.of(new ReturnStatement(location(), literal(42))),
+                                Optional.empty()),
                         selectList(new FunctionCall(QualifiedName.of("answer"), ImmutableList.of()))));
     }
 
     @Test
     void testSimpleFunction()
     {
-        assertThat(statement("""
+        assertThat(statement(
+                """
                 CREATE FUNCTION hello(s VARCHAR)
                 RETURNS varchar
                 LANGUAGE SQL
@@ -126,18 +131,20 @@ class TestSqlParserRoutines
                                         calledOnNullInput(),
                                         new SecurityCharacteristic(location(), INVOKER),
                                         new CommentCharacteristic(new NodeLocation(1, 1), "hello world function")),
-                                new ReturnStatement(location(), functionCall(
+                                Optional.of(new ReturnStatement(location(), functionCall(
                                         "CONCAT",
                                         literal("Hello, "),
                                         identifier("s"),
                                         literal("!")))),
+                                Optional.empty()),
                         false));
     }
 
     @Test
     void testEmptyFunction()
     {
-        assertThat(statement("""
+        assertThat(statement(
+                """
                 CREATE OR REPLACE FUNCTION answer()
                 RETURNS bigint
                 RETURN 42
@@ -151,14 +158,16 @@ class TestSqlParserRoutines
                                 ImmutableList.of(),
                                 returns(type("bigint")),
                                 ImmutableList.of(),
-                                new ReturnStatement(location(), literal(42))),
+                                Optional.of(new ReturnStatement(location(), literal(42))),
+                                Optional.empty()),
                         true));
     }
 
     @Test
     void testFibFunction()
     {
-        assertThat(statement("""
+        assertThat(statement(
+                """
                 CREATE FUNCTION fib(n bigint)
                 RETURNS bigint
                 BEGIN
@@ -186,7 +195,7 @@ class TestSqlParserRoutines
                                 ImmutableList.of(parameter("n", type("bigint"))),
                                 returns(type("bigint")),
                                 ImmutableList.of(),
-                                beginEnd(
+                                Optional.of(beginEnd(
                                         ImmutableList.of(
                                                 declare("a", type("bigint"), literal(1)),
                                                 declare("b", type("bigint"), literal(1)),
@@ -207,13 +216,15 @@ class TestSqlParserRoutines
                                                         assign("a", identifier("b")),
                                                         assign("b", identifier("c")))),
                                         new ReturnStatement(location(), identifier("c")))),
+                                Optional.empty()),
                         false));
     }
 
     @Test
     void testFunctionWithIfElseIf()
     {
-        assertThat(statement("""
+        assertThat(statement(
+                """
                 CREATE FUNCTION CustomerLevel(p_creditLimit DOUBLE)
                 RETURNS varchar
                 RETURNS NULL ON NULL INPUT
@@ -241,7 +252,7 @@ class TestSqlParserRoutines
                                 ImmutableList.of(
                                         returnsNullOnNullInput(),
                                         new SecurityCharacteristic(location(), DEFINER)),
-                                beginEnd(
+                                Optional.of(beginEnd(
                                         ImmutableList.of(declare("lvl", type("VarChar"))),
                                         new IfStatement(
                                                 location(),
@@ -256,6 +267,7 @@ class TestSqlParserRoutines
                                                                 assign("lvl", literal("SILVER")))),
                                                 Optional.empty()),
                                         new ReturnStatement(location(), identifier("lvl")))),
+                                Optional.empty()),
                         false));
     }
 
@@ -299,24 +311,24 @@ class TestSqlParserRoutines
         return new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Operator.SUBTRACT, left, right);
     }
 
-    private static ComparisonExpression lt(String name, Expression expression)
+    private static Predicated lt(String name, Expression expression)
     {
-        return new ComparisonExpression(ComparisonExpression.Operator.LESS_THAN, identifier(name), expression);
+        return new Predicated(null, identifier(name), new ComparisonPredicate(null, ComparisonPredicate.Operator.LESS_THAN, expression));
     }
 
-    private static ComparisonExpression lte(String name, Expression expression)
+    private static Predicated lte(String name, Expression expression)
     {
-        return new ComparisonExpression(ComparisonExpression.Operator.LESS_THAN_OR_EQUAL, identifier(name), expression);
+        return new Predicated(null, identifier(name), new ComparisonPredicate(null, ComparisonPredicate.Operator.LESS_THAN_OR_EQUAL, expression));
     }
 
-    private static ComparisonExpression gt(String name, Expression expression)
+    private static Predicated gt(String name, Expression expression)
     {
-        return new ComparisonExpression(ComparisonExpression.Operator.GREATER_THAN, identifier(name), expression);
+        return new Predicated(null, identifier(name), new ComparisonPredicate(null, ComparisonPredicate.Operator.GREATER_THAN, expression));
     }
 
-    private static ComparisonExpression gte(String name, Expression expression)
+    private static Predicated gte(String name, Expression expression)
     {
-        return new ComparisonExpression(ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL, identifier(name), expression);
+        return new Predicated(null, identifier(name), new ComparisonPredicate(null, ComparisonPredicate.Operator.GREATER_THAN_OR_EQUAL, expression));
     }
 
     private static StringLiteral literal(String literal)
@@ -342,6 +354,7 @@ class TestSqlParserRoutines
     private static Query query(FunctionSpecification function, Select select)
     {
         return new Query(
+                ImmutableList.of(),
                 ImmutableList.of(function),
                 Optional.empty(),
                 new QuerySpecification(

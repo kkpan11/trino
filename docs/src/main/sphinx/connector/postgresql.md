@@ -19,7 +19,7 @@ PostgreSQL instances.
 
 To connect to PostgreSQL, you need:
 
-- PostgreSQL 11.x or higher.
+- PostgreSQL 12.x or higher.
 - Network access from the Trino coordinator and workers to PostgreSQL.
   Port 5432 is the default port.
 
@@ -112,9 +112,6 @@ catalog named `sales` using the configured connector.
 ```{include} jdbc-case-insensitive-matching.fragment
 ```
 
-```{include} non-transactional-insert.fragment
-```
-
 (postgresql-fte-support)=
 ### Fault-tolerant execution support
 
@@ -164,10 +161,16 @@ this table:
 * - `DOUBLE`
   - `DOUBLE`
   -
-* - `NUMERIC(p, s)`
-  - `DECIMAL(p, s)`
-  - `DECIMAL(p, s)` is an alias of `NUMERIC(p, s)`. See
-    [](postgresql-decimal-type-handling) for more information.
+* - `NUMERIC(p, s)` \
+    `DECIMAL(p, s)`
+  - `DECIMAL(pʹ, sʹ)` or `NUMBER`
+  - Maps to Trino `DECIMAL` when input data can be represented as Trino `DECIMAL` losslessly.
+    When `1 ≤ p ≤ 38` and `0 ≤ s ≤ p`, then `pʹ = p` and `sʹ = s`, otherwise, a wider type is used. \
+    When input cannot be represented as Trino `DECIMAL` losslessly, maps to `NUMBER`.
+* - `NUMERIC` \
+    `DECIMAL`
+  - `NUMBER`
+  -
 * - `CHAR(n)`
   - `CHAR(n)`
   -
@@ -213,6 +216,9 @@ this table:
 * - `ARRAY`
   - Disabled, `ARRAY`, or `JSON`
   - See [](postgresql-array-type-handling) for more information.
+* - `GEOMETRY`, `GEOMETRY(GEOMETRY TYPE, SRID)`, `POINT`
+  - `GEOMETRY`
+  -
 :::
 
 No other types are supported.
@@ -249,8 +255,10 @@ this table:
   -
 * - `DECIMAL(p, s)`
   - `NUMERIC(p, s)`
-  - `DECIMAL(p, s)` is an alias of  `NUMERIC(p, s)`. See
-    [](postgresql-decimal-type-handling) for more information.
+  -
+* - `NUMBER`
+  - `NUMERIC`
+  -
 * - `CHAR(n)`
   - `CHAR(n)`
   -
@@ -281,13 +289,12 @@ this table:
 * - `ARRAY`
   - `ARRAY`
   - See [](postgresql-array-type-handling) for more information.
+* - `GEOMETRY`
+  - `GEOMETRY`
+  -
 ::::
 
 No other types are supported.
-
-(postgresql-decimal-type-handling)=
-```{include} decimal-type-handling.fragment
-```
 
 (postgresql-array-type-handling)=
 ### Array type handling
@@ -342,28 +349,46 @@ that catalog name instead of `example` in the above examples.
 ## SQL support
 
 The connector provides read access and write access to data and metadata in
-PostgreSQL.  In addition to the {ref}`globally available
-<sql-globally-available>` and {ref}`read operation <sql-read-operations>`
-statements, the connector supports the following features:
+PostgreSQL. In addition to the [globally available](sql-globally-available) and
+[read operation](sql-read-operations) statements, the connector supports the
+following features:
 
-- {doc}`/sql/insert`
-- {doc}`/sql/update`
-- {doc}`/sql/delete`
-- {doc}`/sql/truncate`
-- {ref}`sql-schema-table-management`
+- [](/sql/insert), see also [](postgresql-insert)
+- [](/sql/update), see also [](postgresql-update)
+- [](/sql/delete), see also [](postgresql-delete)
+- [](/sql/merge), see also [](postgresql-merge)
+- [](/sql/truncate)
+- [](sql-schema-table-management), see also:
+  - [](postgresql-alter-table)
+  - [](postgresql-alter-schema)
+- [](postgresql-procedures)
+- [](postgresql-table-functions)
 
+(postgresql-insert)=
+```{include} non-transactional-insert.fragment
+```
+
+(postgresql-update)=
 ```{include} sql-update-limitation.fragment
 ```
 
+(postgresql-delete)=
 ```{include} sql-delete-limitation.fragment
 ```
 
+(postgresql-merge)=
+```{include} non-transactional-merge.fragment
+```
+
+(postgresql-alter-table)=
 ```{include} alter-table-limitation.fragment
 ```
 
+(postgresql-alter-schema)=
 ```{include} alter-schema-limitation.fragment
 ```
 
+(postgresql-procedures)=
 ### Procedures
 
 ```{include} jdbc-procedures-flush.fragment
@@ -371,6 +396,7 @@ statements, the connector supports the following features:
 ```{include} procedures-execute.fragment
 ```
 
+(postgresql-table-functions)=
 ### Table functions
 
 The connector provides specific {doc}`table functions </functions/table>` to

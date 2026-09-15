@@ -13,25 +13,28 @@
  */
 package io.trino.plugin.postgresql;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.inject.Module;
+import io.trino.Session;
 import io.trino.operator.RetryPolicy;
-import io.trino.plugin.exchange.filesystem.FileSystemExchangePlugin;
+import io.trino.plugin.blackhole.BlackHolePlugin;
 import io.trino.plugin.jdbc.BaseJdbcFailureRecoveryTest;
+import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.tpch.TpchTable;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.abort;
+import static io.trino.plugin.postgresql.TestPostgreSqlRollbacks.doTestRollbackCreateTableAsSelect;
 
 public abstract class BasePostgresFailureRecoveryTest
         extends BaseJdbcFailureRecoveryTest
 {
+    private TestingPostgreSqlServer postgreSqlServer;
+
     public BasePostgresFailureRecoveryTest(RetryPolicy retryPolicy)
     {
         super(retryPolicy);
@@ -45,25 +48,17 @@ public abstract class BasePostgresFailureRecoveryTest
             Module failureInjectionModule)
             throws Exception
     {
-        return PostgreSqlQueryRunner.builder(closeAfterClass(new TestingPostgreSqlServer()))
+        this.postgreSqlServer = new TestingPostgreSqlServer();
+        DistributedQueryRunner queryRunner = PostgreSqlQueryRunner.builder(closeAfterClass(this.postgreSqlServer))
                 .setExtraProperties(configProperties)
                 .setCoordinatorProperties(configProperties)
-                .setAdditionalSetup(runner -> {
-                    runner.installPlugin(new FileSystemExchangePlugin());
-                    runner.loadExchangeManager("filesystem", ImmutableMap.of(
-                            "exchange.base-directories", System.getProperty("java.io.tmpdir") + "/trino-local-file-system-exchange-manager"));
-                })
+                .withExchange("filesystem")
                 .setAdditionalModule(failureInjectionModule)
                 .setInitialTables(requiredTpchTables)
                 .build();
-    }
-
-    @Test
-    @Override
-    protected void testUpdateWithSubquery()
-    {
-        assertThatThrownBy(super::testUpdateWithSubquery).hasMessageContaining("Unexpected Join over for-update table scan");
-        abort("skipped");
+        queryRunner.installPlugin(new BlackHolePlugin());
+        queryRunner.createCatalog("blackhole", "blackhole", Map.of());
+        return queryRunner;
     }
 
     @Test
@@ -80,5 +75,32 @@ public abstract class BasePostgresFailureRecoveryTest
                 .withSetupQuery(setupQuery)
                 .withCleanupQuery(cleanupQuery)
                 .isCoordinatorOnly();
+    }
+
+    /**
+     * Similar to {@link TestPostgreSqlRollbacks#testRollbackCreateTableAsSelect()},
+     * except this one runs in fault-tolerant mode, should this affect connector behavior.
+     *
+     * @see TestPostgreSqlRollbacks#testRollbackCreateTableAsSelect()
+     */
+    // TODO move this test to BaseJdbcFailureRecoveryTest
+    @Test
+    @Timeout(60)
+    public void testRollbackCreateTableAsSelect()
+            throws Exception
+    {
+        doTestRollbackCreateTableAsSelect(getQueryRunner());
+    }
+
+    @Override
+    protected void addPrimaryKeyForMergeTarget(Session session, String tableName, String primaryKey)
+    {
+        postgreSqlServer.execute("ALTER TABLE %s ADD CONSTRAINT pk_%s PRIMARY KEY (%s)".formatted(tableName, tableName, primaryKey));
+    }
+
+    @Override
+    protected boolean supportsMerge()
+    {
+        return true;
     }
 }

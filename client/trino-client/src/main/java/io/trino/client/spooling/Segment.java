@@ -31,7 +31,8 @@ import static java.util.Objects.requireNonNull;
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
 @JsonSubTypes({
         @JsonSubTypes.Type(value = InlineSegment.class, name = "inline"),
-        @JsonSubTypes.Type(value = SpooledSegment.class, name = "spooled")})
+        @JsonSubTypes.Type(value = SpooledSegment.class, name = "spooled"),
+})
 public abstract class Segment
 {
     private final DataAttributes metadata;
@@ -87,8 +88,8 @@ public abstract class Segment
         return new InlineSegment(data, attributes);
     }
 
-    public static Segment spooled(URI segmentUri, DataAttributes attributes, Map<String, List<String>> headers)
+    public static Segment spooled(URI retrieveUri, URI ackUri, DataAttributes attributes, Map<String, List<String>> headers)
     {
-        return new SpooledSegment(segmentUri, attributes, headers);
+        return new SpooledSegment(retrieveUri, ackUri, attributes, headers);
     }
 }

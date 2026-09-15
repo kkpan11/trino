@@ -38,14 +38,15 @@ import io.trino.sql.planner.plan.WindowNode;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.concat;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.planner.plan.AggregationNode.singleAggregation;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
@@ -86,8 +87,8 @@ public class SetOperationNodeTranslator
         this.symbolAllocator = requireNonNull(symbolAllocator, "SymbolAllocator is null");
         this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
         requireNonNull(metadata, "metadata is null");
-        this.countFunction = metadata.resolveBuiltinFunction("count", fromTypes(BOOLEAN));
-        this.rowNumberFunction = metadata.resolveBuiltinFunction("row_number", ImmutableList.of());
+        this.countFunction = metadata.resolveBuiltinFunction(getCharVarcharCoercion(session), "count", ImmutableList.of(BOOLEAN));
+        this.rowNumberFunction = metadata.resolveBuiltinFunction(getCharVarcharCoercion(session), "row_number", ImmutableList.of());
     }
 
     public TranslationResult makeSetContainmentPlanForAll(SetOperationNode node)
@@ -137,7 +138,7 @@ public class SetOperationNodeTranslator
     {
         Assignments.Builder assignments = Assignments.builder();
         // add existing intersect symbols to projection
-        for (Map.Entry<Symbol, Reference> entry : projections.entrySet()) {
+        for (Entry<Symbol, Reference> entry : projections.entrySet()) {
             Symbol symbol = symbolAllocator.newSymbol(entry.getKey().name(), entry.getKey().type());
             assignments.put(symbol, entry.getValue());
         }
@@ -178,7 +179,8 @@ public class SetOperationNodeTranslator
                     Optional.empty()));
         }
 
-        return singleAggregation(idAllocator.getNextId(),
+        return singleAggregation(
+                idAllocator.getNextId(),
                 sourceNode,
                 aggregations.buildOrThrow(),
                 singleGroupingSet(originalColumns));
@@ -194,14 +196,18 @@ public class SetOperationNodeTranslator
             functions.put(output, new WindowNode.Function(
                     countFunction,
                     ImmutableList.of(markers.get(i).toSymbolReference()),
+                    Optional.empty(),
                     defaultFrame,
+                    false,
                     false));
         }
 
         functions.put(rowNumberSymbol, new WindowNode.Function(
                 rowNumberFunction,
                 ImmutableList.of(),
+                Optional.empty(),
                 defaultFrame,
+                false,
                 false));
 
         return new WindowNode(
@@ -209,7 +215,6 @@ public class SetOperationNodeTranslator
                 sourceNode,
                 new DataOrganizationSpecification(originalColumns, Optional.empty()),
                 functions.buildOrThrow(),
-                Optional.empty(),
                 ImmutableSet.of(),
                 0);
     }

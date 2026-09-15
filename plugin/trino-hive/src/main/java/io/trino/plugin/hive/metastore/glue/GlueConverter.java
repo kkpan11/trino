@@ -40,9 +40,12 @@ import io.trino.plugin.hive.HiveStorageFormat;
 import io.trino.spi.TrinoException;
 import io.trino.spi.function.LanguageFunction;
 import io.trino.spi.security.PrincipalType;
+import jakarta.annotation.Nullable;
+import org.gaul.modernizer_maven_annotations.SuppressModernizer;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.glue.model.BinaryColumnStatisticsData;
 import software.amazon.awssdk.services.glue.model.BooleanColumnStatisticsData;
+import software.amazon.awssdk.services.glue.model.ColumnStatistics;
 import software.amazon.awssdk.services.glue.model.ColumnStatisticsData;
 import software.amazon.awssdk.services.glue.model.ColumnStatisticsType;
 import software.amazon.awssdk.services.glue.model.DatabaseInput;
@@ -73,11 +76,11 @@ import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Strings.emptyToNull;
 import static com.google.common.base.Strings.lenientFormat;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.trino.metastore.HiveColumnStatistics.createBinaryColumnStatistics;
 import static io.trino.metastore.HiveColumnStatistics.createBooleanColumnStatistics;
 import static io.trino.metastore.HiveColumnStatistics.createDateColumnStatistics;
@@ -88,6 +91,7 @@ import static io.trino.metastore.HiveColumnStatistics.createStringColumnStatisti
 import static io.trino.metastore.Table.TABLE_COMMENT;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_UNSUPPORTED_FORMAT;
+import static io.trino.plugin.hive.TableType.EXTERNAL_TABLE;
 import static io.trino.plugin.hive.ViewReaderUtil.isTrinoMaterializedView;
 import static io.trino.plugin.hive.ViewReaderUtil.isTrinoView;
 import static io.trino.plugin.hive.metastore.MetastoreUtil.metastoreFunctionName;
@@ -96,9 +100,11 @@ import static io.trino.plugin.hive.metastore.thrift.ThriftMetastoreUtil.decodeFu
 import static io.trino.plugin.hive.metastore.thrift.ThriftMetastoreUtil.fromMetastoreNullsCount;
 import static io.trino.plugin.hive.util.HiveUtil.isDeltaLakeTable;
 import static io.trino.plugin.hive.util.HiveUtil.isIcebergTable;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
 
-final class GlueConverter
+public final class GlueConverter
 {
     static final String PUBLIC_OWNER = "PUBLIC";
     private static final Storage FAKE_PARQUET_STORAGE = new Storage(
@@ -113,9 +119,22 @@ final class GlueConverter
     private static final Column FAKE_COLUMN = new Column("ignored", HiveType.HIVE_INT, Optional.empty(), ImmutableMap.of());
     private static final long SECONDS_PER_DAY = TimeUnit.DAYS.toSeconds(1);
 
-    private static final JsonCodec<LanguageFunction> LANGUAGE_FUNCTION_CODEC = JsonCodec.jsonCodec(LanguageFunction.class);
+    private static final JsonCodec<LanguageFunction> LANGUAGE_FUNCTION_CODEC = jsonCodec(LanguageFunction.class);
 
     private GlueConverter() {}
+
+    public static String getTableType(software.amazon.awssdk.services.glue.model.Table glueTable)
+    {
+        // Athena treats a missing table type as EXTERNAL_TABLE.
+        return requireNonNullElse(getTableTypeNullable(glueTable), EXTERNAL_TABLE.name());
+    }
+
+    @Nullable
+    @SuppressModernizer // Usage of `Table.tableType` is not allowed. Only this method can call that.
+    public static String getTableTypeNullable(software.amazon.awssdk.services.glue.model.Table glueTable)
+    {
+        return glueTable.tableType();
+    }
 
     public static Database fromGlueDatabase(software.amazon.awssdk.services.glue.model.Database glueDb)
     {
@@ -140,8 +159,7 @@ final class GlueConverter
 
     public static Table fromGlueTable(software.amazon.awssdk.services.glue.model.Table glueTable, String databaseName)
     {
-        // Athena treats a missing table type as EXTERNAL_TABLE.
-        String tableType = firstNonNull(glueTable.tableType(), "EXTERNAL_TABLE");
+        String tableType = getTableType(glueTable);
 
         Map<String, String> tableParameters = glueTable.parameters();
         if (glueTable.description() != null) {
@@ -155,7 +173,7 @@ final class GlueConverter
         List<Column> dataColumns;
         StorageDescriptor sd = glueTable.storageDescriptor();
         if (sd == null) {
-            if (!isIcebergTable(tableParameters) && !isDeltaLakeTable(tableParameters) && !isTrinoMaterializedView(tableType, tableParameters)) {
+            if (!isIcebergTable(tableParameters) && !isDeltaLakeTable(tableParameters) && !isTrinoMaterializedView(tableType, tableParameters) && !isTrinoView(tableType, tableParameters)) {
                 throw new TrinoException(HIVE_UNSUPPORTED_FORMAT, "Table StorageDescriptor is null for table '%s' %s".formatted(databaseName, glueTable.name()));
             }
 
@@ -164,7 +182,7 @@ final class GlueConverter
             storage = FAKE_PARQUET_STORAGE;
         }
         else if (isIcebergTable(tableParameters)) {
-            // todo: any reason to not do this for delta and trino mv?
+            // todo: any reason to not do this for trino mv?
             if (sd.columns() == null) {
                 dataColumns = ImmutableList.of(FAKE_COLUMN);
             }
@@ -173,6 +191,11 @@ final class GlueConverter
             }
             partitionColumns = ImmutableList.of();
             storage = FAKE_PARQUET_STORAGE;
+        }
+        else if (isDeltaLakeTable(tableParameters)) {
+            dataColumns = ImmutableList.of(FAKE_COLUMN);
+            partitionColumns = ImmutableList.of();
+            storage = fromGlueStorage(sd, databaseName + "." + glueTable.name());
         }
         else {
             boolean isCsv = sd.serdeInfo() != null && HiveStorageFormat.CSV.getSerde().equals(sd.serdeInfo().serializationLibrary());
@@ -268,10 +291,20 @@ final class GlueConverter
         // OpenCSVSerde deserializes columns from csv file into strings, so we set the column type from the metastore
         // to string to avoid cast exceptions.
         if (columnType == ColumnType.DATA && isCsv) {
-            //TODO(https://github.com/trinodb/trino/issues/7240) Add tests
+            // TODO(https://github.com/trinodb/trino/issues/7240) Add tests
             return new Column(glueColumn.name(), HiveType.HIVE_STRING, Optional.ofNullable(glueColumn.comment()), glueColumn.parameters());
         }
-        return new Column(glueColumn.name(), HiveType.valueOf(glueColumn.type().toLowerCase(Locale.ROOT)), Optional.ofNullable(glueColumn.comment()), glueColumn.parameters());
+        HiveType hiveType;
+        try {
+            hiveType = HiveType.valueOf(glueColumn.type().toLowerCase(Locale.ROOT));
+        }
+        catch (RuntimeException e) {
+            throw new TrinoException(
+                    HIVE_INVALID_METADATA,
+                    format("Column %s has invalid type: %s", glueColumn.name(), glueColumn.type()),
+                    e);
+        }
+        return new Column(glueColumn.name(), hiveType, Optional.ofNullable(glueColumn.comment()), glueColumn.parameters());
     }
 
     private static software.amazon.awssdk.services.glue.model.Column toGlueColumn(Column trinoColumn)
@@ -287,7 +320,7 @@ final class GlueConverter
     private static Storage fromGlueStorage(StorageDescriptor sd, String tablePartitionName)
     {
         Optional<HiveBucketProperty> bucketProperty = Optional.empty();
-        if (sd.numberOfBuckets() > 0) {
+        if (sd.numberOfBuckets() != null && sd.numberOfBuckets() > 0) {
             if (sd.bucketColumns().isEmpty()) {
                 throw new TrinoException(HIVE_INVALID_METADATA, "Table/partition metadata has 'numBuckets' set, but 'bucketCols' is not set: " + tablePartitionName);
             }
@@ -302,7 +335,10 @@ final class GlueConverter
             bucketProperty = Optional.of(new HiveBucketProperty(sd.bucketColumns(), sd.numberOfBuckets(), sortBy));
         }
 
-        SerDeInfo serdeInfo = requireNonNull(sd.serdeInfo(), () -> "StorageDescriptor SerDeInfo is null: " + tablePartitionName);
+        SerDeInfo serdeInfo = sd.serdeInfo();
+        if (serdeInfo == null) {
+            throw new TrinoException(HIVE_INVALID_METADATA, "StorageDescriptor SerDeInfo is null: " + tablePartitionName);
+        }
         return new Storage(
                 StorageFormat.createNullable(serdeInfo.serializationLibrary(), sd.inputFormat(), sd.outputFormat()),
                 Optional.ofNullable(sd.location()),
@@ -365,7 +401,7 @@ final class GlueConverter
                 .build();
     }
 
-    public static Map<String, HiveColumnStatistics> fromGlueStatistics(List<List<software.amazon.awssdk.services.glue.model.ColumnStatistics>> glueColumnStatistics)
+    public static Map<String, HiveColumnStatistics> fromGlueStatistics(List<List<ColumnStatistics>> glueColumnStatistics)
     {
         ImmutableMap.Builder<String, HiveColumnStatistics> columnStatistics = ImmutableMap.builder();
         for (var columns : glueColumnStatistics) {
@@ -438,7 +474,7 @@ final class GlueConverter
         };
     }
 
-    public static List<software.amazon.awssdk.services.glue.model.ColumnStatistics> toGlueColumnStatistics(Map<Column, HiveColumnStatistics> columnStatistics)
+    public static List<ColumnStatistics> toGlueColumnStatistics(Map<Column, HiveColumnStatistics> columnStatistics)
     {
         return columnStatistics.entrySet().stream()
                 .map(e -> toGlueColumnStatistics(e.getKey(), e.getValue()))
@@ -446,10 +482,10 @@ final class GlueConverter
                 .collect(toImmutableList());
     }
 
-    private static Optional<software.amazon.awssdk.services.glue.model.ColumnStatistics> toGlueColumnStatistics(Column column, HiveColumnStatistics statistics)
+    private static Optional<ColumnStatistics> toGlueColumnStatistics(Column column, HiveColumnStatistics statistics)
     {
         return toGlueColumnStatisticsData(statistics, column.getType())
-                .map(columnStatisticsData -> software.amazon.awssdk.services.glue.model.ColumnStatistics.builder()
+                .map(columnStatisticsData -> ColumnStatistics.builder()
                         .columnName(column.getName())
                         .columnType(column.getType().toString())
                         .statisticsData(columnStatisticsData)
@@ -573,12 +609,12 @@ final class GlueConverter
 
     private static Long boxedValue(OptionalLong optionalLong)
     {
-        return optionalLong.isPresent() ? optionalLong.getAsLong() : null;
+        return optionalLong.isPresent() ? optionalLong.orElseThrow() : null;
     }
 
     private static Double boxedValue(OptionalDouble optionalDouble)
     {
-        return optionalDouble.isPresent() ? optionalDouble.getAsDouble() : null;
+        return optionalDouble.isPresent() ? optionalDouble.orElseThrow() : null;
     }
 
     private static Optional<BigDecimal> fromGlueDecimal(DecimalNumber number)

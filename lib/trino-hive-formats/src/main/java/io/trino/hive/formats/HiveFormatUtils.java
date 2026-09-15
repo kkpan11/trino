@@ -232,10 +232,15 @@ public final class HiveFormatUtils
             }
         }
 
-        return parseHiveTimestamp(value);
+        return parseTrimmedHiveTimestamp(value);
     }
 
     public static DecodedTimestamp parseHiveTimestamp(String value)
+    {
+        return parseTrimmedHiveTimestamp(value.trim());
+    }
+
+    private static DecodedTimestamp parseTrimmedHiveTimestamp(String value)
     {
         // Otherwise try default timestamp parsing
         // default parser uses Java util time
@@ -266,12 +271,14 @@ public final class HiveFormatUtils
             if (c == TIMESTAMP_FORMATS_ESCAPE) {
                 // the next character must be an escape or separator
                 if (position + 1 >= property.length()) {
-                    throw new TrinoException(HIVE_INVALID_METADATA,
+                    throw new TrinoException(
+                            HIVE_INVALID_METADATA,
                             "Invalid '%s' property value '%s': unterminated escape at end of value".formatted(TIMESTAMP_FORMATS_KEY, property));
                 }
                 char nextCharacter = property.charAt(position + 1);
                 if (nextCharacter != TIMESTAMP_FORMATS_SEPARATOR && nextCharacter != TIMESTAMP_FORMATS_ESCAPE) {
-                    throw new TrinoException(HIVE_INVALID_METADATA,
+                    throw new TrinoException(
+                            HIVE_INVALID_METADATA,
                             "Invalid '%s' property value '%s': Illegal escaped character at %s".formatted(TIMESTAMP_FORMATS_KEY, property, position));
                 }
 
@@ -311,14 +318,14 @@ public final class HiveFormatUtils
 
     public static String formatHiveTimestamp(Type type, Block block, int position)
     {
-        SqlTimestamp objectValue = (SqlTimestamp) type.getObjectValue(null, block, position);
+        SqlTimestamp objectValue = (SqlTimestamp) type.getObjectValue(block, position);
         LocalDateTime localDateTime = objectValue.toLocalDateTime();
         return TIMESTAMP_FORMATTER.format(localDateTime);
     }
 
     public static void formatHiveTimestamp(Type type, Block block, int position, StringBuilder builder)
     {
-        SqlTimestamp objectValue = (SqlTimestamp) type.getObjectValue(null, block, position);
+        SqlTimestamp objectValue = (SqlTimestamp) type.getObjectValue(block, position);
         LocalDateTime localDateTime = objectValue.toLocalDateTime();
         TIMESTAMP_FORMATTER.formatTo(localDateTime, builder);
     }
@@ -335,7 +342,7 @@ public final class HiveFormatUtils
                 DateTimeFieldType.hourOfDay(),
                 DateTimeFieldType.minuteOfHour(),
                 DateTimeFieldType.secondOfMinute(),
-                DateTimeFieldType.millisOfSecond()
+                DateTimeFieldType.millisOfSecond(),
         };
 
         @Override

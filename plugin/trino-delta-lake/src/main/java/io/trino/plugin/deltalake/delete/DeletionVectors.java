@@ -14,7 +14,6 @@
 package io.trino.plugin.deltalake.delete;
 
 import com.google.common.base.CharMatcher;
-import io.delta.kernel.internal.deletionvectors.Base85Codec;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInput;
@@ -28,14 +27,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.OptionalInt;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.SIZE_OF_INT;
-import static io.delta.kernel.internal.deletionvectors.Base85Codec.decodeUUID;
-import static io.delta.kernel.internal.deletionvectors.Base85Codec.encodeUUID;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_INVALID_SCHEMA;
+import static io.trino.plugin.deltalake.delete.Base85Codec.decodeUUID;
+import static io.trino.plugin.deltalake.delete.Base85Codec.encodeUUID;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.Math.toIntExact;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
@@ -47,7 +47,6 @@ public final class DeletionVectors
     private static final int PORTABLE_ROARING_BITMAP_MAGIC_NUMBER = 1681511377;
     private static final int MAGIC_NUMBER_BYTE_SIZE = 4;
     private static final int BIT_MAP_COUNT_BYTE_SIZE = 8;
-    private static final int BIT_MAP_KEY_BYTE_SIZE = 4;
     private static final int FORMAT_VERSION_V1 = 1;
 
     private static final String UUID_MARKER = "u"; // relative path with random prefix on disk
@@ -61,13 +60,21 @@ public final class DeletionVectors
     public static RoaringBitmapArray readDeletionVectors(TrinoFileSystem fileSystem, Location location, DeletionVectorEntry deletionVector)
             throws IOException
     {
-        if (deletionVector.storageType().equals(UUID_MARKER)) {
-            TrinoInputFile inputFile = fileSystem.newInputFile(location.appendPath(toFileName(deletionVector.pathOrInlineDv())));
-            ByteBuffer buffer = readDeletionVector(inputFile, deletionVector.offset().orElseThrow(), deletionVector.sizeInBytes());
-            return deserializeDeletionVectors(buffer);
-        }
-        if (deletionVector.storageType().equals(INLINE_MARKER) || deletionVector.storageType().equals(PATH_MARKER)) {
-            throw new TrinoException(NOT_SUPPORTED, "Unsupported storage type for deletion vector: " + deletionVector.storageType());
+        switch (deletionVector.storageType()) {
+            case UUID_MARKER -> {
+                TrinoInputFile inputFile = fileSystem.newInputFile(location.appendPath(toFileName(deletionVector.pathOrInlineDv())));
+                ByteBuffer buffer = readDeletionVector(inputFile, deletionVector.offset().orElseThrow(), deletionVector.sizeInBytes());
+                return deserializeDeletionVectors(buffer);
+            }
+            case PATH_MARKER -> {
+                TrinoInputFile inputFile = fileSystem.newInputFile(Location.of(deletionVector.pathOrInlineDv()));
+                if (!inputFile.exists()) {
+                    throw new IllegalArgumentException("Unable to find 'p' type deletion vector by path: " + deletionVector.pathOrInlineDv());
+                }
+                ByteBuffer buffer = readDeletionVector(inputFile, deletionVector.offset().orElseThrow(), deletionVector.sizeInBytes());
+                return deserializeDeletionVectors(buffer);
+            }
+            case INLINE_MARKER -> throw new TrinoException(NOT_SUPPORTED, "Unsupported storage type for deletion vector: " + deletionVector.storageType());
         }
         throw new IllegalArgumentException("Unexpected storage type: " + deletionVector.storageType());
     }
@@ -75,13 +82,22 @@ public final class DeletionVectors
     public static DeletionVectorEntry writeDeletionVectors(
             TrinoFileSystem fileSystem,
             Location location,
-            RoaringBitmapArray deletedRows)
+            RoaringBitmapArray deletedRows,
+            int randomPrefixLength)
             throws IOException
     {
         UUID uuid = randomUUID();
-        String deletionVectorFilename = "deletion_vector_" + uuid + ".bin";
         String pathOrInlineDv = encodeUUID(uuid);
-        int sizeInBytes = MAGIC_NUMBER_BYTE_SIZE + BIT_MAP_COUNT_BYTE_SIZE + BIT_MAP_KEY_BYTE_SIZE + deletedRows.serializedSizeInBytes();
+        String deletionVectorFilename = "deletion_vector_" + uuid + ".bin";
+        if (randomPrefixLength > 0) {
+            String randomPrefix = randomPrefix(randomPrefixLength);
+            pathOrInlineDv = randomPrefix + pathOrInlineDv;
+            location = location.appendPath(randomPrefix);
+        }
+        for (int index = 0; index < deletedRows.length(); index++) {
+            deletedRows.get(index).runOptimize();
+        }
+        int sizeInBytes = MAGIC_NUMBER_BYTE_SIZE + BIT_MAP_COUNT_BYTE_SIZE + deletedRows.serializedSizeInBytes();
         long cardinality = deletedRows.cardinality();
 
         checkArgument(sizeInBytes > 0, "sizeInBytes must be positive: %s", sizeInBytes);
@@ -100,6 +116,16 @@ public final class DeletionVectors
         return new DeletionVectorEntry(UUID_MARKER, pathOrInlineDv, offset, sizeInBytes, cardinality);
     }
 
+    private static String randomPrefix(int length)
+    {
+        String alphanumeric = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        StringBuilder prefix = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            prefix.append(alphanumeric.charAt(ThreadLocalRandom.current().nextInt(alphanumeric.length())));
+        }
+        return prefix.toString();
+    }
+
     private static byte[] serializeAsByteArray(RoaringBitmapArray bitmaps, int sizeInBytes)
     {
         ByteBuffer buffer = ByteBuffer.allocate(sizeInBytes).order(LITTLE_ENDIAN);
@@ -108,7 +134,6 @@ public final class DeletionVectors
         for (int i = 0; i < bitmaps.length(); i++) {
             buffer.putInt(i); // Bitmap index
             RoaringBitmap bitmap = bitmaps.get(i);
-            bitmap.runOptimize();
             bitmap.serialize(buffer);
         }
         return buffer.array();

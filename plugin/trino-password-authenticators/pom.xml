@@ -5,12 +5,13 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>459-SNAPSHOT</version>
+        <version>484-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>trino-password-authenticators</artifactId>
     <packaging>trino-plugin</packaging>
+    <name>${project.artifactId}</name>
     <description>Trino - Password authentication</description>
 
     <dependencies>
@@ -26,11 +27,6 @@
         </dependency>
 
         <dependency>
-            <groupId>com.google.inject</groupId>
-            <artifactId>guice</artifactId>
-        </dependency>
-
-        <dependency>
             <groupId>io.airlift</groupId>
             <artifactId>bootstrap</artifactId>
         </dependency>
@@ -38,6 +34,11 @@
         <dependency>
             <groupId>io.airlift</groupId>
             <artifactId>configuration</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>guice</artifactId>
         </dependency>
 
         <dependency>
@@ -101,15 +102,14 @@
         </dependency>
 
         <dependency>
-            <groupId>org.openjdk.jol</groupId>
-            <artifactId>jol-core</artifactId>
-            <scope>provided</scope>
+            <groupId>eu.rekawek.toxiproxy</groupId>
+            <artifactId>toxiproxy-java</artifactId>
+            <scope>test</scope>
         </dependency>
 
         <dependency>
-            <groupId>eu.rekawek.toxiproxy</groupId>
-            <artifactId>toxiproxy-java</artifactId>
-            <version>2.1.7</version>
+            <groupId>io.airlift</groupId>
+            <artifactId>configuration-testing</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -122,6 +122,12 @@
         <dependency>
             <groupId>io.airlift</groupId>
             <artifactId>testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
+            <artifactId>trino-testing-containers</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -157,7 +163,7 @@
 
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>toxiproxy</artifactId>
+            <artifactId>testcontainers-toxiproxy</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

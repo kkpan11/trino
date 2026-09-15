@@ -30,7 +30,6 @@ import com.google.inject.Singleton;
 import com.google.inject.TypeLiteral;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
-import io.airlift.event.client.EventClient;
 import io.airlift.json.JsonModule;
 import io.airlift.log.Logger;
 import io.trino.sql.parser.SqlParser;
@@ -49,6 +48,7 @@ import io.trino.sql.tree.Explain;
 import io.trino.sql.tree.ExplainAnalyze;
 import io.trino.sql.tree.Insert;
 import io.trino.sql.tree.RefreshMaterializedView;
+import io.trino.sql.tree.RefreshView;
 import io.trino.sql.tree.RenameColumn;
 import io.trino.sql.tree.RenameMaterializedView;
 import io.trino.sql.tree.RenameTable;
@@ -62,10 +62,12 @@ import io.trino.sql.tree.ShowSession;
 import io.trino.sql.tree.ShowTables;
 import io.trino.sql.tree.Statement;
 import io.trino.verifier.QueryRewriter.QueryRewriteException;
+import io.trino.verifier.VerifyCommand.VersionProvider;
 import org.jdbi.v3.core.ConnectionFactory;
 import org.jdbi.v3.core.Jdbi;
 import org.jdbi.v3.sqlobject.SqlObjectPlugin;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.IVersionProvider;
 import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
@@ -77,7 +79,7 @@ import java.io.UncheckedIOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -91,18 +93,16 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.verifier.QueryType.CREATE;
 import static io.trino.verifier.QueryType.MODIFY;
 import static io.trino.verifier.QueryType.READ;
-import static io.trino.verifier.VerifyCommand.VersionProvider;
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.TimeUnit.MINUTES;
-import static picocli.CommandLine.IVersionProvider;
 
 @Command(
         name = "verifier",
@@ -153,8 +153,6 @@ public class VerifyCommand
             for (String clientType : config.getEventClients()) {
                 checkArgument(supportedEventClients.contains(clientType), "Unsupported event client: %s", clientType);
             }
-            Set<EventClient> eventClients = injector.getInstance(new Key<>() {});
-
             VerifierDao dao = injector.getInstance(VerifierDao.class);
 
             ImmutableList.Builder<QueryPair> queriesBuilder = ImmutableList.builder();
@@ -184,9 +182,9 @@ public class VerifyCommand
                     loadJdbcDriver(urls, config.getControlJdbcDriverName());
                 }
             }
-
             // TODO: construct this with Guice
-            int numFailedQueries = new Verifier(System.out, config, eventClients).run(queries);
+            int numFailedQueries = new Verifier(System.out, config, injector.getInstance(new Key<>() {}))
+                    .run(queries);
             System.exit((numFailedQueries > 0) ? 1 : 0);
         }
         catch (InterruptedException | MalformedURLException e) {
@@ -220,10 +218,10 @@ public class VerifyCommand
         ImmutableList.Builder<URL> urlList = ImmutableList.builder();
         File driverPath = new File(path);
         if (!driverPath.isDirectory()) {
-            urlList.add(Paths.get(path).toUri().toURL());
+            urlList.add(Path.of(path).toUri().toURL());
             return urlList.build();
         }
-        File[] files = driverPath.listFiles((dir, name) -> {
+        File[] files = driverPath.listFiles((_, name) -> {
             return name.endsWith(".jar");
         });
         if (files == null) {
@@ -234,7 +232,7 @@ public class VerifyCommand
             if (file.isDirectory()) {
                 continue;
             }
-            urlList.add(Paths.get(file.getAbsolutePath()).toUri().toURL());
+            urlList.add(Path.of(file.getAbsolutePath()).toUri().toURL());
         }
         return urlList.build();
     }
@@ -378,19 +376,22 @@ public class VerifyCommand
         if (statement instanceof CreateTableAsSelect) {
             return CREATE;
         }
-        if (statement instanceof CreateView) {
-            if (((CreateView) statement).isReplace()) {
+        if (statement instanceof CreateView createView) {
+            if (createView.isReplace()) {
                 return MODIFY;
             }
             return CREATE;
         }
-        if (statement instanceof CreateMaterializedView) {
-            if (((CreateMaterializedView) statement).isReplace()) {
+        if (statement instanceof CreateMaterializedView createMaterializedView) {
+            if (createMaterializedView.isReplace()) {
                 return MODIFY;
             }
             return CREATE;
         }
         if (statement instanceof RefreshMaterializedView) {
+            return MODIFY;
+        }
+        if (statement instanceof RefreshView) {
             return MODIFY;
         }
         if (statement instanceof DropMaterializedView) {
@@ -408,8 +409,8 @@ public class VerifyCommand
         if (statement instanceof Explain) {
             return READ;
         }
-        if (statement instanceof ExplainAnalyze) {
-            return statementToQueryType(((ExplainAnalyze) statement).getStatement());
+        if (statement instanceof ExplainAnalyze explainAnalyze) {
+            return statementToQueryType(explainAnalyze.getStatement());
         }
         if (statement instanceof Insert) {
             return MODIFY;
@@ -503,7 +504,7 @@ public class VerifyCommand
         public String[] getVersion()
         {
             String version = getClass().getPackage().getImplementationVersion();
-            return new String[] {spec.name() + " " + firstNonNull(version, "(version unknown)")};
+            return new String[] {spec.name() + " " + requireNonNullElse(version, "(version unknown)")};
         }
     }
 

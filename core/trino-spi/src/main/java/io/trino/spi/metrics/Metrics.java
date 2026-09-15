@@ -64,10 +64,9 @@ public class Metrics
         if (this == o) {
             return true;
         }
-        if (!(o instanceof Metrics)) {
+        if (!(o instanceof Metrics that)) {
             return false;
         }
-        Metrics that = (Metrics) o;
         return metrics.equals(that.metrics);
     }
 
@@ -89,9 +88,7 @@ public class Metrics
     {
         private final Map<String, List<Metric<?>>> groupedMetrics = new HashMap<>();
 
-        private Accumulator()
-        {
-        }
+        private Accumulator() {}
 
         public Accumulator add(Metrics metrics)
         {

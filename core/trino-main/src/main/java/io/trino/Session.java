@@ -16,19 +16,18 @@ package io.trino;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Maps;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.Span;
 import io.trino.client.ProtocolHeaders;
+import io.trino.connector.CatalogHandle;
 import io.trino.metadata.SessionPropertyManager;
 import io.trino.security.AccessControl;
 import io.trino.security.SecurityContext;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.security.Identity;
@@ -152,7 +151,7 @@ public final class Session
         requireNonNull(catalogProperties, "catalogProperties is null");
         ImmutableMap.Builder<String, Map<String, String>> catalogPropertiesBuilder = ImmutableMap.builder();
         catalogProperties.entrySet().stream()
-                .map(entry -> Maps.immutableEntry(entry.getKey(), ImmutableMap.copyOf(entry.getValue())))
+                .map(entry -> Map.entry(entry.getKey(), ImmutableMap.copyOf(entry.getValue())))
                 .forEach(catalogPropertiesBuilder::put);
         this.catalogProperties = catalogPropertiesBuilder.buildOrThrow();
 
@@ -206,7 +205,10 @@ public final class Session
 
     public TimeZoneKey getTimeZoneKey()
     {
-        return timeZoneKey;
+        // Allow overriding timezone key with a session property regardless of it's source
+        return SystemSessionProperties.getTimeZoneId(this)
+                .map(TimeZoneKey::getTimeZoneKey)
+                .orElse(timeZoneKey);
     }
 
     public Locale getLocale()
@@ -409,13 +411,18 @@ public final class Session
         systemProperties.putAll(this.systemProperties);
 
         Map<String, Map<String, String>> catalogProperties = catalogPropertyDefaults.entrySet().stream()
-                .map(entry -> Maps.immutableEntry(entry.getKey(), new HashMap<>(entry.getValue())))
+                .map(entry -> Map.entry(entry.getKey(), new HashMap<>(entry.getValue())))
                 .collect(Collectors.toMap(Entry::getKey, Entry::getValue));
         for (Entry<String, Map<String, String>> catalogEntry : this.catalogProperties.entrySet()) {
-            catalogProperties.computeIfAbsent(catalogEntry.getKey(), id -> new HashMap<>())
+            catalogProperties.computeIfAbsent(catalogEntry.getKey(), _ -> new HashMap<>())
                     .putAll(catalogEntry.getValue());
         }
 
+        return withProperties(systemProperties, catalogProperties);
+    }
+
+    public Session withProperties(Map<String, String> systemProperties, Map<String, Map<String, String>> catalogProperties)
+    {
         return new Session(
                 queryId,
                 querySpan,
@@ -479,6 +486,38 @@ public final class Session
                 queryDataEncoding);
     }
 
+    public Session withoutSpooling()
+    {
+        return new Session(
+                queryId,
+                querySpan,
+                transactionId,
+                clientTransactionSupport,
+                identity,
+                originalIdentity,
+                source,
+                catalog,
+                schema,
+                path,
+                traceToken,
+                timeZoneKey,
+                locale,
+                remoteUserAddress,
+                userAgent,
+                clientInfo,
+                clientTags,
+                clientCapabilities,
+                resourceEstimates,
+                start,
+                systemProperties,
+                catalogProperties,
+                sessionPropertyManager,
+                preparedStatements,
+                protocolHeaders,
+                exchangeEncryptionKey,
+                Optional.empty());
+    }
+
     public ConnectorSession toConnectorSession()
     {
         return new FullConnectorSession(this, identity.toConnectorIdentity());
@@ -501,12 +540,13 @@ public final class Session
     public SessionRepresentation toSessionRepresentation()
     {
         return new SessionRepresentation(
-                queryId.toString(),
+                queryId.id(),
                 querySpan,
                 transactionId,
                 clientTransactionSupport,
                 identity.getUser(),
                 originalIdentity.getUser(),
+                originalIdentity.getEnabledRoles(),
                 identity.getGroups(),
                 originalIdentity.getGroups(),
                 identity.getPrincipal().map(Principal::toString),
@@ -620,6 +660,7 @@ public final class Session
                 .setRemoteUserAddress(getRemoteUserAddress().orElse(null))
                 .setUserAgent(getUserAgent().orElse(null))
                 .setClientInfo(getClientInfo().orElse(null))
+                .setTraceToken(getTraceToken())
                 .setStart(getStart())
                 .build();
     }
@@ -680,7 +721,7 @@ public final class Session
             checkArgument(session.getTransactionId().isEmpty(), "Session builder cannot be created from a session in a transaction");
             this.sessionPropertyManager = session.sessionPropertyManager;
             this.queryId = session.queryId;
-            this.transactionId = session.transactionId.orElse(null);
+            this.transactionId = null; // Set null explicitly as it's not allowed to create from a session in a transaction
             this.clientTransactionSupport = session.clientTransactionSupport;
             this.identity = session.identity;
             this.originalIdentity = session.originalIdentity;
@@ -926,7 +967,7 @@ public final class Session
         public SessionBuilder setCatalogSessionProperty(String catalogName, String propertyName, String propertyValue)
         {
             checkArgument(transactionId == null, "Catalog session properties cannot be set if there is an open transaction");
-            catalogSessionProperties.computeIfAbsent(catalogName, id -> new HashMap<>()).put(propertyName, propertyValue);
+            catalogSessionProperties.computeIfAbsent(catalogName, _ -> new HashMap<>()).put(propertyName, propertyValue);
             return this;
         }
 

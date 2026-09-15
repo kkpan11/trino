@@ -5,11 +5,12 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>459-SNAPSHOT</version>
+        <version>484-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>trino-spi</artifactId>
+    <name>${project.artifactId}</name>
     <description>Trino - Service Provider Interface (SPI)</description>
 
     <properties>
@@ -17,7 +18,6 @@
         <trino.check.skip-revapi>${air.check.skip-basic}</trino.check.skip-revapi>
     </properties>
 
-    <!-- the SPI should have only minimal dependencies -->
     <dependencies>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -48,13 +48,25 @@
 
         <dependency>
             <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api-incubator</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-common</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
             <artifactId>opentelemetry-context</artifactId>
             <scope>runtime</scope>
         </dependency>
 
         <dependency>
-            <groupId>org.openjdk.jol</groupId>
-            <artifactId>jol-core</artifactId>
+            <groupId>org.locationtech.jts</groupId>
+            <artifactId>jts-core</artifactId>
             <scope>runtime</scope>
         </dependency>
 
@@ -77,8 +89,14 @@
         </dependency>
 
         <dependency>
-            <groupId>com.google.inject</groupId>
+            <groupId>io.airlift</groupId>
             <artifactId>guice</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>jackson</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -109,6 +127,18 @@
         <dependency>
             <groupId>it.unimi.dsi</groupId>
             <artifactId>fastutil</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-core</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -166,27 +196,21 @@
             <plugin>
                 <groupId>org.revapi</groupId>
                 <artifactId>revapi-maven-plugin</artifactId>
-                <version>0.15.0</version>
+                <version>0.15.1</version>
                 <configuration>
                     <skip>${trino.check.skip-revapi}</skip>
                     <ignoreSuggestionsFormat>xml</ignoreSuggestionsFormat>
                     <analysisConfiguration>
-                        <revapi.filter>
-                            <elements>
-                                <exclude>
-                                    <item>
-                                        <matcher>java</matcher>
-                                        <match>@io.trino.spi.Experimental(*) ^*;</match>
-                                    </item>
-                                </exclude>
-                            </elements>
-                        </revapi.filter>
                         <revapi.differences>
                             <ignore>true</ignore>
                             <differences>
                                 <!-- Allow adding new annotations (such as @Nullable) -->
                                 <item>
                                     <code>java.annotation.added</code>
+                                </item>
+                                <item>
+                                    <!-- Disabled due to too many false positives -->
+                                    <code>java.method.varargOverloadsOnlyDifferInVarargParameter</code>
                                 </item>
                                 <!-- Allow changing enum constant order (e.g., StandardErrorCode) -->
                                 <item>
@@ -211,477 +235,444 @@
                                     </old>
                                 </item>
                                 <!-- Backwards incompatible changes since the previous release -->
-                                <!-- Any exclusions below can be deleted after each release -->
                                 <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.nowFinal</code>
-                                    <old>class io.trino.spi.connector.ConnectorTableLayout</old>
+                                    <code>java.method.returnTypeChanged</code>
+                                    <old>method io.trino.spi.block.DictionaryBlock io.trino.spi.block.DictionaryBlock::compact()</old>
+                                    <new>method io.trino.spi.block.Block io.trino.spi.block.DictionaryBlock::compact()</new>
+                                    <justification>Dictionary compaction can produce a simpler block representation.</justification>
+                                </item>
+                                <item>
+                                    <code>java.method.returnTypeTypeParametersChanged</code>
+                                    <old>method java.util.List&lt;io.trino.spi.block.DictionaryBlock&gt; io.trino.spi.block.DictionaryBlock::compactRelatedBlocks(java.util.List&lt;io.trino.spi.block.DictionaryBlock&gt;)</old>
+                                    <new>method java.util.List&lt;? extends io.trino.spi.block.Block&gt; io.trino.spi.block.DictionaryBlock::compactRelatedBlocks(java.util.List&lt;io.trino.spi.block.DictionaryBlock&gt;)</new>
+                                    <justification>Related dictionary compaction can produce simpler block representations.</justification>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method long io.trino.spi.connector.ConnectorPageSourceProvider::getMemoryUsage()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method io.trino.spi.connector.ConnectorPageSourceProvider io.trino.spi.connector.ConnectorPageSourceProviderFactory::createPageSourceProvider()</old>
+                                    <new>method io.trino.spi.connector.ConnectorPageSourceProvider io.trino.spi.connector.ConnectorPageSourceProviderFactory::createPageSourceProvider(io.trino.spi.connector.MemoryContext)</new>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int io.trino.spi.block.ArrayBlock::getOffsetBase()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method io.trino.spi.block.Block io.trino.spi.block.ArrayBlock::getRawElementBlock()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.ArrayBlock::getRawValueIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.ByteArrayBlock::getRawValueIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int io.trino.spi.block.Fixed12Block::getRawOffset()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.Fixed12Block::getRawValueIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int[] io.trino.spi.block.Fixed12Block::getRawValues()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int io.trino.spi.block.Int128ArrayBlock::getRawOffset()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.Int128ArrayBlock::getRawValueIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method long[] io.trino.spi.block.Int128ArrayBlock::getRawValues()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.IntArrayBlock::getRawValueIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.LongArrayBlock::getRawValueIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method long[] io.trino.spi.block.LongArrayBlock::getRawValues()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int io.trino.spi.block.LongArrayBlock::getRawValuesOffset()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int io.trino.spi.block.MapBlock::getOffsetBase()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method io.trino.spi.block.Block io.trino.spi.block.MapBlock::getRawKeyBlock()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.MapBlock::getRawMapIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method io.trino.spi.block.Block io.trino.spi.block.MapBlock::getRawValueBlock()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.ShortArrayBlock::getRawValueIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method short[] io.trino.spi.block.ShortArrayBlock::getRawValues()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int io.trino.spi.block.ShortArrayBlock::getRawValuesOffset()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int io.trino.spi.block.VariableWidthBlock::getRawArrayBase()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method int[] io.trino.spi.block.VariableWidthBlock::getRawOffsets()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.visibilityIncreased</code>
+                                    <old>method boolean[] io.trino.spi.block.VariableWidthBlock::getRawValueIsNull()</old>
+                                </item>
+                                <!-- Boolean values now use bit-packed blocks. -->
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method io.trino.spi.block.Block io.trino.spi.type.BooleanType::wrapByteArrayAsBooleanBlockWithoutNulls(byte[])</old>
+                                </item>
+                                <!-- Block null representation changed from boolean null arrays to validity bitmaps. -->
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter io.trino.spi.block.ArrayBlock io.trino.spi.block.ArrayBlock::fromElementBlock(int, ===java.util.Optional&lt;boolean[]&gt;===, int[], io.trino.spi.block.Block)</old>
+                                    <new>parameter io.trino.spi.block.ArrayBlock io.trino.spi.block.ArrayBlock::fromElementBlock(int, ===java.util.Optional&lt;long[]&gt;===, int[], io.trino.spi.block.Block)</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.ArrayBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.ArrayBlockEncoding::&lt;init&gt;(boolean)</old>
+                                    <new>method void io.trino.spi.block.ArrayBlockEncoding::&lt;init&gt;()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter void io.trino.spi.block.ByteArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;boolean[]&gt;===, byte[])</old>
+                                    <new>parameter void io.trino.spi.block.ByteArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;long[]&gt;===, byte[])</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.ByteArrayBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.ByteArrayBlockEncoding::&lt;init&gt;(boolean, boolean, boolean)</old>
+                                    <new>method void io.trino.spi.block.ByteArrayBlockEncoding::&lt;init&gt;(boolean, boolean)</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter void io.trino.spi.block.Fixed12Block::&lt;init&gt;(int, ===java.util.Optional&lt;boolean[]&gt;===, int[])</old>
+                                    <new>parameter void io.trino.spi.block.Fixed12Block::&lt;init&gt;(int, ===java.util.Optional&lt;long[]&gt;===, int[])</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.Fixed12Block::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.Fixed12BlockEncoding::&lt;init&gt;(boolean)</old>
+                                    <new>method void io.trino.spi.block.Fixed12BlockEncoding::&lt;init&gt;()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter void io.trino.spi.block.Int128ArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;boolean[]&gt;===, long[])</old>
+                                    <new>parameter void io.trino.spi.block.Int128ArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;long[]&gt;===, long[])</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.Int128ArrayBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.Int128ArrayBlockEncoding::&lt;init&gt;(boolean)</old>
+                                    <new>method void io.trino.spi.block.Int128ArrayBlockEncoding::&lt;init&gt;()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter void io.trino.spi.block.IntArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;boolean[]&gt;===, int[])</old>
+                                    <new>parameter void io.trino.spi.block.IntArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;long[]&gt;===, int[])</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.IntArrayBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.IntArrayBlockEncoding::&lt;init&gt;(boolean, boolean, boolean)</old>
+                                    <new>method void io.trino.spi.block.IntArrayBlockEncoding::&lt;init&gt;(boolean, boolean)</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter void io.trino.spi.block.LongArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;boolean[]&gt;===, long[])</old>
+                                    <new>parameter void io.trino.spi.block.LongArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;long[]&gt;===, long[])</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.LongArrayBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.LongArrayBlockEncoding::&lt;init&gt;(boolean, boolean, boolean)</old>
+                                    <new>method void io.trino.spi.block.LongArrayBlockEncoding::&lt;init&gt;(boolean, boolean)</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter io.trino.spi.block.MapBlock io.trino.spi.block.MapBlock::createMapBlockInternal(io.trino.spi.type.MapType, int, int, ===java.util.Optional&lt;boolean[]&gt;===, int[], io.trino.spi.block.Block, io.trino.spi.block.Block, io.trino.spi.block.MapHashTables)</old>
+                                    <new>parameter io.trino.spi.block.MapBlock io.trino.spi.block.MapBlock::createMapBlockInternal(io.trino.spi.type.MapType, int, int, ===java.util.Optional&lt;long[]&gt;===, int[], io.trino.spi.block.Block, io.trino.spi.block.Block, io.trino.spi.block.MapHashTables)</new>
+                                    <parameterIndex>3</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter io.trino.spi.block.MapBlock io.trino.spi.block.MapBlock::fromKeyValueBlock(===java.util.Optional&lt;boolean[]&gt;===, int[], io.trino.spi.block.Block, io.trino.spi.block.Block, io.trino.spi.type.MapType)</old>
+                                    <new>parameter io.trino.spi.block.MapBlock io.trino.spi.block.MapBlock::fromKeyValueBlock(===java.util.Optional&lt;long[]&gt;===, int[], io.trino.spi.block.Block, io.trino.spi.block.Block, io.trino.spi.type.MapType)</new>
+                                    <parameterIndex>0</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter io.trino.spi.block.MapBlock io.trino.spi.block.MapBlock::fromKeyValueBlock(===java.util.Optional&lt;boolean[]&gt;===, int[], int, io.trino.spi.block.Block, io.trino.spi.block.Block, io.trino.spi.type.MapType)</old>
+                                    <new>parameter io.trino.spi.block.MapBlock io.trino.spi.block.MapBlock::fromKeyValueBlock(===java.util.Optional&lt;long[]&gt;===, int[], int, io.trino.spi.block.Block, io.trino.spi.block.Block, io.trino.spi.type.MapType)</new>
+                                    <parameterIndex>0</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.MapBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.MapBlockEncoding::&lt;init&gt;(boolean)</old>
+                                    <new>method void io.trino.spi.block.MapBlockEncoding::&lt;init&gt;()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter io.trino.spi.block.RowBlock io.trino.spi.block.RowBlock::fromNotNullSuppressedFieldBlocks(int, ===java.util.Optional&lt;boolean[]&gt;===, io.trino.spi.block.Block[])</old>
+                                    <new>parameter io.trino.spi.block.RowBlock io.trino.spi.block.RowBlock::fromNotNullSuppressedFieldBlocks(int, ===java.util.Optional&lt;long[]&gt;===, io.trino.spi.block.Block[])</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.RowBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method boolean[] io.trino.spi.block.RowBlock::getRawRowIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.RowBlockEncoding::&lt;init&gt;(boolean)</old>
+                                    <new>method void io.trino.spi.block.RowBlockEncoding::&lt;init&gt;()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter void io.trino.spi.block.ShortArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;boolean[]&gt;===, short[])</old>
+                                    <new>parameter void io.trino.spi.block.ShortArrayBlock::&lt;init&gt;(int, ===java.util.Optional&lt;long[]&gt;===, short[])</new>
+                                    <parameterIndex>1</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.ShortArrayBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.ShortArrayBlockEncoding::&lt;init&gt;(boolean, boolean, boolean)</old>
+                                    <new>method void io.trino.spi.block.ShortArrayBlockEncoding::&lt;init&gt;(boolean, boolean)</new>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.ValueBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.addedToInterface</code>
+                                    <new>method java.util.Optional&lt;io.trino.spi.block.Bitmap&gt; io.trino.spi.block.ValueBlock::getValidityBitmap()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter void io.trino.spi.block.VariableWidthBlock::&lt;init&gt;(int, io.airlift.slice.Slice, int[], ===java.util.Optional&lt;boolean[]&gt;===)</old>
+                                    <new>parameter void io.trino.spi.block.VariableWidthBlock::&lt;init&gt;(int, io.airlift.slice.Slice, int[], ===java.util.Optional&lt;long[]&gt;===)</new>
+                                    <parameterIndex>3</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.VariableWidthBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.VariableWidthBlockEncoding::&lt;init&gt;(boolean)</old>
+                                    <new>method void io.trino.spi.block.VariableWidthBlockEncoding::&lt;init&gt;()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter io.trino.spi.block.VariantBlock io.trino.spi.block.VariantBlock::create(int, io.trino.spi.block.Block, io.trino.spi.block.Block, ===java.util.Optional&lt;boolean[]&gt;===)</old>
+                                    <new>parameter io.trino.spi.block.VariantBlock io.trino.spi.block.VariantBlock::create(int, io.trino.spi.block.Block, io.trino.spi.block.Block, ===java.util.Optional&lt;long[]&gt;===)</new>
+                                    <parameterIndex>3</parameterIndex>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.VariantBlock::getNulls()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.removed</code>
+                                    <old>method boolean[] io.trino.spi.block.VariantBlock::getRawIsNull()</old>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method void io.trino.spi.block.VariantBlockEncoding::&lt;init&gt;(boolean)</old>
+                                    <new>method void io.trino.spi.block.VariantBlockEncoding::&lt;init&gt;()</new>
+                                </item>
+                                <item>
+                                    <code>java.method.parameterTypeParameterChanged</code>
+                                    <old>parameter io.trino.spi.block.MapBlock io.trino.spi.type.MapType::createBlockFromKeyValue(===java.util.Optional&lt;boolean[]&gt;===, int[], io.trino.spi.block.Block, io.trino.spi.block.Block)</old>
+                                    <new>parameter io.trino.spi.block.MapBlock io.trino.spi.type.MapType::createBlockFromKeyValue(===java.util.Optional&lt;long[]&gt;===, int[], io.trino.spi.block.Block, io.trino.spi.block.Block)</new>
+                                    <parameterIndex>0</parameterIndex>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.class.removed</code>
-                                    <old>@interface io.trino.spi.function.RemoveInputFunction</old>
+                                    <code>java.method.addedToInterface</code>
+                                    <new>method boolean io.trino.spi.spool.SpoolingManager::isRecoverableException(java.io.IOException)</new>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
                                     <code>java.annotation.removed</code>
-                                    <old>method void io.trino.spi.ErrorCode::&lt;init&gt;(int, java.lang.String, io.trino.spi.ErrorType)</old>
-                                    <new>method void io.trino.spi.ErrorCode::&lt;init&gt;(int, java.lang.String, io.trino.spi.ErrorType)</new>
+                                    <old>method java.lang.String io.trino.spi.security.TrinoPrincipal::getName()</old>
+                                    <new>method java.lang.String io.trino.spi.security.TrinoPrincipal::getName()</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty</annotation>
+                                    <justification>getName() is deprecated and replaced by getPrincipalName() which preserves the original case of USER principal names. The @JsonProperty annotation is moved to getPrincipalName() so that JSON serialization reflects the stored name verbatim.</justification>
+                                </item>
+                                <item>
+                                    <code>java.method.numberOfParametersChanged</code>
+                                    <old>method io.trino.spi.connector.ConnectorMergeSink io.trino.spi.connector.ConnectorPageSinkProvider::createMergeSink(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorMergeTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, io.trino.spi.connector.ConnectorPageSinkId)</old>
+                                    <new>method io.trino.spi.connector.ConnectorMergeSink io.trino.spi.connector.ConnectorPageSinkProvider::createMergeSink(io.trino.spi.connector.ConnectorTransactionHandle, io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorMergeTableHandle, java.util.Optional&lt;io.trino.spi.connector.ConnectorTableCredentials&gt;, io.trino.spi.connector.ConnectorPageSinkId, io.trino.spi.connector.MemoryContext)</new>
+                                </item>
+                                <!--
+                                    TrinoPrincipal and RoleGrant are plain SPI value objects and no longer depend on Jackson.
+                                    JSON serialization of role grants now lives in the file metastore, which maps them to its own
+                                    HiveRoleGrant DTO, so the on-disk format is unchanged.
+                                -->
+                                <item>
+                                    <ignore>true</ignore>
+                                    <code>java.annotation.removed</code>
+                                    <old>method void io.trino.spi.security.RoleGrant::&lt;init&gt;(io.trino.spi.security.TrinoPrincipal, java.lang.String, boolean)</old>
+                                    <new>method void io.trino.spi.security.RoleGrant::&lt;init&gt;(io.trino.spi.security.TrinoPrincipal, java.lang.String, boolean)</new>
                                     <annotation>@com.fasterxml.jackson.annotation.JsonCreator</annotation>
+                                    <justification>Serialization of RoleGrant is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method void io.trino.spi.eventlistener.QueryStatistics::&lt;init&gt;(java.time.Duration, java.time.Duration, java.time.Duration, java.time.Duration, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, double, double, java.util.List&lt;io.trino.spi.eventlistener.StageGcStatistics&gt;, int, boolean, java.util.List&lt;io.trino.spi.eventlistener.StageCpuDistribution&gt;, java.util.List&lt;io.trino.spi.eventlistener.StageOutputBufferUtilization&gt;, java.util.function.Supplier&lt;java.util.List&lt;java.lang.String&gt;&gt;, java.util.List&lt;io.trino.spi.eventlistener.QueryPlanOptimizerStatistics&gt;, java.util.Optional&lt;java.lang.String&gt;)</old>
-                                    <new>method void io.trino.spi.eventlistener.QueryStatistics::&lt;init&gt;(java.time.Duration, java.time.Duration, java.time.Duration, java.time.Duration, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, double, double, java.util.List&lt;io.trino.spi.eventlistener.StageGcStatistics&gt;, int, boolean, java.util.List&lt;io.trino.spi.eventlistener.StageCpuDistribution&gt;, java.util.List&lt;io.trino.spi.eventlistener.StageOutputBufferUtilization&gt;, java.util.List&lt;io.trino.spi.eventlistener.StageTaskStatistics&gt;, java.util.function.Supplier&lt;java.util.List&lt;java.lang.String&gt;&gt;, java.util.List&lt;io.trino.spi.eventlistener.QueryPlanOptimizerStatistics&gt;, java.util.Optional&lt;java.lang.String&gt;)</new>
+                                    <code>java.annotation.removed</code>
+                                    <old>parameter void io.trino.spi.security.RoleGrant::&lt;init&gt;(===io.trino.spi.security.TrinoPrincipal===, java.lang.String, boolean)</old>
+                                    <new>parameter void io.trino.spi.security.RoleGrant::&lt;init&gt;(===io.trino.spi.security.TrinoPrincipal===, java.lang.String, boolean)</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty("grantee")</annotation>
+                                    <justification>Serialization of RoleGrant is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method void io.trino.spi.eventlistener.QueryStatistics::&lt;init&gt;(java.time.Duration, java.time.Duration, java.time.Duration, java.time.Duration, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, double, double, java.util.List&lt;io.trino.spi.eventlistener.StageGcStatistics&gt;, int, boolean, java.util.List&lt;io.trino.spi.eventlistener.StageCpuDistribution&gt;, java.util.List&lt;io.trino.spi.eventlistener.StageOutputBufferUtilization&gt;, java.util.List&lt;io.trino.spi.eventlistener.StageTaskStatistics&gt;, java.util.function.Supplier&lt;java.util.List&lt;java.lang.String&gt;&gt;, java.util.List&lt;io.trino.spi.eventlistener.QueryPlanOptimizerStatistics&gt;, java.util.Optional&lt;java.lang.String&gt;)</old>
-                                    <new>method void io.trino.spi.eventlistener.QueryStatistics::&lt;init&gt;(java.time.Duration, java.time.Duration, java.time.Duration, java.time.Duration, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, java.util.Optional&lt;java.time.Duration&gt;, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, long, double, double, java.util.List&lt;io.trino.spi.eventlistener.StageGcStatistics&gt;, int, boolean, java.util.List&lt;io.trino.spi.eventlistener.StageCpuDistribution&gt;, java.util.List&lt;io.trino.spi.eventlistener.StageOutputBufferUtilization&gt;, java.util.List&lt;io.trino.spi.eventlistener.StageTaskStatistics&gt;, java.util.function.Supplier&lt;java.util.List&lt;java.lang.String&gt;&gt;, java.util.List&lt;io.trino.spi.eventlistener.QueryPlanOptimizerStatistics&gt;, java.util.Optional&lt;java.lang.String&gt;)</new>
-                                </item>
-                                <item>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::fromJson(io.trino.spi.type.Type, boolean[], io.trino.spi.block.Block)</old>
-                                    <new>method io.trino.spi.predicate.SortedRangeSet io.trino.spi.predicate.SortedRangeSet::fromJson(io.trino.spi.type.Type, boolean[], io.trino.spi.block.Block, io.trino.spi.predicate.SortedRangeSet.DiscreteSetMarker)</new>
-                                </item>
-                                <item>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method io.trino.spi.connector.ConnectorInsertTableHandle io.trino.spi.connector.ConnectorMetadata::beginRefreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableHandle, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, io.trino.spi.connector.RetryMode)</old>
-                                    <new>method io.trino.spi.connector.ConnectorInsertTableHandle io.trino.spi.connector.ConnectorMetadata::beginRefreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableHandle, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, io.trino.spi.connector.RetryMode, io.trino.spi.QueryTransformationType)</new>
-                                </item>
-                                <item>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method io.trino.spi.connector.ConnectorInsertTableHandle io.trino.spi.connector.ConnectorMetadata::beginRefreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableHandle, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, io.trino.spi.connector.RetryMode)</old>
-                                    <new>method io.trino.spi.connector.ConnectorInsertTableHandle io.trino.spi.connector.ConnectorMetadata::beginRefreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorTableHandle, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, io.trino.spi.connector.RetryMode, io.trino.spi.RefreshType)</new>
+                                    <code>java.annotation.removed</code>
+                                    <old>parameter void io.trino.spi.security.RoleGrant::&lt;init&gt;(io.trino.spi.security.TrinoPrincipal, ===java.lang.String===, boolean)</old>
+                                    <new>parameter void io.trino.spi.security.RoleGrant::&lt;init&gt;(io.trino.spi.security.TrinoPrincipal, ===java.lang.String===, boolean)</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty("roleName")</annotation>
+                                    <justification>Serialization of RoleGrant is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method void io.trino.spi.connector.ConnectorMetadata::finishMerge(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorMergeTableHandle, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.Collection&lt;io.trino.spi.statistics.ComputedStatistics&gt;)</old>
-                                    <new>method void io.trino.spi.connector.ConnectorMetadata::finishMerge(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorMergeTableHandle, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.Collection&lt;io.trino.spi.statistics.ComputedStatistics&gt;)</new>
-                                </item>
-
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.field.removed</code>
-                                    <old>field io.trino.spi.connector.JoinCondition.Operator.IS_DISTINCT_FROM</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>parameter void io.trino.spi.security.RoleGrant::&lt;init&gt;(io.trino.spi.security.TrinoPrincipal, java.lang.String, ===boolean===)</old>
+                                    <new>parameter void io.trino.spi.security.RoleGrant::&lt;init&gt;(io.trino.spi.security.TrinoPrincipal, java.lang.String, ===boolean===)</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty("grantable")</annotation>
+                                    <justification>Serialization of RoleGrant is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.field.removed</code>
-                                    <old>field io.trino.spi.expression.StandardFunctions.IS_DISTINCT_FROM_OPERATOR_FUNCTION_NAME</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>method io.trino.spi.security.TrinoPrincipal io.trino.spi.security.RoleGrant::getGrantee()</old>
+                                    <new>method io.trino.spi.security.TrinoPrincipal io.trino.spi.security.RoleGrant::getGrantee()</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty</annotation>
+                                    <justification>Serialization of RoleGrant is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method java.lang.invoke.MethodHandle io.trino.spi.type.TypeOperators::getDistinctFromOperator(io.trino.spi.type.Type, io.trino.spi.function.InvocationConvention)</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>method java.lang.String io.trino.spi.security.RoleGrant::getRoleName()</old>
+                                    <new>method java.lang.String io.trino.spi.security.RoleGrant::getRoleName()</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty</annotation>
+                                    <justification>Serialization of RoleGrant is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.field.removed</code>
-                                    <old>field io.trino.spi.function.OperatorType.IS_DISTINCT_FROM</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>method boolean io.trino.spi.security.RoleGrant::isGrantable()</old>
+                                    <new>method boolean io.trino.spi.security.RoleGrant::isGrantable()</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty</annotation>
+                                    <justification>Serialization of RoleGrant is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method java.lang.invoke.MethodHandle io.trino.spi.type.MapType::getKeyBlockNativeNotDistinctFrom()</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>method void io.trino.spi.security.TrinoPrincipal::&lt;init&gt;(io.trino.spi.security.PrincipalType, java.lang.String)</old>
+                                    <new>method void io.trino.spi.security.TrinoPrincipal::&lt;init&gt;(io.trino.spi.security.PrincipalType, java.lang.String)</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonCreator</annotation>
+                                    <justification>Serialization of TrinoPrincipal is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method java.lang.invoke.MethodHandle io.trino.spi.type.MapType::getKeyBlockNotDistinctFrom()</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>parameter void io.trino.spi.security.TrinoPrincipal::&lt;init&gt;(===io.trino.spi.security.PrincipalType===, java.lang.String)</old>
+                                    <new>parameter void io.trino.spi.security.TrinoPrincipal::&lt;init&gt;(===io.trino.spi.security.PrincipalType===, java.lang.String)</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty("type")</annotation>
+                                    <justification>Serialization of TrinoPrincipal is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.type.TypeOperatorDeclaration.Builder io.trino.spi.type.TypeOperatorDeclaration.Builder::addDistinctFromOperator(io.trino.spi.function.OperatorMethodHandle)</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>parameter void io.trino.spi.security.TrinoPrincipal::&lt;init&gt;(io.trino.spi.security.PrincipalType, ===java.lang.String===)</old>
+                                    <new>parameter void io.trino.spi.security.TrinoPrincipal::&lt;init&gt;(io.trino.spi.security.PrincipalType, ===java.lang.String===)</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty("name")</annotation>
+                                    <justification>Serialization of TrinoPrincipal is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.type.TypeOperatorDeclaration.Builder io.trino.spi.type.TypeOperatorDeclaration.Builder::addDistinctFromOperators(java.util.Collection&lt;io.trino.spi.function.OperatorMethodHandle&gt;)</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
+                                    <code>java.annotation.removed</code>
+                                    <old>method io.trino.spi.security.PrincipalType io.trino.spi.security.TrinoPrincipal::getType()</old>
+                                    <new>method io.trino.spi.security.PrincipalType io.trino.spi.security.TrinoPrincipal::getType()</new>
+                                    <annotation>@com.fasterxml.jackson.annotation.JsonProperty</annotation>
+                                    <justification>Serialization of TrinoPrincipal is the responsibility of the code that persists it, not of the SPI.</justification>
                                 </item>
                                 <item>
                                     <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method java.util.Collection&lt;io.trino.spi.function.OperatorMethodHandle&gt; io.trino.spi.type.TypeOperatorDeclaration::getDistinctFromOperators()</old>
-                                    <justification>IS_DISTINCT_FROM replaced with IDENTICAL</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"rawInputDataSizeDistribution"</oldValue>
-                                    <newValue>"estimatedMemoryReservationDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"rawInputPositionsDistribution"</oldValue>
-                                    <newValue>"rawInputDataSizeDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"processedInputDataSizeDistribution"</oldValue>
-                                    <newValue>"rawInputPositionsDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"processedInputPositionsDistribution"</oldValue>
-                                    <newValue>"processedInputDataSizeDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"outputDataSizeDistribution"</oldValue>
-                                    <newValue>"processedInputPositionsDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"outputPositionsDistribution"</oldValue>
-                                    <newValue>"outputDataSizeDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"totalDriversDistribution"</oldValue>
-                                    <newValue>"outputPositionsDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"createTimeMillisDistribution"</oldValue>
-                                    <newValue>"totalDriversDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"firstStartTimeMillisDistribution"</oldValue>
-                                    <newValue>"createTimeMillisDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"lastStartTimeMillisDistribution"</oldValue>
-                                    <newValue>"firstStartTimeMillisDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"terminatingStartTimeMillisDistribution"</oldValue>
-                                    <newValue>"lastStartTimeMillisDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"lastEndTimeMillisDistribution"</oldValue>
-                                    <newValue>"terminatingStartTimeMillisDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"endTimeMillisDistribution"</oldValue>
-                                    <newValue>"lastEndTimeMillisDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.LongSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"createTimeScaledDistribution"</oldValue>
-                                    <newValue>"endTimeMillisDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"firstStartTimeScaledDistribution"</oldValue>
-                                    <newValue>"createTimeScaledDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"lastStartTimeScaledDistribution"</oldValue>
-                                    <newValue>"firstStartTimeScaledDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"terminatingStartTimeScaledDistribution"</oldValue>
-                                    <newValue>"lastStartTimeScaledDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"lastEndTimeScaledDistribution"</oldValue>
-                                    <newValue>"terminatingStartTimeScaledDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===)</old>
-                                    <new>parameter void io.trino.spi.eventlistener.StageTaskStatistics::&lt;init&gt;(int, int, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.LongSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, io.trino.spi.eventlistener.DoubleSymmetricDistribution, ===io.trino.spi.eventlistener.DoubleSymmetricDistribution===, io.trino.spi.eventlistener.DoubleSymmetricDistribution)</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonProperty</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>"endTimeScaledDistribution"</oldValue>
-                                    <newValue>"lastEndTimeScaledDistribution"</newValue>
-                                    <justification>added new stats</justification>
-                                </item>
-                                <item>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method double io.trino.spi.metrics.Distribution&lt;T&gt;::getMax()</new>
-                                </item>
-                                <item>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method double io.trino.spi.metrics.Distribution&lt;T&gt;::getMin()</new>
-                                </item>
-                                <item>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method java.util.Optional&lt;io.trino.spi.block.ByteArrayBlock&gt; io.trino.spi.block.ValueBlock::getNulls()</new>
-                                </item>
-                                <item>
-                                    <code>java.method.visibilityIncreased</code>
-                                    <new>method byte[] io.trino.spi.block.ByteArrayBlock::getRawValues()</new>
-                                </item>
-                                <item>
-                                    <code>java.method.visibilityIncreased</code>
-                                    <new>method int io.trino.spi.block.ByteArrayBlock::getRawValuesOffset()</new>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.externalClassExposedInAPI</code>
-                                    <new>interface io.opentelemetry.api.metrics.DoubleGauge</new>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.externalClassExposedInAPI</code>
-                                    <new>interface io.opentelemetry.api.metrics.LongGauge</new>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>interface io.trino.spi.connector.LocalProperty&lt;E&gt;</old>
-                                    <new>interface io.trino.spi.connector.LocalProperty&lt;E&gt;</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonSubTypes</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>{@com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.connector.ConstantProperty.class, name = "constant"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.connector.SortingProperty.class, name = "sorting"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.connector.GroupingProperty.class, name = "grouping")}</oldValue>
-                                    <newValue>{@com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.connector.ConstantProperty.class, name = "constant"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.connector.GroupingProperty.class, name = "grouping"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.connector.SortingProperty.class, name = "sorting")}</newValue>
-                                    <justification>cleanup</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>interface io.trino.spi.eventlistener.TableReferenceInfo</old>
-                                    <new>interface io.trino.spi.eventlistener.TableReferenceInfo</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonSubTypes</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>{@com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.ViewReferenceInfo.class, name = "view"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.MaterializedViewReferenceInfo.class, name = "materializedView"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.RowFilterReferenceInfo.class, name = "rowFilter"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.ColumnMaskReferenceInfo.class, name = "columnMask")}</oldValue>
-                                    <newValue>{@com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.ColumnMaskReferenceInfo.class, name = "columnMask"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.MaterializedViewReferenceInfo.class, name = "materializedView"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.RowFilterReferenceInfo.class, name = "rowFilter"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.eventlistener.ViewReferenceInfo.class, name = "view")}</newValue>
-                                    <justification>cleanup</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.annotation.attributeValueChanged</code>
-                                    <old>interface io.trino.spi.predicate.ValueSet</old>
-                                    <new>interface io.trino.spi.predicate.ValueSet</new>
-                                    <annotationType>com.fasterxml.jackson.annotation.JsonSubTypes</annotationType>
-                                    <attribute>value</attribute>
-                                    <oldValue>{@com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.predicate.EquatableValueSet.class, name = "equatable"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.predicate.SortedRangeSet.class, name = "sortable"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.predicate.AllOrNoneValueSet.class, name = "allOrNone")}</oldValue>
-                                    <newValue>{@com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.predicate.AllOrNoneValueSet.class, name = "allOrNone"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.predicate.EquatableValueSet.class, name = "equatable"), @com.fasterxml.jackson.annotation.JsonSubTypes.Type(value = io.trino.spi.predicate.SortedRangeSet.class, name = "sortable")}</newValue>
-                                    <justification>cleanup</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.removed</code>
-                                    <old>interface io.trino.spi.exchange.ExchangeManagerHandleResolver</old>
-                                    <justification>cleanup</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method io.trino.spi.type.TypeSignature io.trino.spi.type.TypeNotFoundException::getType()</old>
-                                    <justification>remove unused method to expand constructor parameters</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method void io.trino.spi.eventlistener.QueryMetadata::&lt;init&gt;(java.lang.String, java.util.Optional&lt;java.lang.String&gt;, java.lang.String, java.util.Optional&lt;java.lang.String&gt;, java.util.Optional&lt;java.lang.String&gt;, java.lang.String, java.util.List&lt;io.trino.spi.eventlistener.TableInfo&gt;, java.util.List&lt;io.trino.spi.eventlistener.RoutineInfo&gt;, java.net.URI, java.util.Optional&lt;java.lang.String&gt;, java.util.Optional&lt;java.lang.String&gt;, java.util.function.Supplier&lt;java.util.Optional&lt;java.lang.String&gt;&gt;)</old>
-                                    <new>method void io.trino.spi.eventlistener.QueryMetadata::&lt;init&gt;(java.lang.String, java.util.Optional&lt;java.lang.String&gt;, java.util.Optional&lt;java.lang.String&gt;, java.lang.String, java.util.Optional&lt;java.lang.String&gt;, java.util.Optional&lt;java.lang.String&gt;, java.lang.String, java.util.List&lt;io.trino.spi.eventlistener.TableInfo&gt;, java.util.List&lt;io.trino.spi.eventlistener.RoutineInfo&gt;, java.net.URI, java.util.Optional&lt;java.lang.String&gt;, java.util.Optional&lt;java.lang.String&gt;, java.util.function.Supplier&lt;java.util.Optional&lt;java.lang.String&gt;&gt;)</new>
-                                    <justification>introduction of spooled protocol</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.externalClassExposedInAPI</code>
-                                    <new>interface io.opentelemetry.api.common.KeyValue</new>
-                                    <justification>New OpenTelemetry version</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.externalClassExposedInAPI</code>
-                                    <new>interface io.opentelemetry.api.common.Value&lt;T&gt;</new>
-                                    <justification>New OpenTelemetry version</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.class.externalClassExposedInAPI</code>
-                                    <new>enum io.opentelemetry.api.common.ValueType</new>
-                                    <justification>New OpenTelemetry version</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method java.time.Instant io.trino.spi.protocol.SpooledSegmentHandle::expirationTime()</new>
-                                    <justification>Spooling SPI simplification</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.removed</code>
-                                    <old>method java.util.Optional&lt;io.trino.spi.protocol.SpooledLocation.DirectLocation&gt; io.trino.spi.protocol.SpoolingManager::directLocation(io.trino.spi.protocol.SpooledSegmentHandle)</old>
-                                    <justification>Spooling SPI simplification</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method io.trino.spi.protocol.SpooledLocation io.trino.spi.protocol.SpoolingManager::location(io.trino.spi.protocol.SpooledSegmentHandle)</old>
-                                    <new>method io.trino.spi.protocol.SpooledLocation io.trino.spi.protocol.SpoolingManager::location(io.trino.spi.protocol.SpooledSegmentHandle, boolean)</new>
-                                    <justification>Spooling SPI simplification</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.exception.checkedAdded</code>
-                                    <old>method java.util.Optional&lt;io.trino.spi.protocol.SpooledLocation.DirectLocation&gt; io.trino.spi.protocol.SpoolingManager::directLocation(io.trino.spi.protocol.SpooledSegmentHandle)</old>
-                                    <new>method java.util.Optional&lt;io.trino.spi.protocol.SpooledLocation.DirectLocation&gt; io.trino.spi.protocol.SpoolingManager::directLocation(io.trino.spi.protocol.SpooledSegmentHandle) throws java.io.IOException</new>
-                                    <exception>java.io.IOException</exception>
-                                    <justification>For consistency with other TrinoFileSystem methods</justification>
-                                </item>
-                                <item>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method java.lang.String io.trino.spi.protocol.SpooledSegmentHandle::encodingId()</new>
-                                    <justification>Spooling tracing</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method java.lang.String io.trino.spi.protocol.SpooledSegmentHandle::identifier()</new>
-                                    <justification>Spooling tracing</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method io.trino.spi.QueryId io.trino.spi.protocol.SpooledSegmentHandle::queryId()</new>
-                                    <justification>ADD YOUR EXPLANATION FOR THE NECESSITY OF THIS CHANGE</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.numberOfParametersChanged</code>
-                                    <old>method void io.trino.spi.protocol.SpoolingContext::&lt;init&gt;(io.trino.spi.QueryId, long)</old>
-                                    <new>method void io.trino.spi.protocol.SpoolingContext::&lt;init&gt;(java.lang.String, io.trino.spi.QueryId, long, long)</new>
-                                    <justification>Spooling tracing</justification>
-                                </item>
-                                <item>
-                                    <ignore>true</ignore>
-                                    <code>java.method.addedToInterface</code>
-                                    <new>method java.lang.String io.trino.spi.protocol.SpooledSegmentHandle::encoding()</new>
-                                    <justification>Spooling encodingId renamed to encoding across the whole codebase</justification>
+                                    <code>java.method.returnTypeChanged</code>
+                                    <old>method void io.trino.spi.connector.ConnectorMetadata::finishMerge(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorMergeTableHandle, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.Collection&lt;io.trino.spi.statistics.ComputedStatistics&gt;)</old>
+                                    <new>method java.util.Optional&lt;io.trino.spi.connector.ConnectorOutputMetadata&gt; io.trino.spi.connector.ConnectorMetadata::finishMerge(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.ConnectorMergeTableHandle, java.util.List&lt;io.trino.spi.connector.ConnectorTableHandle&gt;, java.util.Collection&lt;io.airlift.slice.Slice&gt;, java.util.Collection&lt;io.trino.spi.statistics.ComputedStatistics&gt;)</new>
                                 </item>
                             </differences>
                         </revapi.differences>
@@ -691,7 +682,7 @@
                     <dependency>
                         <groupId>org.revapi</groupId>
                         <artifactId>revapi-java</artifactId>
-                        <version>0.28.1</version>
+                        <version>0.28.4</version>
                     </dependency>
                 </dependencies>
                 <executions>
@@ -701,6 +692,17 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.basepom.maven</groupId>
+                <artifactId>duplicate-finder-maven-plugin</artifactId>
+                <configuration>
+                    <ignoredResourcePatterns combine.children="append">
+                        <!-- ignore the Iceberg build metadata file -->
+                        <ignoredResourcePattern>^iceberg-build\.properties$</ignoredResourcePattern>
+                    </ignoredResourcePatterns>
+                </configuration>
             </plugin>
         </plugins>
     </build>

@@ -29,7 +29,9 @@ import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.operator.OperationTimer.OperationTiming;
+import io.trino.operator.ResourceUsageTimeSeriesRecorder.ResourceUsageTimeSeriesSnapshot;
 import io.trino.plugin.base.metrics.TDigestHistogram;
+import io.trino.plugin.base.util.UncheckedCloser;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.metrics.Metrics;
@@ -64,6 +66,7 @@ public class OperatorContext
 {
     private final int operatorId;
     private final PlanNodeId planNodeId;
+    private final Optional<PlanNodeId> sourceId;
     private final String operatorType;
     private final DriverContext driverContext;
     private final Executor executor;
@@ -75,11 +78,12 @@ public class OperatorContext
     private final CounterStat internalNetworkInputDataSize = new CounterStat();
     private final CounterStat internalNetworkPositions = new CounterStat();
 
-    private final OperationTiming addInputTiming = new OperationTiming();
+    private final ResourceUsageTimeSeriesRecorder cpuTimeSeriesRecorder = new ResourceUsageTimeSeriesRecorder();
+    private final OperationTiming addInputTiming = new OperationTiming(cpuTimeSeriesRecorder);
     private final CounterStat inputDataSize = new CounterStat();
     private final CounterStat inputPositions = new CounterStat();
 
-    private final OperationTiming getOutputTiming = new OperationTiming();
+    private final OperationTiming getOutputTiming = new OperationTiming(cpuTimeSeriesRecorder);
     private final CounterStat outputDataSize = new CounterStat();
     private final CounterStat outputPositions = new CounterStat();
 
@@ -96,14 +100,13 @@ public class OperatorContext
     private final AtomicReference<ListenableFuture<Void>> finishedFuture = new AtomicReference<>();
     private final AtomicLong blockedWallNanos = new AtomicLong();
 
-    private final OperationTiming finishTiming = new OperationTiming();
+    private final OperationTiming finishTiming = new OperationTiming(cpuTimeSeriesRecorder);
 
     private final OperatorSpillContext spillContext;
     private final AtomicReference<Supplier<? extends OperatorInfo>> infoSupplier = new AtomicReference<>();
 
     private final AtomicLong peakUserMemoryReservation = new AtomicLong();
     private final AtomicLong peakRevocableMemoryReservation = new AtomicLong();
-    private final AtomicLong peakTotalMemoryReservation = new AtomicLong();
 
     @GuardedBy("this")
     private boolean memoryRevokingRequested;
@@ -113,10 +116,15 @@ public class OperatorContext
     private Runnable memoryRevocationRequestListener;
 
     private final MemoryTrackingContext operatorMemoryContext;
+    private final AggregatedMemoryContext aggregateUserMemoryContext;
+    private final AggregatedMemoryContext aggregateRevocableMemoryContext;
+    private final LocalMemoryContext localUserMemoryContext;
+    private final LocalMemoryContext localRevocableMemoryContext;
 
     public OperatorContext(
             int operatorId,
             PlanNodeId planNodeId,
+            Optional<PlanNodeId> sourceId,
             String operatorType,
             DriverContext driverContext,
             Executor executor,
@@ -125,6 +133,7 @@ public class OperatorContext
         checkArgument(operatorId >= 0, "operatorId is negative");
         this.operatorId = operatorId;
         this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
+        this.sourceId = requireNonNull(sourceId, "sourceId is null");
         this.operatorType = requireNonNull(operatorType, "operatorType is null");
         this.driverContext = requireNonNull(driverContext, "driverContext is null");
         this.spillContext = new OperatorSpillContext(this.driverContext);
@@ -134,7 +143,10 @@ public class OperatorContext
         this.revocableMemoryFuture = new AtomicReference<>(SettableFuture.create());
         this.revocableMemoryFuture.get().set(null);
         this.operatorMemoryContext = requireNonNull(operatorMemoryContext, "operatorMemoryContext is null");
-        operatorMemoryContext.initializeLocalMemoryContexts(operatorType);
+        this.aggregateUserMemoryContext = new InternalAggregatedMemoryContext(operatorMemoryContext.aggregateUserMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, false);
+        this.aggregateRevocableMemoryContext = new InternalAggregatedMemoryContext(operatorMemoryContext.aggregateRevocableMemoryContext(), revocableMemoryFuture, this::updatePeakMemoryReservations, false);
+        this.localUserMemoryContext = new InternalLocalMemoryContext(operatorMemoryContext.aggregateUserMemoryContext().newLocalMemoryContext(operatorType), memoryFuture, this::updatePeakMemoryReservations, false);
+        this.localRevocableMemoryContext = new InternalLocalMemoryContext(operatorMemoryContext.aggregateRevocableMemoryContext().newLocalMemoryContext(operatorType), revocableMemoryFuture, this::updatePeakMemoryReservations, false);
     }
 
     public int getOperatorId()
@@ -299,43 +311,37 @@ public class OperatorContext
     // caller should close this context as it's a new context
     public LocalMemoryContext newLocalUserMemoryContext(String allocationTag)
     {
-        return new InternalLocalMemoryContext(operatorMemoryContext.newUserMemoryContext(allocationTag), memoryFuture, this::updatePeakMemoryReservations, true);
+        return aggregateUserMemoryContext.newLocalMemoryContext(allocationTag);
     }
 
     // caller shouldn't close this context as it's managed by the OperatorContext
     public LocalMemoryContext localUserMemoryContext()
     {
-        return new InternalLocalMemoryContext(operatorMemoryContext.localUserMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, false);
+        return localUserMemoryContext;
     }
 
     // caller shouldn't close this context as it's managed by the OperatorContext
     public LocalMemoryContext localRevocableMemoryContext()
     {
-        return new InternalLocalMemoryContext(operatorMemoryContext.localRevocableMemoryContext(), revocableMemoryFuture, this::updatePeakMemoryReservations, false);
+        return localRevocableMemoryContext;
     }
 
     // caller shouldn't close this context as it's managed by the OperatorContext
     public AggregatedMemoryContext aggregateUserMemoryContext()
     {
-        return new InternalAggregatedMemoryContext(operatorMemoryContext.aggregateUserMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, false);
+        return aggregateUserMemoryContext;
     }
 
     // caller shouldn't close this context as it's managed by the OperatorContext
     public AggregatedMemoryContext aggregateRevocableMemoryContext()
     {
-        return new InternalAggregatedMemoryContext(operatorMemoryContext.aggregateRevocableMemoryContext(), revocableMemoryFuture, this::updatePeakMemoryReservations, false);
+        return aggregateRevocableMemoryContext;
     }
 
     // caller should close this context as it's a new context
     public AggregatedMemoryContext newAggregateUserMemoryContext()
     {
-        return new InternalAggregatedMemoryContext(operatorMemoryContext.newAggregateUserMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, true);
-    }
-
-    // caller should close this context as it's a new context
-    public AggregatedMemoryContext newAggregateRevocableMemoryContext()
-    {
-        return new InternalAggregatedMemoryContext(operatorMemoryContext.newAggregateRevocableMemoryContext(), revocableMemoryFuture, this::updatePeakMemoryReservations, true);
+        return aggregateUserMemoryContext.newAggregatedMemoryContext();
     }
 
     // listen to all memory allocations and update the peak memory reservations accordingly
@@ -343,13 +349,12 @@ public class OperatorContext
     {
         long userMemory = operatorMemoryContext.getUserMemory();
         long revocableMemory = operatorMemoryContext.getRevocableMemory();
-        // TODO on cluster level, "total memory" means "user memory + revocable", and used to include the system memory.
-        //   Here, the total memory used to be user+system, and sans revocable. This apparent inconsistency should be removed.
-        //   Perhaps, we don't need to track "total memory" here.
-        long totalMemory = userMemory;
-        peakUserMemoryReservation.accumulateAndGet(userMemory, Math::max);
-        peakRevocableMemoryReservation.accumulateAndGet(revocableMemory, Math::max);
-        peakTotalMemoryReservation.accumulateAndGet(totalMemory, Math::max);
+        if (userMemory > peakUserMemoryReservation.get()) {
+            peakUserMemoryReservation.accumulateAndGet(userMemory, Math::max);
+        }
+        if (revocableMemory > peakRevocableMemoryReservation.get()) {
+            peakRevocableMemoryReservation.accumulateAndGet(revocableMemory, Math::max);
+        }
     }
 
     public long getReservedRevocableBytes()
@@ -391,7 +396,10 @@ public class OperatorContext
             this.infoSupplier.set(info == null ? null : Suppliers.ofInstance(info));
         }
 
-        operatorMemoryContext.close();
+        try (var closer = UncheckedCloser.create()) {
+            closer.register(operatorMemoryContext.aggregateUserMemoryContext()::close);
+            closer.register(operatorMemoryContext.aggregateRevocableMemoryContext()::close);
+        }
 
         if (operatorMemoryContext.getUserMemory() != 0) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Operator %s has non-zero user memory (%d bytes) after destroy()", this, operatorMemoryContext.getUserMemory()));
@@ -506,15 +514,6 @@ public class OperatorContext
         return format("%s-%s", operatorType, planNodeId);
     }
 
-    public static Metrics getOperatorMetrics(Metrics operatorMetrics, long inputPositions, double cpuTimeSeconds, double wallTimeSeconds, double blockedWallSeconds)
-    {
-        return operatorMetrics.mergeWith(new Metrics(ImmutableMap.of(
-                "Input rows distribution", TDigestHistogram.fromValue(inputPositions),
-                "CPU time distribution (s)", TDigestHistogram.fromValue(cpuTimeSeconds),
-                "Scheduled time distribution (s)", TDigestHistogram.fromValue(wallTimeSeconds),
-                "Blocked time distribution (s)", TDigestHistogram.fromValue(blockedWallSeconds))));
-    }
-
     public <C, R> R accept(QueryContextVisitor<C, R> visitor, C context)
     {
         return visitor.visitOperatorContext(this, context);
@@ -528,10 +527,11 @@ public class OperatorContext
         long inputPositionsCount = inputPositions.getTotalCount();
 
         return new OperatorStats(
-                driverContext.getTaskId().getStageId().getId(),
+                driverContext.getTaskId().stageId().id(),
                 driverContext.getPipelineContext().getPipelineId(),
                 operatorId,
                 planNodeId,
+                sourceId,
                 operatorType,
 
                 1,
@@ -544,7 +544,6 @@ public class OperatorContext
                 new Duration(physicalInputReadTimeNanos.get(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 DataSize.ofBytes(internalNetworkInputDataSize.getTotalCount()),
                 internalNetworkPositions.getTotalCount(),
-                DataSize.ofBytes(physicalInputDataSize.getTotalCount() + internalNetworkInputDataSize.getTotalCount()),
                 DataSize.ofBytes(inputDataSize.getTotalCount()),
                 inputPositionsCount,
                 (double) inputPositionsCount * inputPositionsCount,
@@ -557,11 +556,11 @@ public class OperatorContext
 
                 dynamicFilterSplitsProcessed.get(),
                 getOperatorMetrics(
-                        metrics.get(),
                         inputPositionsCount,
                         new Duration(addInputTiming.getCpuNanos() + getOutputTiming.getCpuNanos() + finishTiming.getCpuNanos(), NANOSECONDS).convertTo(SECONDS).getValue(),
                         new Duration(addInputTiming.getWallNanos() + getOutputTiming.getWallNanos() + finishTiming.getWallNanos(), NANOSECONDS).convertTo(SECONDS).getValue(),
-                        new Duration(blockedWallNanos.get(), NANOSECONDS).convertTo(SECONDS).getValue()),
+                        new Duration(blockedWallNanos.get(), NANOSECONDS).convertTo(SECONDS).getValue(),
+                        cpuTimeSeriesRecorder.snapshot()),
                 connectorMetrics.get(),
                 Metrics.EMPTY, // will be filled in when aggregating at pipeline level
 
@@ -578,12 +577,26 @@ public class OperatorContext
 
                 DataSize.ofBytes(peakUserMemoryReservation.get()),
                 DataSize.ofBytes(peakRevocableMemoryReservation.get()),
-                DataSize.ofBytes(peakTotalMemoryReservation.get()),
 
                 DataSize.ofBytes(spillContext.getSpilledBytes()),
 
                 memoryFuture.get().isDone() ? Optional.empty() : Optional.of(WAITING_FOR_MEMORY),
                 info);
+    }
+
+    private Metrics getOperatorMetrics(
+            long inputPositions,
+            double cpuTimeSeconds,
+            double wallTimeSeconds,
+            double blockedWallSeconds,
+            ResourceUsageTimeSeriesSnapshot resourceUsageTimeSeries)
+    {
+        return metrics.get().mergeWith(new Metrics(ImmutableMap.of(
+                "Input rows distribution", TDigestHistogram.fromValue(inputPositions),
+                "CPU time distribution (s)", TDigestHistogram.fromValue(cpuTimeSeconds),
+                "Scheduled time distribution (s)", TDigestHistogram.fromValue(wallTimeSeconds),
+                "Blocked time distribution (s)", TDigestHistogram.fromValue(blockedWallSeconds),
+                "CPU and scheduled time usage over time", resourceUsageTimeSeries)));
     }
 
     private static long nanosBetween(long start, long end)
@@ -619,7 +632,6 @@ public class OperatorContext
             implements SpillContext
     {
         private final DriverContext driverContext;
-        private final AtomicLong reservedBytes = new AtomicLong();
         private final AtomicLong spilledBytes = new AtomicLong();
 
         public OperatorSpillContext(DriverContext driverContext)
@@ -631,12 +643,10 @@ public class OperatorContext
         public void updateBytes(long bytes)
         {
             if (bytes >= 0) {
-                reservedBytes.addAndGet(bytes);
                 driverContext.reserveSpill(bytes);
                 spilledBytes.addAndGet(bytes);
             }
             else {
-                reservedBytes.accumulateAndGet(-bytes, this::decrementSpilledReservation);
                 driverContext.freeSpill(-bytes);
             }
         }
@@ -644,13 +654,6 @@ public class OperatorContext
         public long getSpilledBytes()
         {
             return spilledBytes.longValue();
-        }
-
-        private long decrementSpilledReservation(long reservedBytes, long bytesBeingFreed)
-        {
-            checkArgument(bytesBeingFreed >= 0);
-            checkArgument(bytesBeingFreed <= reservedBytes, "tried to free %s spilled bytes from %s bytes reserved", bytesBeingFreed, reservedBytes);
-            return reservedBytes - bytesBeingFreed;
         }
 
         @Override
@@ -664,7 +667,7 @@ public class OperatorContext
         public String toString()
         {
             return toStringHelper(this)
-                    .add("usedBytes", reservedBytes.get())
+                    .add("spilledBytes", spilledBytes.get())
                     .toString();
         }
     }
@@ -699,6 +702,18 @@ public class OperatorContext
             }
 
             ListenableFuture<Void> blocked = delegate.setBytes(bytes);
+            updateMemoryFuture(blocked, memoryFuture);
+            allocationListener.run();
+            return blocked;
+        }
+
+        @Override
+        public ListenableFuture<Void> addBytes(long delta)
+        {
+            if (delta == 0) {
+                return NOT_BLOCKED;
+            }
+            ListenableFuture<Void> blocked = delegate.addBytes(delta);
             updateMemoryFuture(blocked, memoryFuture);
             allocationListener.run();
             return blocked;

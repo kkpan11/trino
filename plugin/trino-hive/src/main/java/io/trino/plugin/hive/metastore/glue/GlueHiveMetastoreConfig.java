@@ -20,6 +20,7 @@ import io.airlift.configuration.DefunctConfig;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 
+import java.net.URI;
 import java.util.Optional;
 
 @DefunctConfig({
@@ -33,9 +34,9 @@ import java.util.Optional;
 public class GlueHiveMetastoreConfig
 {
     private Optional<String> glueRegion = Optional.empty();
-    private Optional<String> glueEndpointUrl = Optional.empty();
+    private Optional<URI> glueEndpointUrl = Optional.empty();
     private Optional<String> glueStsRegion = Optional.empty();
-    private Optional<String> glueStsEndpointUrl = Optional.empty();
+    private Optional<URI> glueStsEndpointUrl = Optional.empty();
     private boolean pinGlueClientToCurrentRegion;
     private int maxGlueErrorRetries = 10;
     private int maxGlueConnections = 30;
@@ -49,6 +50,7 @@ public class GlueHiveMetastoreConfig
     private int partitionSegments = 5;
     private int threads = 40;
     private boolean assumeCanonicalPartitionKeys;
+    private boolean skipArchive;
 
     public Optional<String> getGlueRegion()
     {
@@ -63,14 +65,14 @@ public class GlueHiveMetastoreConfig
         return this;
     }
 
-    public Optional<String> getGlueEndpointUrl()
+    public Optional<URI> getGlueEndpointUrl()
     {
         return glueEndpointUrl;
     }
 
     @Config("hive.metastore.glue.endpoint-url")
     @ConfigDescription("Glue API endpoint URL")
-    public GlueHiveMetastoreConfig setGlueEndpointUrl(String glueEndpointUrl)
+    public GlueHiveMetastoreConfig setGlueEndpointUrl(URI glueEndpointUrl)
     {
         this.glueEndpointUrl = Optional.ofNullable(glueEndpointUrl);
         return this;
@@ -89,14 +91,14 @@ public class GlueHiveMetastoreConfig
         return this;
     }
 
-    public Optional<String> getGlueStsEndpointUrl()
+    public Optional<URI> getGlueStsEndpointUrl()
     {
         return glueStsEndpointUrl;
     }
 
     @Config("hive.metastore.glue.sts.endpoint")
     @ConfigDescription("AWS STS endpoint for Glue authentication")
-    public GlueHiveMetastoreConfig setGlueStsEndpointUrl(String glueStsEndpointUrl)
+    public GlueHiveMetastoreConfig setGlueStsEndpointUrl(URI glueStsEndpointUrl)
     {
         this.glueStsEndpointUrl = Optional.ofNullable(glueStsEndpointUrl);
         return this;
@@ -271,10 +273,23 @@ public class GlueHiveMetastoreConfig
     }
 
     @Config("hive.metastore.glue.assume-canonical-partition-keys")
-    @ConfigDescription("Allow conversion of non-char types (eg BIGINT, timestamp) to canonical string formats")
+    @ConfigDescription("Allow conversion of non-char types (eg BIGINT, date) to canonical string formats")
     public GlueHiveMetastoreConfig setAssumeCanonicalPartitionKeys(boolean assumeCanonicalPartitionKeys)
     {
         this.assumeCanonicalPartitionKeys = assumeCanonicalPartitionKeys;
+        return this;
+    }
+
+    public boolean isSkipArchive()
+    {
+        return skipArchive;
+    }
+
+    @Config("hive.metastore.glue.skip-archive")
+    @ConfigDescription("Skip archiving an old table version when updating a table in the Glue metastore")
+    public GlueHiveMetastoreConfig setSkipArchive(boolean skipArchive)
+    {
+        this.skipArchive = skipArchive;
         return this;
     }
 }

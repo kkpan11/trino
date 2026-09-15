@@ -19,14 +19,19 @@ import com.google.common.net.HostAndPort;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
+import io.airlift.configuration.DefunctConfig;
+import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.airlift.units.MaxDataSize;
 import io.airlift.units.MinDataSize;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import software.amazon.awssdk.retries.api.RetryStrategy;
 import software.amazon.awssdk.services.s3.model.ObjectCannedACL;
+import software.amazon.awssdk.services.s3.model.StorageClass;
 
 import java.util.Optional;
 import java.util.Set;
@@ -37,11 +42,56 @@ import static software.amazon.awssdk.awscore.retry.AwsRetryStrategy.adaptiveRetr
 import static software.amazon.awssdk.awscore.retry.AwsRetryStrategy.legacyRetryStrategy;
 import static software.amazon.awssdk.awscore.retry.AwsRetryStrategy.standardRetryStrategy;
 
+@DefunctConfig({
+        "s3.exclusive-create",
+        "s3.use-web-identity-token-credentials-provider",
+})
 public class S3FileSystemConfig
 {
     public enum S3SseType
     {
-        NONE, S3, KMS
+        NONE, S3, KMS, CUSTOMER
+    }
+
+    public enum StorageClassType
+    {
+        STANDARD,
+        STANDARD_IA,
+        INTELLIGENT_TIERING,
+        REDUCED_REDUNDANCY,
+        ONEZONE_IA,
+        GLACIER,
+        DEEP_ARCHIVE,
+        OUTPOSTS,
+        GLACIER_IR,
+        SNOW,
+        EXPRESS_ONEZONE;
+
+        public static StorageClass toStorageClass(StorageClassType storageClass)
+        {
+            return switch (storageClass) {
+                case STANDARD -> StorageClass.STANDARD;
+                case STANDARD_IA -> StorageClass.STANDARD_IA;
+                case INTELLIGENT_TIERING -> StorageClass.INTELLIGENT_TIERING;
+                case REDUCED_REDUNDANCY -> StorageClass.REDUCED_REDUNDANCY;
+                case ONEZONE_IA -> StorageClass.ONEZONE_IA;
+                case GLACIER -> StorageClass.GLACIER;
+                case DEEP_ARCHIVE -> StorageClass.DEEP_ARCHIVE;
+                case OUTPOSTS -> StorageClass.OUTPOSTS;
+                case GLACIER_IR -> StorageClass.GLACIER_IR;
+                case SNOW -> StorageClass.SNOW;
+                case EXPRESS_ONEZONE -> StorageClass.EXPRESS_ONEZONE;
+            };
+        }
+    }
+
+    public enum SignerType
+    {
+        AwsS3V4Signer,
+        Aws4Signer,
+        AsyncAws4Signer,
+        Aws4UnsignedPayloadSigner,
+        EventStreamAws4Signer,
     }
 
     public enum ObjectCannedAcl
@@ -54,7 +104,7 @@ public class S3FileSystemConfig
         BUCKET_OWNER_READ,
         BUCKET_OWNER_FULL_CONTROL;
 
-        public static ObjectCannedACL getCannedAcl(S3FileSystemConfig.ObjectCannedAcl cannedAcl)
+        public static ObjectCannedACL getCannedAcl(ObjectCannedAcl cannedAcl)
         {
             return switch (cannedAcl) {
                 case NONE -> null;
@@ -66,6 +116,14 @@ public class S3FileSystemConfig
                 case BUCKET_OWNER_FULL_CONTROL -> ObjectCannedACL.BUCKET_OWNER_FULL_CONTROL;
             };
         }
+    }
+
+    public enum S3AuthType
+    {
+        DEFAULT,
+        IAM_ROLE,
+        WEB_IDENTITY,
+        ANONYMOUS,
     }
 
     public enum RetryMode
@@ -89,6 +147,8 @@ public class S3FileSystemConfig
     private String endpoint;
     private String region;
     private boolean pathStyleAccess;
+    private boolean expectContinueEnabled = true;
+    private StorageClassType storageClass = StorageClassType.STANDARD;
     private String iamRole;
     private String roleSessionName = "trino-filesystem";
     private String externalId;
@@ -96,14 +156,16 @@ public class S3FileSystemConfig
     private String stsRegion;
     private S3SseType sseType = S3SseType.NONE;
     private String sseKmsKeyId;
-    private boolean useWebIdentityTokenCredentialsProvider;
-    private DataSize streamingPartSize = DataSize.of(16, MEGABYTE);
+    private String sseCustomerKey;
+    private S3AuthType authType = S3AuthType.DEFAULT;
+    private SignerType signerType;
+    private DataSize streamingPartSize = DataSize.of(32, MEGABYTE);
     private boolean requesterPays;
     private Integer maxConnections = 500;
     private Duration connectionTtl;
     private Duration connectionMaxIdleTime;
     private Duration socketConnectTimeout;
-    private Duration socketReadTimeout;
+    private Duration socketTimeout;
     private boolean tcpKeepAlive;
     private HostAndPort httpProxy;
     private boolean httpProxySecure;
@@ -113,8 +175,9 @@ public class S3FileSystemConfig
     private Set<String> nonProxyHosts = ImmutableSet.of();
     private ObjectCannedAcl objectCannedAcl = ObjectCannedAcl.NONE;
     private RetryMode retryMode = RetryMode.LEGACY;
-    private int maxErrorRetries = 10;
-    private boolean supportsExclusiveCreate = true;
+    private int maxErrorRetries = 20;
+    private boolean crossRegionAccessEnabled;
+    private String applicationId = "Trino";
 
     public String getAwsAccessKey()
     {
@@ -175,6 +238,32 @@ public class S3FileSystemConfig
     public S3FileSystemConfig setPathStyleAccess(boolean pathStyleAccess)
     {
         this.pathStyleAccess = pathStyleAccess;
+        return this;
+    }
+
+    public boolean isExpectContinueEnabled()
+    {
+        return expectContinueEnabled;
+    }
+
+    @Config("s3.expect-continue-enabled")
+    @ConfigDescription("Enable HTTP expect-continue handshake for S3 PUT requests; disable for S3-compatible gateways that reject it")
+    public S3FileSystemConfig setExpectContinueEnabled(boolean expectContinueEnabled)
+    {
+        this.expectContinueEnabled = expectContinueEnabled;
+        return this;
+    }
+
+    public StorageClassType getStorageClass()
+    {
+        return storageClass;
+    }
+
+    @Config("s3.storage-class")
+    @ConfigDescription("The S3 storage class to use when writing the data")
+    public S3FileSystemConfig setStorageClass(StorageClassType storageClass)
+    {
+        this.storageClass = storageClass;
         return this;
     }
 
@@ -308,15 +397,72 @@ public class S3FileSystemConfig
         return this;
     }
 
-    public boolean isUseWebIdentityTokenCredentialsProvider()
+    public S3AuthType getAuthType()
     {
-        return useWebIdentityTokenCredentialsProvider;
+        return authType;
     }
 
-    @Config("s3.use-web-identity-token-credentials-provider")
-    public S3FileSystemConfig setUseWebIdentityTokenCredentialsProvider(boolean useWebIdentityTokenCredentialsProvider)
+    @Config("s3.auth-type")
+    @ConfigDescription("Authentication mode for accessing S3")
+    public S3FileSystemConfig setAuthType(S3AuthType authType)
     {
-        this.useWebIdentityTokenCredentialsProvider = useWebIdentityTokenCredentialsProvider;
+        this.authType = authType;
+        return this;
+    }
+
+    public String getSseCustomerKey()
+    {
+        return sseCustomerKey;
+    }
+
+    @Config("s3.sse.customer-key")
+    @ConfigDescription("Customer Key to use for S3 server-side encryption with Customer key (SSE-C)")
+    @ConfigSecuritySensitive
+    public S3FileSystemConfig setSseCustomerKey(String sseCustomerKey)
+    {
+        this.sseCustomerKey = sseCustomerKey;
+        return this;
+    }
+
+    @AssertTrue(message = "s3.sse.customer-key has to be set for server-side encryption with customer-provided key")
+    public boolean isSseWithCustomerKeyConfigValid()
+    {
+        if (sseType == S3SseType.CUSTOMER) {
+            return sseCustomerKey != null;
+        }
+        return true;
+    }
+
+    @AssertTrue(message = "s3.iam-role must be set when, and only when, s3.auth-type=IAM_ROLE")
+    public boolean isIamRolePresenceValid()
+    {
+        return (authType == S3AuthType.IAM_ROLE) == (iamRole != null);
+    }
+
+    @AssertTrue(message = "s3.auth-type=ANONYMOUS and s3.auth-type=WEB_IDENTITY cannot be used with other authentication properties (s3.aws-access-key, s3.aws-secret-key, s3.external-id, s3.sts.endpoint, s3.sts.region)")
+    public boolean isCredentialFreeAuthTypeValid()
+    {
+        // s3.external-id and s3.sts.* remain allowed under DEFAULT for security-mapping roles.
+        if (authType == S3AuthType.ANONYMOUS || authType == S3AuthType.WEB_IDENTITY) {
+            return awsAccessKey == null &&
+                    awsSecretKey == null &&
+                    externalId == null &&
+                    stsEndpoint == null &&
+                    stsRegion == null;
+        }
+        return true;
+    }
+
+    public Optional<SignerType> getSignerType()
+    {
+        return Optional.ofNullable(signerType);
+    }
+
+    @ConfigDescription("AWS signing protocol to use while authenticating S3 requests")
+    @Config("s3.signer-type")
+    public S3FileSystemConfig setSignerType(SignerType signerType)
+    {
+        this.signerType = signerType;
         return this;
     }
 
@@ -400,16 +546,17 @@ public class S3FileSystemConfig
         return this;
     }
 
-    public Optional<Duration> getSocketReadTimeout()
+    public Optional<Duration> getSocketTimeout()
     {
-        return Optional.ofNullable(socketReadTimeout);
+        return Optional.ofNullable(socketTimeout);
     }
 
-    @Config("s3.socket-read-timeout")
-    @ConfigDescription("Maximum time allowed for socket reads before timing out")
-    public S3FileSystemConfig setSocketReadTimeout(Duration socketReadTimeout)
+    @LegacyConfig("s3.socket-read-timeout")
+    @Config("s3.socket-timeout")
+    @ConfigDescription("Maximum time allowed for socket reads/writes before timing out")
+    public S3FileSystemConfig setSocketTimeout(Duration socketTimeout)
     {
-        this.socketReadTimeout = socketReadTimeout;
+        this.socketTimeout = socketTimeout;
         return this;
     }
 
@@ -499,16 +646,31 @@ public class S3FileSystemConfig
         return this;
     }
 
-    public boolean isSupportsExclusiveCreate()
+    public boolean isCrossRegionAccessEnabled()
     {
-        return supportsExclusiveCreate;
+        return crossRegionAccessEnabled;
     }
 
-    @Config("s3.exclusive-create")
-    @ConfigDescription("Whether S3-compatible storage supports exclusive create (true for Minio and AWS S3)")
-    public S3FileSystemConfig setSupportsExclusiveCreate(boolean supportsExclusiveCreate)
+    @Config("s3.cross-region-access")
+    @ConfigDescription("Enable S3 cross region access")
+    public S3FileSystemConfig setCrossRegionAccessEnabled(boolean crossRegionAccessEnabled)
     {
-        this.supportsExclusiveCreate = supportsExclusiveCreate;
+        this.crossRegionAccessEnabled = crossRegionAccessEnabled;
+        return this;
+    }
+
+    @Size(max = 50)
+    @NotNull
+    public String getApplicationId()
+    {
+        return applicationId;
+    }
+
+    @Config("s3.application-id")
+    @ConfigDescription("Suffix that will be added to HTTP User-Agent header to identify the application")
+    public S3FileSystemConfig setApplicationId(String applicationId)
+    {
+        this.applicationId = applicationId;
         return this;
     }
 }

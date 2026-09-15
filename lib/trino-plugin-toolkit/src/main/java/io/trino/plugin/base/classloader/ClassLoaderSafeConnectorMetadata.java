@@ -23,6 +23,7 @@ import io.trino.spi.connector.BeginTableExecuteResult;
 import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorAnalyzeMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
@@ -34,6 +35,7 @@ import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorResolvedIndex;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
@@ -42,10 +44,10 @@ import io.trino.spi.connector.ConnectorTableProperties;
 import io.trino.spi.connector.ConnectorTableSchema;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.ConnectorViewDefinition;
+import io.trino.spi.connector.ConnectorWritableTableHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.JoinApplicationResult;
-import io.trino.spi.connector.JoinCondition;
 import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.LimitApplicationResult;
@@ -78,6 +80,7 @@ import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.LanguageFunction;
 import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.Privilege;
@@ -122,10 +125,10 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public ConnectorTableHandle makeCompatiblePartitioning(ConnectorSession session, ConnectorTableHandle tableHandle, ConnectorPartitioningHandle partitioningHandle)
+    public Optional<ConnectorTableHandle> applyPartitioning(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<ConnectorPartitioningHandle> partitioningHandle, List<ColumnHandle> columns)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.makeCompatiblePartitioning(session, tableHandle, partitioningHandle);
+            return delegate.applyPartitioning(session, tableHandle, partitioningHandle, columns);
         }
     }
 
@@ -154,10 +157,10 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public TableStatisticsMetadata getStatisticsCollectionMetadataForWrite(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    public TableStatisticsMetadata getStatisticsCollectionMetadataForWrite(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean tableReplace)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getStatisticsCollectionMetadataForWrite(session, tableMetadata);
+            return delegate.getStatisticsCollectionMetadataForWrite(session, tableMetadata, tableReplace);
         }
     }
 
@@ -202,14 +205,6 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public Optional<ConnectorTableExecuteHandle> getTableHandleForExecute(ConnectorSession session, ConnectorTableHandle tableHandle, String procedureName, Map<String, Object> executeProperties, RetryMode retryMode)
-    {
-        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getTableHandleForExecute(session, tableHandle, procedureName, executeProperties, retryMode);
-        }
-    }
-
-    @Override
     public Optional<ConnectorTableExecuteHandle> getTableHandleForExecute(ConnectorSession session, ConnectorAccessControl accessControl, ConnectorTableHandle tableHandle, String procedureName, Map<String, Object> executeProperties, RetryMode retryMode)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
@@ -218,10 +213,26 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public void executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
+    public Optional<ConnectorTableExecuteHandle> getTableHandleForMaterializedViewExecute(ConnectorSession session, ConnectorAccessControl accessControl, ConnectorTableHandle tableHandle, String procedureName, Map<String, Object> executeProperties, RetryMode retryMode)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            delegate.executeTableExecute(session, tableExecuteHandle);
+            return delegate.getTableHandleForMaterializedViewExecute(session, accessControl, tableHandle, procedureName, executeProperties, retryMode);
+        }
+    }
+
+    @Override
+    public Map<String, Long> executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.executeTableExecute(session, tableExecuteHandle);
+        }
+    }
+
+    @Override
+    public Set<ColumnHandle> getColumnHandlesForTableExecute(ConnectorSession connectorSession, ConnectorTableHandle tableHandle, ConnectorTableExecuteHandle connectorTableExecuteHandle)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getColumnHandlesForTableExecute(connectorSession, tableHandle, connectorTableExecuteHandle);
         }
     }
 
@@ -242,10 +253,10 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public void finishTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle, Collection<Slice> fragments, List<Object> tableExecuteState)
+    public Map<String, Long> finishTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle, Collection<Slice> fragments, List<Object> tableExecuteState)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            delegate.finishTableExecute(session, tableExecuteHandle, fragments, tableExecuteState);
+            return delegate.finishTableExecute(session, tableExecuteHandle, fragments, tableExecuteState);
         }
     }
 
@@ -282,10 +293,18 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public Optional<Object> getInfo(ConnectorTableHandle table)
+    public Optional<Object> getInfo(ConnectorSession session, ConnectorTableHandle table)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getInfo(table);
+            return delegate.getInfo(session, table);
+        }
+    }
+
+    @Override
+    public Metrics getMetrics(ConnectorSession session)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getMetrics(session);
         }
     }
 
@@ -365,10 +384,10 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column)
+    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
     {
-        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            delegate.addColumn(session, tableHandle, column);
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.addColumn(session, tableHandle, column, position);
         }
     }
 
@@ -377,6 +396,22 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.addField(session, tableHandle, parentPath, fieldName, type, ignoreExisting);
+        }
+    }
+
+    @Override
+    public void setDefaultValue(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, String defaultValue)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.setDefaultValue(session, tableHandle, column, defaultValue);
+        }
+    }
+
+    @Override
+    public void dropDefaultValue(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.dropDefaultValue(session, tableHandle, columnHandle);
         }
     }
 
@@ -629,32 +664,18 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, RefreshType refreshType)
+    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, boolean hasForeignSourceTables, RetryMode retryMode, RefreshType refreshType)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.beginRefreshMaterializedView(session, tableHandle, sourceTableHandles, retryMode, refreshType);
+            return delegate.beginRefreshMaterializedView(session, tableHandle, sourceTableHandles, hasForeignSourceTables, retryMode, refreshType);
         }
     }
 
     @Override
-    public Optional<ConnectorOutputMetadata> finishRefreshMaterializedView(
-            ConnectorSession session,
-            ConnectorTableHandle tableHandle,
-            ConnectorInsertTableHandle insertHandle,
-            Collection<Slice> fragments,
-            Collection<ComputedStatistics> computedStatistics,
-            List<ConnectorTableHandle> sourceTableHandles,
-            List<String> sourceTableFunctions)
+    public Optional<ConnectorOutputMetadata> finishRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics, List<ConnectorTableHandle> sourceTableHandles, boolean hasForeignSourceTables, boolean hasSourceTableFunctions, boolean hasNonDeterministicFunctions)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.finishRefreshMaterializedView(
-                    session,
-                    tableHandle,
-                    insertHandle,
-                    fragments,
-                    computedStatistics,
-                    sourceTableHandles,
-                    sourceTableFunctions);
+            return delegate.finishRefreshMaterializedView(session, tableHandle, insertHandle, fragments, computedStatistics, sourceTableHandles, hasForeignSourceTables, hasSourceTableFunctions, hasNonDeterministicFunctions);
         }
     }
 
@@ -679,6 +700,14 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.setViewAuthorization(session, viewName, principal);
+        }
+    }
+
+    @Override
+    public void refreshView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition viewDefinition)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.refreshView(session, viewName, viewDefinition);
         }
     }
 
@@ -807,7 +836,8 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public AggregationFunctionMetadata getAggregationFunctionMetadata(ConnectorSession session,
+    public AggregationFunctionMetadata getAggregationFunctionMetadata(
+            ConnectorSession session,
             FunctionId functionId)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
@@ -816,8 +846,10 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public FunctionDependencyDeclaration getFunctionDependencies(ConnectorSession session,
-            FunctionId functionId, BoundSignature boundSignature)
+    public FunctionDependencyDeclaration getFunctionDependencies(
+            ConnectorSession session,
+            FunctionId functionId,
+            BoundSignature boundSignature)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.getFunctionDependencies(session, functionId, boundSignature);
@@ -861,6 +893,46 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.dropLanguageFunction(session, name, signatureToken);
+        }
+    }
+
+    @Override
+    public void createBranch(ConnectorSession session, ConnectorTableHandle tableHandle, String branch, Optional<String> fromBranch, SaveMode saveMode, Map<String, Object> properties)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.createBranch(session, tableHandle, branch, fromBranch, saveMode, properties);
+        }
+    }
+
+    @Override
+    public void dropBranch(ConnectorSession session, ConnectorTableHandle tableHandle, String branch)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.dropBranch(session, tableHandle, branch);
+        }
+    }
+
+    @Override
+    public void fastForwardBranch(ConnectorSession session, ConnectorTableHandle tableHandle, String sourceBranch, String targetBranch)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.fastForwardBranch(session, tableHandle, sourceBranch, targetBranch);
+        }
+    }
+
+    @Override
+    public Collection<String> listBranches(ConnectorSession session, SchemaTableName tableName)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.listBranches(session, tableName);
+        }
+    }
+
+    @Override
+    public boolean branchExists(ConnectorSession session, SchemaTableName tableName, String branch)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.branchExists(session, tableName, branch);
         }
     }
 
@@ -993,6 +1065,30 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
+    public void grantTableBranchPrivileges(ConnectorSession session, SchemaTableName tableName, String branchName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.grantTableBranchPrivileges(session, tableName, branchName, privileges, grantee, grantOption);
+        }
+    }
+
+    @Override
+    public void denyTableBranchPrivileges(ConnectorSession session, SchemaTableName tableName, String branchName, Set<Privilege> privileges, TrinoPrincipal grantee)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.denyTableBranchPrivileges(session, tableName, branchName, privileges, grantee);
+        }
+    }
+
+    @Override
+    public void revokeTableBranchPrivileges(ConnectorSession session, SchemaTableName tableName, String branchName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.revokeTableBranchPrivileges(session, tableName, branchName, privileges, grantee, grantOption);
+        }
+    }
+
+    @Override
     public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
@@ -1058,22 +1154,6 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.applyJoin(session, joinType, left, right, joinCondition, leftAssignments, rightAssignments, statistics);
-        }
-    }
-
-    @Override
-    public Optional<JoinApplicationResult<ConnectorTableHandle>> applyJoin(
-            ConnectorSession session,
-            JoinType joinType,
-            ConnectorTableHandle left,
-            ConnectorTableHandle right,
-            List<JoinCondition> joinConditions,
-            Map<String, ColumnHandle> leftAssignments,
-            Map<String, ColumnHandle> rightAssignments,
-            JoinStatistics statistics)
-    {
-        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.applyJoin(session, joinType, left, right, joinConditions, leftAssignments, rightAssignments, statistics);
         }
     }
 
@@ -1161,6 +1241,14 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
+    public MaterializedViewFreshness getMaterializedViewFreshness(ConnectorSession session, SchemaTableName name, boolean considerGracePeriod)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getMaterializedViewFreshness(session, name, considerGracePeriod);
+        }
+    }
+
+    @Override
     public MaterializedViewFreshness getMaterializedViewFreshness(ConnectorSession session, SchemaTableName name)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
@@ -1173,6 +1261,14 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.renameMaterializedView(session, source, target);
+        }
+    }
+
+    @Override
+    public void setMaterializedViewAuthorization(ConnectorSession session, SchemaTableName viewName, TrinoPrincipal principal)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.setMaterializedViewAuthorization(session, viewName, principal);
         }
     }
 
@@ -1207,18 +1303,18 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, RetryMode retryMode)
+    public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, Map<Integer, Collection<ColumnHandle>> updateCaseColumns, RetryMode retryMode)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.beginMerge(session, tableHandle, retryMode);
+            return delegate.beginMerge(session, tableHandle, updateCaseColumns, retryMode);
         }
     }
 
     @Override
-    public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle, List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    public Optional<ConnectorOutputMetadata> finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle, List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            delegate.finishMerge(session, mergeTableHandle, sourceTableHandles, fragments, computedStatistics);
+            return delegate.finishMerge(session, mergeTableHandle, sourceTableHandles, fragments, computedStatistics);
         }
     }
 
@@ -1275,6 +1371,30 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.getInsertWriterScalingOptions(session, tableHandle);
+        }
+    }
+
+    @Override
+    public Optional<ConnectorTableCredentials> getTableCredentials(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getTableCredentials(session, tableHandle);
+        }
+    }
+
+    @Override
+    public Optional<ConnectorTableCredentials> getTableCredentials(ConnectorSession session, ConnectorWritableTableHandle tableHandle)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getTableCredentials(session, tableHandle);
+        }
+    }
+
+    @Override
+    public Optional<ConnectorTableCredentials> getTableCredentials(ConnectorSession session, ConnectorTableFunctionHandle tableFunctionHandle)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getTableCredentials(session, tableFunctionHandle);
         }
     }
 }

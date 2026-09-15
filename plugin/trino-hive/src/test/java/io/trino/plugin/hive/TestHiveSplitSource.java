@@ -18,9 +18,11 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.stats.CounterStat;
 import io.airlift.units.DataSize;
-import io.trino.filesystem.cache.DefaultCachingHostAddressProvider;
+import io.trino.filesystem.cache.NoopSplitAffinityProvider;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
+import io.trino.spi.connector.DynamicFilterSnapshot;
+import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -34,8 +36,9 @@ import java.util.function.BooleanSupplier;
 
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.trino.plugin.hive.DynamicFilterState.completedState;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_EXCEEDED_SPLIT_BUFFERING_LIMIT;
-import static io.trino.plugin.hive.HiveSessionProperties.getMaxInitialSplitSize;
+import static io.trino.plugin.hive.HiveSessionProperties.getMaxSplitSize;
 import static io.trino.plugin.hive.HiveTestUtils.SESSION;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.lang.Math.toIntExact;
@@ -52,14 +55,14 @@ public class TestHiveSplitSource
                 "database",
                 "table",
                 10,
-                10,
                 DataSize.of(1, MEGABYTE),
                 Integer.MAX_VALUE,
                 new TestingHiveSplitLoader(),
                 Executors.newFixedThreadPool(5),
                 new CounterStat(),
-                new DefaultCachingHostAddressProvider(),
-                false);
+                new NoopSplitAffinityProvider(),
+                false,
+                completedState());
 
         // add 10 splits
         for (int i = 0; i < 10; i++) {
@@ -68,15 +71,15 @@ public class TestHiveSplitSource
         }
 
         // remove 1 split
-        assertThat(getSplits(hiveSplitSource, 1).size()).isEqualTo(1);
+        assertThat(getSplits(hiveSplitSource, 1)).hasSize(1);
         assertThat(hiveSplitSource.getBufferedInternalSplitCount()).isEqualTo(9);
 
         // remove 4 splits
-        assertThat(getSplits(hiveSplitSource, 4).size()).isEqualTo(4);
+        assertThat(getSplits(hiveSplitSource, 4)).hasSize(4);
         assertThat(hiveSplitSource.getBufferedInternalSplitCount()).isEqualTo(5);
 
         // try to remove 20 splits, and verify we only got 5
-        assertThat(getSplits(hiveSplitSource, 20).size()).isEqualTo(5);
+        assertThat(getSplits(hiveSplitSource, 20)).hasSize(5);
         assertThat(hiveSplitSource.getBufferedInternalSplitCount()).isEqualTo(0);
     }
 
@@ -88,14 +91,14 @@ public class TestHiveSplitSource
                 "database",
                 "table",
                 10,
-                10,
                 DataSize.of(1, MEGABYTE),
                 Integer.MAX_VALUE,
                 new TestingHiveSplitLoader(),
                 Executors.newFixedThreadPool(5),
                 new CounterStat(),
-                new DefaultCachingHostAddressProvider(),
-                false);
+                new NoopSplitAffinityProvider(),
+                false,
+                completedState());
 
         // add two splits, one of the splits is dynamically pruned
         hiveSplitSource.addToQueue(new TestSplit(0, () -> false));
@@ -103,30 +106,30 @@ public class TestHiveSplitSource
         assertThat(hiveSplitSource.getBufferedInternalSplitCount()).isEqualTo(2);
 
         // try to remove 2 splits, only one should be returned
-        assertThat(getSplits(hiveSplitSource, 2).size()).isEqualTo(1);
+        assertThat(getSplits(hiveSplitSource, 2)).hasSize(1);
         assertThat(hiveSplitSource.getBufferedInternalSplitCount()).isEqualTo(0);
     }
 
     @Test
     public void testEvenlySizedSplitRemainder()
     {
-        DataSize initialSplitSize = getMaxInitialSplitSize(SESSION);
+        DataSize maxSplitSize = getMaxSplitSize(SESSION);
         HiveSplitSource hiveSplitSource = HiveSplitSource.allAtOnce(
                 SESSION,
                 "database",
                 "table",
-                10,
                 10,
                 DataSize.of(1, MEGABYTE),
                 Integer.MAX_VALUE,
                 new TestingHiveSplitLoader(),
                 Executors.newSingleThreadExecutor(),
                 new CounterStat(),
-                new DefaultCachingHostAddressProvider(),
-                false);
+                new NoopSplitAffinityProvider(),
+                false,
+                completedState());
 
-        // One byte larger than the initial split max size
-        DataSize fileSize = DataSize.ofBytes(initialSplitSize.toBytes() + 1);
+        // One byte larger than the max split size
+        DataSize fileSize = DataSize.ofBytes(maxSplitSize.toBytes() + 1);
         long halfOfSize = fileSize.toBytes() / 2;
         hiveSplitSource.addToQueue(new TestSplit(1, OptionalInt.empty(), fileSize));
 
@@ -145,14 +148,14 @@ public class TestHiveSplitSource
                 "database",
                 "table",
                 10,
-                10,
                 DataSize.of(1, MEGABYTE),
                 Integer.MAX_VALUE,
                 new TestingHiveSplitLoader(),
                 Executors.newFixedThreadPool(5),
                 new CounterStat(),
-                new DefaultCachingHostAddressProvider(),
-                false);
+                new NoopSplitAffinityProvider(),
+                false,
+                completedState());
 
         // add some splits
         for (int i = 0; i < 5; i++) {
@@ -161,7 +164,7 @@ public class TestHiveSplitSource
         }
 
         // remove a split and verify
-        assertThat(getSplits(hiveSplitSource, 1).size()).isEqualTo(1);
+        assertThat(getSplits(hiveSplitSource, 1)).hasSize(1);
         assertThat(hiveSplitSource.getBufferedInternalSplitCount()).isEqualTo(4);
 
         // fail source
@@ -197,14 +200,14 @@ public class TestHiveSplitSource
                 "database",
                 "table",
                 10,
-                10,
                 DataSize.of(1, MEGABYTE),
                 Integer.MAX_VALUE,
                 new TestingHiveSplitLoader(),
                 Executors.newFixedThreadPool(5),
                 new CounterStat(),
-                new DefaultCachingHostAddressProvider(),
-                false);
+                new NoopSplitAffinityProvider(),
+                false,
+                completedState());
 
         SettableFuture<ConnectorSplit> splits = SettableFuture.create();
 
@@ -214,7 +217,7 @@ public class TestHiveSplitSource
             try {
                 started.countDown();
                 List<ConnectorSplit> batch = getSplits(hiveSplitSource, 1);
-                assertThat(batch.size()).isEqualTo(1);
+                assertThat(batch).hasSize(1);
                 splits.set(batch.get(0));
             }
             catch (Throwable e) {
@@ -236,7 +239,7 @@ public class TestHiveSplitSource
 
             // wait for thread to get the split
             ConnectorSplit split = splits.get(800, TimeUnit.MILLISECONDS);
-            assertThat(((HiveSplit) split).getSchema()).containsEntry("id", "33");
+            assertThat(((HiveSplit) split).getSchema().serdeProperties()).containsEntry("id", "33");
         }
         finally {
             // make sure the thread exits
@@ -252,15 +255,15 @@ public class TestHiveSplitSource
                 SESSION,
                 "database",
                 "table",
-                10,
                 10000,
                 maxOutstandingSplitsSize,
                 Integer.MAX_VALUE,
                 new TestingHiveSplitLoader(),
                 Executors.newFixedThreadPool(5),
                 new CounterStat(),
-                new DefaultCachingHostAddressProvider(),
-                false);
+                new NoopSplitAffinityProvider(),
+                false,
+                completedState());
         int testSplitSizeInBytes = new TestSplit(0).getEstimatedSizeInBytes();
 
         int maxSplitCount = toIntExact(maxOutstandingSplitsSize.toBytes()) / testSplitSizeInBytes;
@@ -269,7 +272,7 @@ public class TestHiveSplitSource
             assertThat(hiveSplitSource.getBufferedInternalSplitCount()).isEqualTo(i + 1);
         }
 
-        assertThat(getSplits(hiveSplitSource, maxSplitCount).size()).isEqualTo(maxSplitCount);
+        assertThat(getSplits(hiveSplitSource, maxSplitCount)).hasSize(maxSplitCount);
 
         for (int i = 0; i < maxSplitCount; i++) {
             hiveSplitSource.addToQueue(new TestSplit(i));
@@ -282,21 +285,17 @@ public class TestHiveSplitSource
 
     private static List<ConnectorSplit> getSplits(ConnectorSplitSource source, int maxSize)
     {
-        return getFutureValue(source.getNextBatch(maxSize)).getSplits();
+        return getFutureValue(source.getNextBatch(maxSize, new DynamicFilterSnapshot(TupleDomain.all(), true)));
     }
 
     private static class TestingHiveSplitLoader
             implements HiveSplitLoader
     {
         @Override
-        public void start(HiveSplitSource splitSource)
-        {
-        }
+        public void start(HiveSplitSource splitSource) {}
 
         @Override
-        public void stop()
-        {
-        }
+        public void stop() {}
     }
 
     private static class TestSplit
@@ -324,14 +323,13 @@ public class TestHiveSplitSource
 
         private TestSplit(int id, OptionalInt bucketNumber, DataSize fileSize, BooleanSupplier partitionMatchSupplier)
         {
-            super(
-                    "partition-name",
+            super("partition-name",
                     "path",
                     0,
                     fileSize.toBytes(),
                     fileSize.toBytes(),
                     Instant.now().toEpochMilli(),
-                    ImmutableMap.of("id", String.valueOf(id)),
+                    new Schema("abc", false, ImmutableMap.of("id", String.valueOf(id))),
                     ImmutableList.of(),
                     ImmutableList.of(new InternalHiveBlock(0, fileSize.toBytes(), ImmutableList.of())),
                     bucketNumber,

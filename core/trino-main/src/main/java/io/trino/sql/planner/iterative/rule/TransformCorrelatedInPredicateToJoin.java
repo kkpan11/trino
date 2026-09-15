@@ -16,11 +16,12 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.trino.Session;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
 import io.trino.metadata.Metadata;
 import io.trino.sql.ir.Case;
-import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.ComparisonOperator;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.IrUtils;
@@ -51,10 +52,12 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.matching.Pattern.nonEmpty;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.sql.ir.Booleans.FALSE;
+import static io.trino.sql.ir.IrExpressions.comparison;
 import static io.trino.sql.ir.IrExpressions.not;
 import static io.trino.sql.ir.IrUtils.and;
 import static io.trino.sql.ir.IrUtils.or;
@@ -118,10 +121,11 @@ public class TransformCorrelatedInPredicateToJoin
 
         Symbol inPredicateOutputSymbol = getOnlyElement(subqueryAssignments.keySet());
 
-        return apply(apply, inPredicate, inPredicateOutputSymbol, context.getLookup(), context.getIdAllocator(), context.getSymbolAllocator());
+        return apply(context.getSession(), apply, inPredicate, inPredicateOutputSymbol, context.getLookup(), context.getIdAllocator(), context.getSymbolAllocator());
     }
 
     private Result apply(
+            Session session,
             ApplyNode apply,
             ApplyNode.In inPredicate,
             Symbol inPredicateOutputSymbol,
@@ -137,6 +141,7 @@ public class TransformCorrelatedInPredicateToJoin
         }
 
         PlanNode projection = buildInPredicateEquivalent(
+                session,
                 apply,
                 inPredicate,
                 inPredicateOutputSymbol,
@@ -148,6 +153,7 @@ public class TransformCorrelatedInPredicateToJoin
     }
 
     private PlanNode buildInPredicateEquivalent(
+            Session session,
             ApplyNode apply,
             ApplyNode.In inPredicate,
             Symbol inPredicateOutputSymbol,
@@ -178,7 +184,7 @@ public class TransformCorrelatedInPredicateToJoin
         Expression joinExpression = and(
                 or(
                         new IsNull(probeSideSymbol.toSymbolReference()),
-                        new Comparison(Comparison.Operator.EQUAL, probeSideSymbol.toSymbolReference(), buildSideSymbol.toSymbolReference()),
+                        comparison(metadata, getCharVarcharCoercion(session), ComparisonOperator.EQUAL, probeSideSymbol.toSymbolReference(), buildSideSymbol.toSymbolReference()),
                         new IsNull(buildSideSymbol.toSymbolReference())),
                 correlationCondition);
 
@@ -186,13 +192,13 @@ public class TransformCorrelatedInPredicateToJoin
 
         Symbol matchConditionSymbol = symbolAllocator.newSymbol("matchConditionSymbol", BOOLEAN);
         Expression matchCondition = and(
-                isNotNull(probeSideSymbol),
-                isNotNull(buildSideSymbol));
+                isNotNull(session, probeSideSymbol),
+                isNotNull(session, buildSideSymbol));
 
         Symbol nullMatchConditionSymbol = symbolAllocator.newSymbol("nullMatchConditionSymbol", BOOLEAN);
         Expression nullMatchCondition = and(
-                isNotNull(buildSideKnownNonNull),
-                not(metadata, matchCondition));
+                isNotNull(session, buildSideKnownNonNull),
+                not(metadata, getCharVarcharCoercion(session), matchCondition));
 
         ProjectNode preProjection = new ProjectNode(
                 idAllocator.getNextId(),
@@ -210,16 +216,16 @@ public class TransformCorrelatedInPredicateToJoin
                 idAllocator.getNextId(),
                 preProjection,
                 ImmutableMap.<Symbol, AggregationNode.Aggregation>builder()
-                        .put(countMatchesSymbol, countWithFilter(matchConditionSymbol))
-                        .put(countNullMatchesSymbol, countWithFilter(nullMatchConditionSymbol))
+                        .put(countMatchesSymbol, countWithFilter(session, matchConditionSymbol))
+                        .put(countNullMatchesSymbol, countWithFilter(session, nullMatchConditionSymbol))
                         .buildOrThrow(),
                 singleGroupingSet(probeSide.getOutputSymbols()));
 
         // TODO since we care only about "some count > 0", we could have specialized node instead of leftOuterJoin that does the job without materializing join results
         Case inPredicateEquivalent = new Case(
                 ImmutableList.of(
-                        new WhenClause(isGreaterThan(countMatchesSymbol, 0), booleanConstant(true)),
-                        new WhenClause(isGreaterThan(countNullMatchesSymbol, 0), booleanConstant(null))),
+                        new WhenClause(isGreaterThan(metadata, session, countMatchesSymbol, 0), booleanConstant(true)),
+                        new WhenClause(isGreaterThan(metadata, session, countNullMatchesSymbol, 0), booleanConstant(null))),
                 FALSE);
         return new ProjectNode(
                 idAllocator.getNextId(),
@@ -244,16 +250,14 @@ public class TransformCorrelatedInPredicateToJoin
                 Optional.of(joinExpression),
                 Optional.empty(),
                 Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
                 ImmutableMap.of(),
                 Optional.empty());
     }
 
-    private AggregationNode.Aggregation countWithFilter(Symbol filter)
+    private AggregationNode.Aggregation countWithFilter(Session session, Symbol filter)
     {
         return new AggregationNode.Aggregation(
-                metadata.resolveBuiltinFunction("count", ImmutableList.of()),
+                metadata.resolveBuiltinFunction(getCharVarcharCoercion(session), "count", ImmutableList.of()),
                 ImmutableList.of(),
                 false,
                 Optional.of(filter),
@@ -261,17 +265,19 @@ public class TransformCorrelatedInPredicateToJoin
                 Optional.empty()); /* mask */
     }
 
-    private static Expression isGreaterThan(Symbol symbol, long value)
+    private static Expression isGreaterThan(Metadata metadata, Session session, Symbol symbol, long value)
     {
-        return new Comparison(
-                Comparison.Operator.GREATER_THAN,
+        return comparison(
+                metadata,
+                getCharVarcharCoercion(session),
+                ComparisonOperator.GREATER_THAN,
                 symbol.toSymbolReference(),
                 bigint(value));
     }
 
-    private Expression isNotNull(Symbol symbol)
+    private Expression isNotNull(Session session, Symbol symbol)
     {
-        return not(metadata, new IsNull(symbol.toSymbolReference()));
+        return not(metadata, getCharVarcharCoercion(session), new IsNull(symbol.toSymbolReference()));
     }
 
     private static Expression bigint(long value)

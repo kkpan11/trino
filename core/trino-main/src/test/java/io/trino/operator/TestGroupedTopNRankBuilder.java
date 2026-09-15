@@ -42,7 +42,7 @@ public class TestGroupedTopNRankBuilder
     {
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRankBuilder(
                 ImmutableList.of(BIGINT),
-                (left, leftPosition, right, rightPosition) -> {
+                (_, _, _, _) -> {
                     throw new UnsupportedOperationException();
                 },
                 new PageWithPositionEqualsAndHash()
@@ -81,8 +81,8 @@ public class TestGroupedTopNRankBuilder
 
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRankBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(0), ImmutableList.of(ASC_NULLS_LAST), typeOperators),
-                new SimplePageWithPositionEqualsAndHash(types, ImmutableList.of(0), blockTypeOperators),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(0)), ImmutableList.of(0), ImmutableList.of(ASC_NULLS_LAST), typeOperators),
+                new SimplePageWithPositionEqualsAndHash(ImmutableList.of(types.get(0)), ImmutableList.of(0), blockTypeOperators),
                 3,
                 produceRanking,
                 new int[0],
@@ -114,7 +114,7 @@ public class TestGroupedTopNRankBuilder
                         .build()).process()).isTrue();
 
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertThat(output.size()).isEqualTo(1);
+        assertThat(output).hasSize(1);
 
         List<Type> outputTypes = ImmutableList.of(DOUBLE, BIGINT);
         Page expected = rowPageBuilder(outputTypes)
@@ -147,8 +147,8 @@ public class TestGroupedTopNRankBuilder
         GroupByHash groupByHash = createGroupByHash(types.get(0), NOOP, typeOperators);
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRankBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), typeOperators),
-                new SimplePageWithPositionEqualsAndHash(types, ImmutableList.of(1), blockTypeOperators),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), typeOperators),
+                new SimplePageWithPositionEqualsAndHash(ImmutableList.of(types.get(1)), ImmutableList.of(1), blockTypeOperators),
                 3,
                 produceRanking,
                 new int[] {0},
@@ -190,7 +190,7 @@ public class TestGroupedTopNRankBuilder
                         .build()).process()).isTrue();
 
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertThat(output.size()).isEqualTo(1);
+        assertThat(output).hasSize(1);
 
         List<Type> outputTypes = ImmutableList.of(BIGINT, DOUBLE, BIGINT);
         Page expected = rowPageBuilder(outputTypes)
@@ -221,16 +221,15 @@ public class TestGroupedTopNRankBuilder
                 .row(1L, 0.2)
                 .row(1L, 0.9)
                 .row(1L, 0.1)
-                .build()
-                .get(0);
+                .buildPage();
         input.compact();
 
         AtomicBoolean unblock = new AtomicBoolean();
         GroupByHash groupByHash = createGroupByHash(types.get(0), unblock::get, typeOperators);
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRankBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), typeOperators),
-                new SimplePageWithPositionEqualsAndHash(types, ImmutableList.of(1), blockTypeOperators),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), typeOperators),
+                new SimplePageWithPositionEqualsAndHash(ImmutableList.of(types.get(1)), ImmutableList.of(1), blockTypeOperators),
                 5,
                 false,
                 new int[] {0},
@@ -242,26 +241,24 @@ public class TestGroupedTopNRankBuilder
         unblock.set(true);
         assertThat(work.process()).isTrue();
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertThat(output.size()).isEqualTo(1);
 
         Page expected = rowPagesBuilder(types)
                 .row(1L, 0.1)
                 .row(1L, 0.2)
                 .row(1L, 0.3)
                 .row(1L, 0.9)
-                .build()
-                .get(0);
-        assertPageEquals(types, output.get(0), expected);
+                .buildPage();
+        assertPageEquals(types, getOnlyElement(output), expected);
     }
 
     private GroupByHash createGroupByHash(Type partitionType, UpdateMemory updateMemory, TypeOperators typeOperators)
     {
         return GroupByHash.createGroupByHash(
                 ImmutableList.of(partitionType),
-                false,
+                GroupByHash.shouldCacheHashValue(false, ImmutableList.of(partitionType)),
                 1,
                 false,
-                new FlatHashStrategyCompiler(typeOperators),
+                new FlatHashStrategyCompiler(typeOperators, new NullSafeHashCompiler(typeOperators)),
                 updateMemory);
     }
 

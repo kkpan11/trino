@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.iceberg.catalog.nessie;
 
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.filesystem.FileIterator;
@@ -22,11 +23,9 @@ import io.trino.plugin.iceberg.IcebergConfig;
 import io.trino.plugin.iceberg.IcebergQueryRunner;
 import io.trino.plugin.iceberg.SchemaInitializer;
 import io.trino.plugin.iceberg.containers.NessieContainer;
-import io.trino.plugin.iceberg.fileio.ForwardingFileIo;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.tpch.TpchTable;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableMetadataParser;
@@ -43,17 +42,16 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
 
+import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
-import static io.trino.plugin.iceberg.IcebergTestUtils.checkOrcFileSorting;
-import static io.trino.plugin.iceberg.IcebergTestUtils.checkParquetFileSorting;
+import static io.trino.plugin.iceberg.IcebergTestUtils.FILE_IO_FACTORY;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.lang.String.format;
 import static org.apache.iceberg.CatalogProperties.CATALOG_IMPL;
 import static org.apache.iceberg.CatalogProperties.URI;
 import static org.apache.iceberg.CatalogProperties.WAREHOUSE_LOCATION;
 import static org.apache.iceberg.CatalogUtil.buildIcebergCatalog;
-import static org.apache.iceberg.FileFormat.PARQUET;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.abort;
@@ -89,12 +87,14 @@ public class TestIcebergNessieCatalogConnectorSmokeTest
 
         tempDir = Files.createTempDirectory("test_trino_nessie_catalog");
 
-        catalog = (NessieCatalog) buildIcebergCatalog("tpch", ImmutableMap.<String, String>builder()
+        catalog = (NessieCatalog) buildIcebergCatalog(
+                "tpch",
+                ImmutableMap.<String, String>builder()
                         .put(CATALOG_IMPL, NessieCatalog.class.getName())
                         .put(URI, nessieContainer.getRestApiUri())
                         .put(WAREHOUSE_LOCATION, tempDir.toString())
                         .buildOrThrow(),
-                new Configuration(false));
+                null);
 
         return IcebergQueryRunner.builder()
                 .setBaseDataDir(Optional.of(tempDir))
@@ -105,6 +105,7 @@ public class TestIcebergNessieCatalogConnectorSmokeTest
                                 "iceberg.nessie-catalog.uri", nessieContainer.getRestApiUri(),
                                 "iceberg.nessie-catalog.default-warehouse-dir", tempDir.toString(),
                                 "iceberg.writer-sort-buffer-size", "1MB"))
+                .addIcebergProperty("fs.hadoop.enabled", "true")
                 .setSchemaInitializer(
                         SchemaInitializer.builder()
                                 .withClonedTpchTables(ImmutableList.<TpchTable<?>>builder()
@@ -121,6 +122,22 @@ public class TestIcebergNessieCatalogConnectorSmokeTest
             case SUPPORTS_CREATE_VIEW, SUPPORTS_CREATE_MATERIALIZED_VIEW, SUPPORTS_RENAME_SCHEMA -> false;
             default -> super.hasBehavior(connectorBehavior);
         };
+    }
+
+    @Override
+    protected void verifyConcurrentDeleteFailurePermissible(Exception e)
+    {
+        if (!nullToEmpty(e.getMessage()).contains("Failed to commit during write:")) {
+            super.verifyConcurrentDeleteFailurePermissible(e);
+            return;
+        }
+
+        assertThat(e)
+                .hasMessageContaining("Failed to commit during write:");
+        assertThat(Throwables.getCausalChain(e))
+                .anySatisfy(throwable -> assertThat(nullToEmpty(throwable.getMessage())).containsAnyOf(
+                        "Cannot commit: ref hash is out of date",
+                        "Found new conflicting delete files that can apply to records matching"));
     }
 
     @Test
@@ -147,15 +164,8 @@ public class TestIcebergNessieCatalogConnectorSmokeTest
                 .hasStackTraceContaining("renameNamespace is not supported for Iceberg Nessie catalogs");
     }
 
-    @Test
     @Override
-    public void testDeleteRowsConcurrently()
-    {
-        abort("skipped for now due to flakiness");
-    }
-
-    @Override
-    protected void dropTableFromMetastore(String tableName)
+    protected void dropTableFromCatalog(String tableName)
     {
         // used when registering a table, which is not supported by the Nessie catalog
     }
@@ -297,7 +307,7 @@ public class TestIcebergNessieCatalogConnectorSmokeTest
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT 1 x, 'INDIA' y", 1);
 
         String metadataLocation = getMetadataLocation(tableName);
-        TableMetadata tableMetadata = TableMetadataParser.read(new ForwardingFileIo(fileSystem), metadataLocation);
+        TableMetadata tableMetadata = TableMetadataParser.read(FILE_IO_FACTORY.create(fileSystem), metadataLocation);
         Location tableLocation = Location.of(tableMetadata.location());
         Location currentSnapshotFile = Location.of(tableMetadata.currentSnapshot().manifestListLocation());
 
@@ -324,7 +334,7 @@ public class TestIcebergNessieCatalogConnectorSmokeTest
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT 1 x, 'INDIA' y", 1);
 
         String metadataLocation = getMetadataLocation(tableName);
-        FileIO fileIo = new ForwardingFileIo(fileSystem);
+        FileIO fileIo = FILE_IO_FACTORY.create(fileSystem);
         TableMetadata tableMetadata = TableMetadataParser.read(fileIo, metadataLocation);
         Location tableLocation = Location.of(tableMetadata.location());
         Location manifestListFile = Location.of(tableMetadata.currentSnapshot().allManifests(fileIo).get(0).path());
@@ -372,13 +382,11 @@ public class TestIcebergNessieCatalogConnectorSmokeTest
                 .isTrue();
     }
 
-    @Override
-    protected boolean isFileSorted(Location path, String sortColumnName)
+    @Test
+    @Override // TODO https://github.com/trinodb/trino/issues/30928 Fix flaky test
+    public void testDeleteRowsConcurrently()
     {
-        if (format == PARQUET) {
-            return checkParquetFileSorting(fileSystem.newInputFile(path), sortColumnName);
-        }
-        return checkOrcFileSorting(fileSystem, path, sortColumnName);
+        abort("skipped");
     }
 
     @Override

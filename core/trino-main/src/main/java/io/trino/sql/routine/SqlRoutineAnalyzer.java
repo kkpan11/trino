@@ -32,7 +32,6 @@ import io.trino.sql.analyzer.QueryType;
 import io.trino.sql.analyzer.RelationId;
 import io.trino.sql.analyzer.RelationType;
 import io.trino.sql.analyzer.Scope;
-import io.trino.sql.analyzer.TypeSignatureTranslator;
 import io.trino.sql.tree.AssignmentStatement;
 import io.trino.sql.tree.AstVisitor;
 import io.trino.sql.tree.CaseStatement;
@@ -55,6 +54,8 @@ import io.trino.sql.tree.LoopStatement;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NullInputCharacteristic;
 import io.trino.sql.tree.ParameterDeclaration;
+import io.trino.sql.tree.PropertiesCharacteristic;
+import io.trino.sql.tree.Property;
 import io.trino.sql.tree.RepeatStatement;
 import io.trino.sql.tree.ReturnStatement;
 import io.trino.sql.tree.ReturnsClause;
@@ -73,9 +74,10 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.Iterables.getLast;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
+import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_PROPERTY;
 import static io.trino.spi.StandardErrorCode.MISSING_RETURN;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -83,11 +85,11 @@ import static io.trino.spi.StandardErrorCode.SYNTAX_ERROR;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.toTypeSignature;
+import static io.trino.sql.analyzer.TypeDescriptorTranslator.toTypeDescriptor;
 import static java.lang.String.format;
 import static java.util.Collections.nCopies;
+import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
-import static java.util.function.Predicate.not;
 
 public class SqlRoutineAnalyzer
 {
@@ -103,28 +105,23 @@ public class SqlRoutineAnalyzer
     public static FunctionMetadata extractFunctionMetadata(FunctionId functionId, FunctionSpecification function)
     {
         validateLanguage(function);
-        validateReturn(function);
 
         String functionName = getFunctionName(function);
         Signature.Builder signatureBuilder = Signature.builder()
-                .returnType(toTypeSignature(function.getReturnsClause().getReturnType()));
+                .returnType(toTypeDescriptor(function.getReturnsClause().getReturnType()));
 
         validateArguments(function);
-        function.getParameters().stream()
-                .map(ParameterDeclaration::getType)
-                .map(TypeSignatureTranslator::toTypeSignature)
-                .forEach(signatureBuilder::argumentType);
+        for (ParameterDeclaration parameter : function.getParameters()) {
+            signatureBuilder.argumentType(toTypeDescriptor(parameter.getType()), parameter.getName().orElseThrow().getValue());
+        }
         Signature signature = signatureBuilder.build();
 
         FunctionMetadata.Builder builder = FunctionMetadata.scalarBuilder(functionName)
                 .functionId(functionId)
                 .signature(signature)
                 .nullable()
-                .argumentNullability(nCopies(signature.getArgumentTypes().size(), isCalledOnNull(function)));
-
-        getComment(function)
-                .filter(not(String::isBlank))
-                .ifPresentOrElse(builder::description, builder::noDescription);
+                .argumentNullability(nCopies(signature.getArgumentTypes().size(), isCalledOnNull(function)))
+                .description(getComment(function).orElse(""));
 
         if (!isDeterministic(function)) {
             builder.nondeterministic();
@@ -137,23 +134,23 @@ public class SqlRoutineAnalyzer
 
     public SqlRoutineAnalysis analyze(Session session, AccessControl accessControl, FunctionSpecification function)
     {
-        String functionName = getFunctionName(function);
+        checkArgument(getLanguageName(function).equalsIgnoreCase("SQL"), "function language must be SQL");
+        ControlStatement statement = function.getStatement().orElseThrow();
 
-        validateLanguage(function);
+        String functionName = getFunctionName(function);
 
         boolean calledOnNull = isCalledOnNull(function);
         Optional<String> comment = getComment(function);
-        validateSecurity(function);
 
         ReturnsClause returnsClause = function.getReturnsClause();
         Type returnType = getType(returnsClause, returnsClause.getReturnType());
 
         Map<String, Type> arguments = getArguments(function);
 
-        validateReturn(function);
+        validateReturn(statement);
 
         StatementVisitor visitor = new StatementVisitor(session, accessControl, returnType);
-        visitor.process(function.getStatement(), new Context(arguments, Set.of()));
+        visitor.process(statement, new Context(arguments, Set.of()));
 
         Analysis analysis = visitor.getAnalysis();
 
@@ -174,6 +171,7 @@ public class SqlRoutineAnalyzer
                 calledOnNull,
                 actuallyDeterministic,
                 comment,
+                statement,
                 visitor.getAnalysis());
     }
 
@@ -189,7 +187,7 @@ public class SqlRoutineAnalyzer
     private Type getType(Node node, DataType type)
     {
         try {
-            return plannerContext.getTypeManager().getType(toTypeSignature(type));
+            return plannerContext.getTypeManager().getType(toTypeDescriptor(type));
         }
         catch (TypeNotFoundException e) {
             throw semanticException(TYPE_MISMATCH, node, "Unknown type: %s", type);
@@ -223,7 +221,7 @@ public class SqlRoutineAnalyzer
         }
     }
 
-    private static Optional<Identifier> getLanguage(FunctionSpecification function)
+    public static Optional<Identifier> getLanguage(FunctionSpecification function)
     {
         List<LanguageCharacteristic> language = function.getRoutineCharacteristics().stream()
                 .filter(LanguageCharacteristic.class::isInstance)
@@ -239,13 +237,33 @@ public class SqlRoutineAnalyzer
                 .findAny();
     }
 
+    public static String getLanguageName(FunctionSpecification function)
+    {
+        return getLanguage(function).map(Identifier::getCanonicalValue).orElse("SQL");
+    }
+
     private static void validateLanguage(FunctionSpecification function)
     {
-        getLanguage(function).ifPresent(language -> {
-            if (!language.getValue().equalsIgnoreCase("sql")) {
-                throw semanticException(NOT_SUPPORTED, language, "Unsupported function language: %s", language.getCanonicalValue());
+        if (getLanguageName(function).equalsIgnoreCase("SQL")) {
+            function.getDefinition().ifPresent(definition -> {
+                throw semanticException(SYNTAX_ERROR, definition, "Functions using language 'SQL' must be defined using SQL");
+            });
+            List<Property> properties = getProperties(function);
+            if (!properties.isEmpty()) {
+                throw semanticException(INVALID_FUNCTION_PROPERTY, properties.getFirst(), "Function language 'SQL' does not support properties");
             }
-        });
+        }
+        else {
+            function.getStatement().ifPresent(statement -> {
+                throw semanticException(SYNTAX_ERROR, statement, "Only functions using language 'SQL' may be defined using SQL");
+            });
+            function.getRoutineCharacteristics().stream()
+                    .filter(SecurityCharacteristic.class::isInstance)
+                    .findFirst()
+                    .ifPresent(security -> {
+                        throw semanticException(NOT_SUPPORTED, security, "Only functions using language 'SQL' may declare security");
+                    });
+        }
     }
 
     private static boolean isDeterministic(FunctionSpecification function)
@@ -321,18 +339,57 @@ public class SqlRoutineAnalyzer
                 .findAny();
     }
 
-    private static void validateReturn(FunctionSpecification function)
+    public static List<Property> getProperties(FunctionSpecification function)
     {
-        ControlStatement statement = function.getStatement();
-        if (statement instanceof ReturnStatement) {
-            return;
+        List<PropertiesCharacteristic> properties = function.getRoutineCharacteristics().stream()
+                .filter(PropertiesCharacteristic.class::isInstance)
+                .map(PropertiesCharacteristic.class::cast)
+                .toList();
+
+        if (properties.size() > 1) {
+            throw semanticException(SYNTAX_ERROR, properties.get(1), "Multiple properties clauses specified");
         }
 
-        checkArgument(statement instanceof CompoundStatement, "invalid function statement: %s", statement);
-        CompoundStatement body = (CompoundStatement) statement;
-        if (!(getLast(body.getStatements(), null) instanceof ReturnStatement)) {
-            throw semanticException(MISSING_RETURN, body, "Function must end in a RETURN statement");
+        return properties.stream()
+                .map(PropertiesCharacteristic::getProperties)
+                .flatMap(List::stream)
+                .collect(toImmutableList());
+    }
+
+    private static void validateReturn(ControlStatement statement)
+    {
+        switch (statement) {
+            case ReturnStatement _ -> {}
+            case CompoundStatement body -> {
+                if (!alwaysReturns(body)) {
+                    throw semanticException(MISSING_RETURN, body, "Function must end in a RETURN statement");
+                }
+            }
+            default -> throw new IllegalArgumentException("Invalid function statement: " + statement);
         }
+    }
+
+    // Determines whether a statement is guaranteed to execute a RETURN on every path through it.
+    // Loops are never considered exhaustive, since a LEAVE can exit one before its body reaches a RETURN.
+    private static boolean alwaysReturns(ControlStatement statement)
+    {
+        return switch (statement) {
+            case ReturnStatement _ -> true;
+            case CompoundStatement body -> alwaysReturns(body.getStatements());
+            case IfStatement ifStatement -> ifStatement.getElseClause().isPresent() &&
+                    alwaysReturns(ifStatement.getStatements()) &&
+                    ifStatement.getElseIfClauses().stream().allMatch(clause -> alwaysReturns(clause.getStatements())) &&
+                    alwaysReturns(ifStatement.getElseClause().orElseThrow().getStatements());
+            case CaseStatement caseStatement -> caseStatement.getElseClause().isPresent() &&
+                    caseStatement.getWhenClauses().stream().allMatch(clause -> alwaysReturns(clause.getStatements())) &&
+                    alwaysReturns(caseStatement.getElseClause().orElseThrow().getStatements());
+            default -> false;
+        };
+    }
+
+    private static boolean alwaysReturns(List<ControlStatement> statements)
+    {
+        return !statements.isEmpty() && alwaysReturns(statements.getLast());
     }
 
     private class StatementVisitor
@@ -343,13 +400,14 @@ public class SqlRoutineAnalyzer
         private final Type returnType;
 
         private final Analysis analysis = new Analysis(null, ImmutableMap.of(), QueryType.OTHERS);
-        private final TypeCoercion typeCoercion = new TypeCoercion(plannerContext.getTypeManager()::getType);
+        private final TypeCoercion typeCoercion;
 
         public StatementVisitor(Session session, AccessControl accessControl, Type returnType)
         {
             this.session = requireNonNull(session, "session is null");
             this.accessControl = requireNonNull(accessControl, "accessControl is null");
             this.returnType = requireNonNull(returnType, "returnType is null");
+            this.typeCoercion = new TypeCoercion(plannerContext.getTypeManager()::getType, getCharVarcharCoercion(session));
         }
 
         public Analysis getAnalysis()
@@ -590,6 +648,9 @@ public class SqlRoutineAnalyzer
     private static String identifierValue(Identifier name)
     {
         // TODO: this should use getCanonicalValue()
-        return name.getValue();
+        // stop-gap: lowercasing for now to match what is happening during analysis;
+        // otherwise we do not support non-lowercase variables in functions.
+        // Rework as part of https://github.com/trinodb/trino/pull/24829
+        return name.getValue().toLowerCase(ENGLISH);
     }
 }

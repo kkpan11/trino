@@ -13,43 +13,35 @@
  */
 package io.trino.client.spooling.encoding;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.client.CloseableIterator;
 import io.trino.client.Column;
+import io.trino.client.JsonDecodingUtils.TypeDecoder;
+import io.trino.client.JsonIterators;
 import io.trino.client.QueryDataDecoder;
 import io.trino.client.spooling.DataAttributes;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.util.List;
 
-import static io.trino.client.FixJsonDataUtils.fixData;
+import static io.trino.client.JsonDecodingUtils.createTypeDecoders;
 import static java.util.Objects.requireNonNull;
 
 public class JsonQueryDataDecoder
         implements QueryDataDecoder
 {
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final TypeReference<List<List<Object>>> TYPE = new TypeReference<List<List<Object>>>() {};
-    private final List<Column> columns;
+    private final TypeDecoder[] decoders;
 
-    public JsonQueryDataDecoder(List<Column> columns)
+    JsonQueryDataDecoder(TypeDecoder[] decoders)
     {
-        this.columns = requireNonNull(columns, "columns is null");
+        this.decoders = requireNonNull(decoders, "decoders is null");
     }
 
     @Override
-    public Iterable<List<Object>> decode(InputStream stream, DataAttributes attributes)
+    public CloseableIterator<List<Object>> decode(InputStream stream, DataAttributes queryAttributes)
+            throws IOException
     {
-        try {
-            return fixData(columns, OBJECT_MAPPER.readValue(stream, TYPE));
-        }
-        catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        return JsonIterators.forInputStream(stream, decoders);
     }
 
     @Override
@@ -62,9 +54,9 @@ public class JsonQueryDataDecoder
             implements QueryDataDecoder.Factory
     {
         @Override
-        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes)
+        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary)
         {
-            return new JsonQueryDataDecoder(columns);
+            return new JsonQueryDataDecoder(createTypeDecoders(columns, supportsVariantBinary));
         }
 
         @Override
@@ -78,9 +70,9 @@ public class JsonQueryDataDecoder
             extends Factory
     {
         @Override
-        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes)
+        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary)
         {
-            return new ZstdQueryDataDecoder(super.create(columns, queryAttributes));
+            return new ZstdQueryDataDecoder(super.create(columns, queryAttributes, supportsVariantBinary));
         }
 
         @Override
@@ -94,40 +86,15 @@ public class JsonQueryDataDecoder
             extends Factory
     {
         @Override
-        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes)
+        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary)
         {
-            return new Lz4QueryDataDecoder(super.create(columns, queryAttributes));
+            return new Lz4QueryDataDecoder(super.create(columns, queryAttributes, supportsVariantBinary));
         }
 
         @Override
         public String encoding()
         {
             return super.encoding() + "+lz4";
-        }
-    }
-
-    public static class JsonSchema
-    {
-        private final int[] offsets;
-        private final int step;
-
-        @JsonCreator
-        public JsonSchema(int[] offsets, int step)
-        {
-            this.offsets = offsets;
-            this.step = step;
-        }
-
-        @JsonProperty("offsets")
-        public int[] getOffsets()
-        {
-            return offsets;
-        }
-
-        @JsonProperty("step")
-        public int getStep()
-        {
-            return step;
         }
     }
 }

@@ -14,11 +14,12 @@
 package io.trino.plugin.pinot;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.pinot.query.DynamicTable;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.DynamicFilterSnapshot;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
@@ -100,15 +101,15 @@ public class TestPinotSplitManager
 
     private void assertSplits(List<PinotSplit> splits, int numSplitsExpected, PinotSplit.SplitType splitType)
     {
-        assertThat(splits.size()).isEqualTo(numSplitsExpected);
+        assertThat(splits).hasSize(numSplitsExpected);
         splits.forEach(s -> assertThat(s.getSplitType()).isEqualTo(splitType));
     }
 
     private void assertSegmentSplitWellFormed(PinotSplit split)
     {
         assertThat(split.getSplitType()).isEqualTo(SEGMENT);
-        assertThat(split.getSegmentHost().isPresent()).isTrue();
-        assertThat(split.getSegments().isEmpty()).isFalse();
+        assertThat(split.getSegmentHost()).isPresent();
+        assertThat(split.getSegments()).isNotEmpty();
     }
 
     public static ConnectorSession createSessionWithNumSplits(int numSegmentsPerSplit, boolean forbidSegmentQueries, PinotConfig pinotConfig)
@@ -127,10 +128,10 @@ public class TestPinotSplitManager
     private List<PinotSplit> getSplitsHelper(PinotTableHandle pinotTable, int numSegmentsPerSplit, boolean forbidSegmentQueries)
     {
         ConnectorSession session = createSessionWithNumSplits(numSegmentsPerSplit, forbidSegmentQueries, pinotConfig);
-        ConnectorSplitSource splitSource = pinotSplitManager.getSplits(null, session, pinotTable, DynamicFilter.EMPTY, Constraint.alwaysTrue());
+        ConnectorSplitSource splitSource = pinotSplitManager.getSplits(null, session, pinotTable, ImmutableSet.of(), Constraint.alwaysTrue());
         List<PinotSplit> splits = new ArrayList<>();
         while (!splitSource.isFinished()) {
-            splits.addAll(getFutureValue(splitSource.getNextBatch(1000)).getSplits().stream().map(s -> (PinotSplit) s).collect(toList()));
+            splits.addAll(getFutureValue(splitSource.getNextBatch(1000, new DynamicFilterSnapshot(TupleDomain.all(), true))).stream().map(s -> (PinotSplit) s).collect(toList()));
         }
 
         return splits;

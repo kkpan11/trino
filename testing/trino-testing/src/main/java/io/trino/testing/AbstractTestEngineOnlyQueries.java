@@ -22,13 +22,20 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
-import com.google.common.collect.Ordering;
+import com.google.common.util.concurrent.UncheckedTimeoutException;
 import io.airlift.concurrent.MoreFutures;
+import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.Span;
 import io.trino.Session;
 import io.trino.SystemSessionProperties;
+import io.trino.client.ClientCapabilities;
+import io.trino.dispatcher.DispatchManager;
+import io.trino.execution.QueryManager;
+import io.trino.server.BasicQueryInfo;
 import io.trino.spi.session.PropertyMetadata;
+import io.trino.spi.type.NumberType;
 import io.trino.spi.type.TimeZoneKey;
+import io.trino.spi.type.TrinoNumber;
 import io.trino.tests.QueryTemplate;
 import io.trino.tpch.TpchTable;
 import io.trino.type.SqlIntervalDayTime;
@@ -36,6 +43,8 @@ import io.trino.type.SqlIntervalYearMonth;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -46,26 +55,37 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Objects;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
+import static io.airlift.units.Duration.nanosSince;
 import static io.trino.SystemSessionProperties.IGNORE_DOWNSTREAM_PREFERENCES;
+import static io.trino.SystemSessionProperties.LEGACY_VARCHAR_TO_CHAR_COERCION;
+import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
+import static io.trino.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.sql.analyzer.QueryExplainer.DEPRECATED_TYPE_LOGICAL_WARNING;
 import static io.trino.sql.tree.ExplainType.Type.DISTRIBUTED;
 import static io.trino.sql.tree.ExplainType.Type.IO;
 import static io.trino.sql.tree.ExplainType.Type.LOGICAL;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.QueryAssertions.assertContains;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
+import static io.trino.testing.TestingNames.randomNameSuffix;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.tests.QueryTemplate.parameter;
 import static io.trino.tests.QueryTemplate.queryTemplate;
 import static io.trino.tpch.TpchTable.CUSTOMER;
@@ -77,11 +97,16 @@ import static io.trino.tpch.TpchTable.PART_SUPPLIER;
 import static io.trino.tpch.TpchTable.REGION;
 import static io.trino.tpch.TpchTable.SUPPLIER;
 import static java.lang.String.format;
+import static java.lang.Thread.currentThread;
 import static java.util.Collections.nCopies;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public abstract class AbstractTestEngineOnlyQueries
         extends AbstractTestQueryFramework
@@ -193,27 +218,13 @@ public abstract class AbstractTestEngineOnlyQueries
         @Language("SQL") String sql = DateTimeFormatter.ofPattern("'SELECT TIMESTAMP '''uuuu-MM-dd HH:mm:ss.SSS''").format(localTimeThatDidNotExist);
         assertThat(computeScalar(sql)).isEqualTo(localTimeThatDidNotExist); // this tests Trino and the QueryRunner
         assertQuery(sql); // this tests H2QueryRunner
-
-        LocalDate localDateThatDidNotHaveMidnight = LocalDate.of(1970, 1, 1);
-        checkState(ZoneId.systemDefault().getRules().getValidOffsets(localDateThatDidNotHaveMidnight.atStartOfDay()).isEmpty(), "This test assumes certain JVM time zone");
-        // This tests that both Trino runner and H2 can return DATE value for a day which midnight never happened in JVM's zone (e.g. is not exactly representable using java.sql.Date)
-        sql = DateTimeFormatter.ofPattern("'SELECT DATE '''uuuu-MM-dd''").format(localDateThatDidNotHaveMidnight);
-        assertThat(computeScalar(sql)).isEqualTo(localDateThatDidNotHaveMidnight); // this tests Trino and the QueryRunner
-        assertQuery(sql); // this tests H2QueryRunner
-
-        LocalTime localTimeThatDidNotOccurOn19700101 = LocalTime.of(0, 10);
-        checkState(ZoneId.systemDefault().getRules().getValidOffsets(localTimeThatDidNotOccurOn19700101.atDate(LocalDate.ofEpochDay(0))).isEmpty(), "This test assumes certain JVM time zone");
-        checkState(!Objects.equals(java.sql.Time.valueOf(localTimeThatDidNotOccurOn19700101).toLocalTime(), localTimeThatDidNotOccurOn19700101), "This test assumes certain JVM time zone");
-        sql = DateTimeFormatter.ofPattern("'SELECT TIME '''HH:mm:ss''").format(localTimeThatDidNotOccurOn19700101);
-        assertThat(computeScalar(sql)).isEqualTo(localTimeThatDidNotOccurOn19700101); // this tests Trino and the QueryRunner
-        assertQuery(sql); // this tests H2QueryRunner
     }
 
     @Test
     public void testNodeRoster()
     {
         List<MaterializedRow> result = computeActual("SELECT * FROM system.runtime.nodes").getMaterializedRows();
-        assertThat(result.size()).isEqualTo(getNodeCount());
+        assertThat(result).hasSize(getNodeCount());
     }
 
     @Test
@@ -365,28 +376,36 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testCharVarcharComparison()
     {
-        // with implicit coercions
-        assertQuery("SELECT * FROM (VALUES" +
-                "   CAST(NULL AS char(3)), " +
-                "   CAST('   ' AS char(3))) t(x) " +
-                "WHERE x = CAST('  ' AS varchar(2))",
-                // H2 returns '' on CAST char(3) to varchar(2)
-                "SELECT '   '");
-
-        // with explicit casts
-        assertQuery(
+        // The char value is coerced to varchar by trimming trailing spaces, then compared as varchar (no blank
+        // padding): char '   ' becomes '', so it matches the empty varchar but not a space-padded varchar.
+        assertThat(query(
                 "SELECT * FROM (VALUES" +
                         "   CAST(NULL AS char(3)), " +
                         "   CAST('   ' AS char(3))) t(x) " +
-                        "WHERE CAST(x AS varchar(2)) = CAST('  ' AS varchar(2))",
-                // H2 returns '' on CAST char(3) to varchar(2)
-                "SELECT '   '");
+                        "WHERE x = CAST('' AS varchar(2))"))
+                .matches("VALUES CAST('   ' AS char(3))");
+
+        assertThat(query(
+                "SELECT * FROM (VALUES" +
+                        "   CAST(NULL AS char(3)), " +
+                        "   CAST('   ' AS char(3))) t(x) " +
+                        "WHERE x = CAST('  ' AS varchar(2))"))
+                .returnsEmptyResult();
+
+        // explicit casts to varchar compare as varchar (no blank padding) as well
+        assertThat(query(
+                "SELECT * FROM (VALUES" +
+                        "   CAST(NULL AS char(3)), " +
+                        "   CAST('   ' AS char(3))) t(x) " +
+                        "WHERE CAST(x AS varchar(2)) = CAST('' AS varchar(2))"))
+                .matches("VALUES CAST('   ' AS char(3))");
     }
 
     @Test
     public void testVarcharCharComparison()
     {
-        // with implicit coercions
+        // The char value is coerced to varchar by trimming trailing spaces, then compared as varchar (no blank
+        // padding): char '  ' becomes '', matching only the empty varchar.
         assertThat(query("SELECT * FROM (VALUES" +
                 "   CAST(NULL AS varchar(3)), " +
                 "   CAST('' AS varchar(3))," +
@@ -394,7 +413,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 "   CAST('  ' AS varchar(3)), " +
                 "   CAST('   ' AS varchar(3))) t(x) " +
                 "WHERE x = CAST('  ' AS char(2))"))
-                .matches("VALUES '', ' ', '  ', '   '");
+                .matches("VALUES CAST('' AS varchar(3))");
 
         // with explicit casts
         assertQuery("SELECT * FROM (VALUES" +
@@ -407,9 +426,36 @@ public abstract class AbstractTestEngineOnlyQueries
     }
 
     @Test
+    public void testCharVarcharCoercionSessionProperty()
+    {
+        Session standard = Session.builder(getSession()).setSystemProperty(LEGACY_VARCHAR_TO_CHAR_COERCION, "false").build();
+        Session legacy = Session.builder(getSession()).setSystemProperty(LEGACY_VARCHAR_TO_CHAR_COERCION, "true").build();
+
+        // CAST(char AS varchar) semantics: standard yields the unpadded value, legacy re-pads to the CHAR length
+        assertThat(query(standard, "SELECT CAST(CAST('abc' AS char(5)) AS varchar(10))"))
+                .matches("VALUES CAST('abc' AS varchar(10))");
+        assertThat(query(legacy, "SELECT CAST(CAST('abc' AS char(5)) AS varchar(10))"))
+                .matches("VALUES CAST('abc  ' AS varchar(10))");
+
+        // implicit coercion direction: standard coerces char to varchar (trailing spaces trimmed), legacy coerces varchar to char (blank-padded)
+        assertThat(query(standard, "SELECT CAST('   ' AS char(3)) = CAST('  ' AS varchar(2))"))
+                .matches("VALUES false");
+        assertThat(query(legacy, "SELECT CAST('   ' AS char(3)) = CAST('  ' AS varchar(2))"))
+                .matches("VALUES true");
+
+        // implicit coercion direction: standard coerces char to varchar
+        assertThat(query(standard, "SELECT CHAR 'abc' a, CHAR 'abcde' UNION ALL SELECT CAST('abcde' AS varchar(5)), CAST('abc' AS varchar(3))"))
+                .matches("VALUES (CAST('abc' AS varchar(5)), CAST('abcde' AS varchar(5))), (CAST('abcde' AS varchar(5)), CAST('abc' AS varchar(5)))");
+        // implicit coercion direction: legacy coerces char to varchar
+        assertThat(query(legacy, "SELECT CHAR 'abc' a, CHAR 'abcde' UNION ALL SELECT CAST('abcde' AS varchar(5)), CAST('abc' AS varchar(3))"))
+                .matches("VALUES (CAST('abc' AS char(5)), CAST('abcde' AS char(5))), (CAST('abcde' AS char(5)), CAST('abc' AS char(5)))");
+    }
+
+    @Test
     public void testRollupOverUnion()
     {
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT orderstatus, sum(orderkey)\n" +
                         "FROM (SELECT orderkey, orderstatus\n" +
                         "      FROM orders\n" +
@@ -444,7 +490,8 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery(
                 "WITH wnation AS (SELECT nationkey, regionkey FROM nation) " +
                         "SELECT regionkey FROM wnation WHERE nationkey < 7 " +
-                        "INTERSECT SELECT regionkey FROM wnation WHERE nationkey > 21", "VALUES 1, 3");
+                        "INTERSECT SELECT regionkey FROM wnation WHERE nationkey > 21",
+                "VALUES 1, 3");
         assertQuery(
                 "SELECT num FROM (SELECT 1 AS num FROM nation WHERE nationkey=10 " +
                         "INTERSECT SELECT 1 FROM nation WHERE nationkey=20) T");
@@ -474,7 +521,7 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT NULL, NULL INTERSECT SELECT NULL, NULL FROM nation");
 
         MaterializedResult emptyResult = computeActual("SELECT 100 INTERSECT (SELECT regionkey FROM nation WHERE nationkey <10)");
-        assertThat(emptyResult.getMaterializedRows().size()).isEqualTo(0);
+        assertThat(emptyResult.getMaterializedRows()).isEmpty();
     }
 
     @Test
@@ -531,7 +578,7 @@ public abstract class AbstractTestEngineOnlyQueries
                         "EXCEPT (SELECT * FROM (VALUES 1) EXCEPT SELECT * FROM (VALUES 1))");
 
         MaterializedResult emptyResult = computeActual("SELECT 0 EXCEPT (SELECT regionkey FROM nation WHERE nationkey <10)");
-        assertThat(emptyResult.getMaterializedRows().size()).isEqualTo(0);
+        assertThat(emptyResult.getMaterializedRows()).isEmpty();
     }
 
     @Test
@@ -565,7 +612,7 @@ public abstract class AbstractTestEngineOnlyQueries
     public void testAssignUniqueId()
     {
         String unionLineitem25Times = range(0, 25)
-                .mapToObj(i -> "SELECT * FROM lineitem")
+                .mapToObj(_ -> "SELECT * FROM lineitem")
                 .collect(joining(" UNION ALL "));
 
         assertQuery(
@@ -729,7 +776,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 computeActual("SELECT ARRAY[CAST(282 AS DECIMAL(22,1)), CAST(282 AS DECIMAL(10,1))] || CAST(292 AS BIGINT)"),
                 computeActual("SELECT ARRAY[CAST(282 AS DECIMAL(22,1)), CAST(282 AS DECIMAL(10,1)), CAST(292 AS DECIMAL(19,0))]"));
 
-        // DECIMAL - DECIMAL
+        // DECIMAL - DOUBLE
         assertQuery("SELECT CAST(1.1 AS DECIMAL(38,1)) + CAST(1.1 AS DOUBLE)");
         assertQuery("SELECT CAST(1.1 AS DECIMAL(38,1)) = CAST(1.1 AS DOUBLE)");
         assertQuery("SELECT SIN(CAST(1.1 AS DECIMAL(38,1)))");
@@ -752,8 +799,16 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT CAST(1.1 AS DECIMAL(38,1)) + CAST(CAST(121 AS DECIMAL(30,1)) AS SMALLINT)");
         assertQuery("SELECT CAST(292 AS DECIMAL(38,1)) = CAST(CAST(121 AS DECIMAL(30,1)) AS SMALLINT)");
 
+        // DECIMAL - NUMBER
+        assertThat(query("SELECT CAST(1.1 AS DECIMAL(38,1)) + CAST(1.1 AS NUMBER)")).matches("VALUES NUMBER '2.2'");
+        assertThat(query("SELECT CAST(1.1 AS DECIMAL(7,1)) = CAST(1.1 AS NUMBER)")).matches("VALUES true");
+        assertThat(query("SELECT CAST(1.1 AS DECIMAL(38,1)) = CAST(1.1 AS NUMBER)")).matches("VALUES true");
+        assertThat(query("SELECT ARRAY[CAST(282.1 AS NUMBER), CAST(283.2 AS NUMBER)] || CAST(101.3 AS DECIMAL(5,1))"))
+                .matches("SELECT ARRAY[CAST(282.1 AS NUMBER), CAST(283.2 AS NUMBER), CAST(101.3 AS NUMBER)]");
+
         // Complex coercions across joins
-        assertQuery("SELECT * FROM (" +
+        assertQuery(
+                "SELECT * FROM (" +
                         "  SELECT t2.x || t2.z cc FROM (" +
                         "    SELECT *" +
                         "    FROM (VALUES (VARCHAR 'a', VARCHAR 'c')) t(x, z)" +
@@ -768,7 +823,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "WHERE cc = 'ac'",
                 "SELECT 'ac'");
 
-        assertQuery("SELECT * FROM (" +
+        assertQuery(
+                "SELECT * FROM (" +
                         "  SELECT greatest (t.x, t.z) cc FROM (" +
                         "    SELECT *" +
                         "    FROM (VALUES (VARCHAR 'a', VARCHAR 'c')) t(x, z)" +
@@ -783,7 +839,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "WHERE cc = 'c'",
                 "SELECT 'c'");
 
-        assertQuery("SELECT cc[1], cc[2] FROM (" +
+        assertQuery(
+                "SELECT cc[1], cc[2] FROM (" +
                         " SELECT * FROM (" +
                         "  SELECT array[t.x, t.z] cc FROM (" +
                         "    SELECT *" +
@@ -804,6 +861,61 @@ public abstract class AbstractTestEngineOnlyQueries
                 "    UNION ALL" +
                 "    SELECT 'yy' AS c" +
                 ")");
+    }
+
+    /**
+     * Supplements {@link #testCoercions}
+     */
+    @Test
+    public void testNumericCoercions()
+    {
+        String[] numericTypes = new String[] {
+                "tinyint",
+                "smallint",
+                "integer",
+                "bigint",
+                "real",
+                "double",
+                "decimal(10,5)",
+                "decimal(24,11)",
+                "number",
+        };
+
+        for (String left : numericTypes) {
+            for (String right : numericTypes) {
+                try {
+                    String add = "SELECT CAST(CAST('3' AS " + left + ") + CAST('4' AS " + right + ") AS varchar)";
+                    String subtract = "SELECT CAST(CAST('3' AS " + left + ") - CAST('4' AS " + right + ") AS varchar)";
+                    String multiply = "SELECT CAST(CAST('3' AS " + left + ") * CAST('4' AS " + right + ") AS varchar)";
+                    String divide = "SELECT CAST(CAST('12' AS " + left + ") / CAST('4' AS " + right + ") AS varchar)";
+                    String modulo = "SELECT CAST(CAST('12' AS " + left + ") % CAST('7' AS " + right + ") AS varchar)";
+                    List<String> both = List.of(left, right);
+                    // There currently is no coercion between number and real/double/decimal
+                    boolean unsupported =
+                            both.contains("number") &&
+                                    (both.contains("real") || both.contains("double"));
+                    if (unsupported) {
+                        assertThat(query(add)).failure().hasMessageMatching("line 1:\\d+: Cannot apply operator: .* \\+ .*");
+                        assertThat(query(subtract)).failure().hasMessageMatching("line 1:\\d+: Cannot apply operator: .* - .*");
+                        assertThat(query(multiply)).failure().hasMessageMatching("line 1:\\d+: Cannot apply operator: .* \\* .*");
+                        assertThat(query(divide)).failure().hasMessageMatching("line 1:\\d+: Cannot apply operator: .* / .*");
+                        assertThat(query(modulo)).failure().hasMessageMatching("line 1:\\d+: Cannot apply operator: .* % .*");
+                    }
+                    else {
+                        assertThat((String) computeActual(add).getOnlyValue()).matches("7(\\.0E0|\\.0+)?");
+                        assertThat((String) computeActual(subtract).getOnlyValue()).matches("-1(\\.0E0|\\.0+)?");
+                        assertThat((String) computeActual(multiply).getOnlyValue()).matches("12(\\.0+)?|1.2E1");
+                        assertThat((String) computeActual(divide).getOnlyValue()).matches("3(\\.0E0|\\.0+)?");
+                        assertThat((String) computeActual(modulo).getOnlyValue()).matches("5(\\.0E0|\\.0+)?");
+                    }
+                }
+                catch (Throwable e) {
+                    e.addSuppressed(new Exception("left = " + left));
+                    e.addSuppressed(new Exception("right = " + right));
+                    throw e;
+                }
+            }
+        }
     }
 
     @Test
@@ -868,7 +980,7 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testQuantifiedComparisonCornerCases()
     {
-        //the %subquery% is wrapped in a SELECT so that H2 does not blow up on the VALUES subquery
+        // the %subquery% is wrapped in a SELECT so that H2 does not blow up on the VALUES subquery
         queryTemplate("SELECT %value% %operator% %quantifier% (SELECT * FROM (%subquery%))")
                 .replaceAll(
                         parameter("subquery").of(
@@ -886,7 +998,7 @@ public abstract class AbstractTestEngineOnlyQueries
     {
         assertQueryFails(
                 "SELECT * FROM lineitem l JOIN (SELECT orderkey_1, custkey FROM orders) o on l.orderkey = o.orderkey_1",
-                "line 1:39: Column 'orderkey_1' cannot be resolved");
+                "line 1:39: Column 'orderkey_1' cannot be resolved.*");
     }
 
     @Test
@@ -896,7 +1008,9 @@ public abstract class AbstractTestEngineOnlyQueries
                 .setSystemProperty(SystemSessionProperties.DISTINCT_AGGREGATIONS_STRATEGY, "pre_aggregate")
                 .build();
         // This is optimized using CAST(null AS interval day to second) which may be problematic to deserialize on worker
-        assertQuery(session, "WITH t(a, b) AS (VALUES (1, INTERVAL '1' SECOND)) " +
+        assertQuery(
+                session,
+                "WITH t(a, b) AS (VALUES (1, INTERVAL '1' SECOND)) " +
                         "SELECT count(DISTINCT a), CAST(max(b) AS VARCHAR) FROM t",
                 "VALUES (1, '0 00:00:01.000')");
     }
@@ -922,7 +1036,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testTryInvalidCast()
     {
-        assertQuery("SELECT TRY(CAST('a' AS BIGINT))",
+        assertQuery(
+                "SELECT TRY(CAST('a' AS BIGINT))",
                 "SELECT NULL");
     }
 
@@ -948,7 +1063,8 @@ public abstract class AbstractTestEngineOnlyQueries
         Session session = Session.builder(getSession())
                 .addPreparedStatement("my_query", query)
                 .build();
-        assertQuery(session,
+        assertQuery(
+                session,
                 "EXECUTE my_query USING 1, 5, 4, 0",
                 "VALUES (2, 4), (3, 8), (4, 4)");
     }
@@ -960,7 +1076,8 @@ public abstract class AbstractTestEngineOnlyQueries
         Session session = Session.builder(getSession())
                 .addPreparedStatement("my_query", query)
                 .build();
-        assertQuery(session,
+        assertQuery(
+                session,
                 "EXECUTE my_query USING 5",
                 "VALUES (1, 2)");
     }
@@ -973,7 +1090,8 @@ public abstract class AbstractTestEngineOnlyQueries
                 .addPreparedStatement("my_query", query)
                 .build();
 
-        assertQuery(session,
+        assertQuery(
+                session,
                 "EXECUTE my_query USING 10",
                 "SELECT 10 in (SELECT orderkey FROM orders)");
     }
@@ -992,7 +1110,8 @@ public abstract class AbstractTestEngineOnlyQueries
         Session session = Session.builder(getSession())
                 .addPreparedStatement("my_query", query)
                 .build();
-        assertQuery(session,
+        assertQuery(
+                session,
                 "EXECUTE my_query USING 1, 3, 2",
                 "VALUES (1,1), (1,2), (2,2), (2,1), (3,3)");
     }
@@ -1223,7 +1342,8 @@ public abstract class AbstractTestEngineOnlyQueries
         Session session = Session.builder(getSession())
                 .addPreparedStatement("my_query", query)
                 .build();
-        assertQuery(session,
+        assertQuery(
+                session,
                 "EXECUTE my_query USING 6, 0, 10",
                 "VALUES (3, 6)");
     }
@@ -1236,7 +1356,8 @@ public abstract class AbstractTestEngineOnlyQueries
         Session session = Session.builder(getSession())
                 .addPreparedStatement("my_query", query)
                 .build();
-        assertQuery(session,
+        assertQuery(
+                session,
                 "EXECUTE my_query USING abs(-2) ",
                 "VALUES 3, 4, 5, 6");
     }
@@ -1314,7 +1435,6 @@ public abstract class AbstractTestEngineOnlyQueries
         assertEqualsIgnoreOrder(actual, expected);
 
         session = Session.builder(getSession())
-                .setSystemProperty("omit_datetime_type_precision", "false")
                 .addPreparedStatement(
                         "my_query",
                         "SELECT 1 " +
@@ -1334,27 +1454,14 @@ public abstract class AbstractTestEngineOnlyQueries
                 .row(4, "decimal(3,2)")
                 .build();
         assertEqualsIgnoreOrder(actual, expected);
-
-        session = Session.builder(session)
-                .setSystemProperty("omit_datetime_type_precision", "true")
-                .build();
-
-        actual = computeActual(session, "DESCRIBE INPUT my_query");
-        expected = resultBuilder(session, BIGINT, VARCHAR)
-                .row(0, "char(2)")
-                .row(1, "varchar")
-                .row(2, "timestamp")
-                .row(3, "timestamp(6)")
-                .row(4, "decimal(3,2)")
-                .build();
-        assertEqualsIgnoreOrder(actual, expected);
     }
 
     @Test
     public void testDescribeInputWithClause()
     {
         Session session = Session.builder(getSession())
-                .addPreparedStatement("my_query", """
+                .addPreparedStatement("my_query",
+                        """
                         WITH t2 AS (
                             SELECT * FROM (VALUES 1) AS t2(b)
                             WHERE b = ?)
@@ -1409,63 +1516,41 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testDescribeOutput()
     {
-        Session session = Session.builder(getSession())
-                .addPreparedStatement("my_query", "SELECT * FROM nation")
-                .build();
-
-        MaterializedResult actual = computeActual(session, "DESCRIBE OUTPUT my_query");
+        Session session = getSession();
+        String sql = "SELECT * FROM nation";
         MaterializedResult expected = resultBuilder(session, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN)
                 .row("nationkey", session.getCatalog().get(), session.getSchema().get(), "nation", "bigint", 8, false)
                 .row("name", session.getCatalog().get(), session.getSchema().get(), "nation", "varchar(25)", 0, false)
                 .row("regionkey", session.getCatalog().get(), session.getSchema().get(), "nation", "bigint", 8, false)
                 .row("comment", session.getCatalog().get(), session.getSchema().get(), "nation", "varchar(152)", 0, false)
                 .build();
-        assertEqualsIgnoreOrder(actual, expected);
+        assertDescribeOutputWithBothSyntax(session, sql, expected);
     }
 
     @Test
     public void testDescribeOutputDateTimeTypes()
     {
-        Session session = Session.builder(getSession())
-                .setSystemProperty("omit_datetime_type_precision", "true")
-                .addPreparedStatement("my_query", "SELECT localtimestamp a, current_timestamp b, localtime c")
-                .build();
-
-        MaterializedResult actual = computeActual(session, "DESCRIBE OUTPUT my_query");
+        Session session = getSession();
+        String sql = "SELECT localtimestamp a, current_timestamp b, localtime c";
         MaterializedResult expected = resultBuilder(session, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN)
-                .row("a", "", "", "", "timestamp", 8, true)
-                .row("b", "", "", "", "timestamp with time zone", 8, true)
-                .row("c", "", "", "", "time", 8, true)
-                .build();
-        assertEqualsIgnoreOrder(actual, expected);
-
-        session = Session.builder(getSession())
-                .setSystemProperty("omit_datetime_type_precision", "false")
-                .addPreparedStatement("my_query", "SELECT localtimestamp a, current_timestamp b")
-                .build();
-
-        actual = computeActual(session, "DESCRIBE OUTPUT my_query");
-        expected = resultBuilder(session, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN)
                 .row("a", "", "", "", "timestamp(3)", 8, true)
                 .row("b", "", "", "", "timestamp(3) with time zone", 8, true)
+                .row("c", "", "", "", "time(3)", 8, true)
                 .build();
-        assertEqualsIgnoreOrder(actual, expected);
+        assertDescribeOutputWithBothSyntax(session, sql, expected);
     }
 
     @Test
     public void testDescribeOutputNamedAndUnnamed()
     {
-        Session session = Session.builder(getSession())
-                .addPreparedStatement("my_query", "SELECT 1, name, regionkey AS my_alias FROM nation")
-                .build();
-
-        MaterializedResult actual = computeActual(session, "DESCRIBE OUTPUT my_query");
+        Session session = getSession();
+        String sql = "SELECT 1, name, regionkey AS my_alias FROM nation";
         MaterializedResult expected = resultBuilder(session, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN)
                 .row("_col0", "", "", "", "integer", 4, false)
                 .row("name", session.getCatalog().get(), session.getSchema().get(), "nation", "varchar(25)", 0, false)
                 .row("my_alias", session.getCatalog().get(), session.getSchema().get(), "nation", "bigint", 8, true)
                 .build();
-        assertEqualsIgnoreOrder(actual, expected);
+        assertDescribeOutputWithBothSyntax(session, sql, expected);
     }
 
     @Test
@@ -1474,8 +1559,6 @@ public abstract class AbstractTestEngineOnlyQueries
         assertDescribeOutputRowCount("CREATE TABLE foo AS SELECT * FROM nation");
 
         assertDescribeOutputEmpty("CALL foo()");
-        assertDescribeOutputEmpty("SET SESSION optimize_hash_generation=false");
-        assertDescribeOutputEmpty("RESET SESSION optimize_hash_generation");
         assertDescribeOutputEmpty("START TRANSACTION");
         assertDescribeOutputEmpty("COMMIT");
         assertDescribeOutputEmpty("ROLLBACK");
@@ -1546,16 +1629,55 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testDescribeOutputOnAliasedColumnsAndExpressions()
     {
-        Session session = Session.builder(getSession())
-                .addPreparedStatement("my_query", "SELECT count(*) AS this_is_aliased, 1 + 2 FROM nation")
-                .build();
-
-        MaterializedResult actual = computeActual(session, "DESCRIBE OUTPUT my_query");
+        Session session = getSession();
+        String sql = "SELECT count(*) AS this_is_aliased, 1 + 2 FROM nation";
         MaterializedResult expected = resultBuilder(session, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN)
                 .row("this_is_aliased", "", "", "", "bigint", 8, true)
                 .row("_col1", "", "", "", "integer", 4, false)
                 .build();
-        assertEqualsIgnoreOrder(actual, expected);
+        assertDescribeOutputWithBothSyntax(session, sql, expected);
+    }
+
+    private void assertDescribeOutputWithBothSyntax(Session session, @Language("SQL") String sql, MaterializedResult expected)
+    {
+        // Test prepared statement syntax
+        Session sessionWithStatement = Session.builder(session)
+                .addPreparedStatement("my_query", sql)
+                .build();
+        MaterializedResult preparedResult = computeActual(sessionWithStatement, "DESCRIBE OUTPUT my_query");
+        assertEqualsIgnoreOrder(preparedResult, expected);
+
+        // Test inline query syntax
+        MaterializedResult inlineResult = computeActual(session, format("DESCRIBE OUTPUT (%s)", sql));
+        assertEqualsIgnoreOrder(inlineResult, expected);
+    }
+
+    @Test
+    public void testDescribeOutputNumberTypeWithCapability()
+    {
+        Session session = Session.builder(getSession())
+                .setClientCapabilities(Stream.of(ClientCapabilities.values())
+                        .map(ClientCapabilities::toString)
+                        .collect(toImmutableSet()))
+                .build();
+        String sql = "SELECT NUMBER '1.5'";
+        MaterializedResult expected = resultBuilder(session, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN)
+                .row("_col0", "", "", "", "number", 0, false)
+                .build();
+        assertDescribeOutputWithBothSyntax(session, sql, expected);
+    }
+
+    @Test
+    public void testDescribeOutputNumberTypeWithoutCapability()
+    {
+        Session session = Session.builder(getSession())
+                .setClientCapabilities(ImmutableSet.of())
+                .build();
+        String sql = "SELECT NUMBER '1.5'";
+        MaterializedResult expected = resultBuilder(session, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BIGINT, BOOLEAN)
+                .row("_col0", "", "", "", "varchar", 0, false)
+                .build();
+        assertDescribeOutputWithBothSyntax(session, sql, expected);
     }
 
     @Test
@@ -1568,13 +1690,18 @@ public abstract class AbstractTestEngineOnlyQueries
     public void testPreparedStatementWithSubqueries()
     {
         List<QueryTemplate.Parameter> leftValues = parameter("left").of(
-                "", "1 = ",
+                "",
+                "1 = ",
                 "EXISTS",
                 "1 IN",
-                "1 = ANY", "1 = ALL",
-                "2 <> ANY", "2 <> ALL",
-                "0 < ALL", "0 < ANY",
-                "1 <= ALL", "1 <= ANY");
+                "1 = ANY",
+                "1 = ALL",
+                "2 <> ANY",
+                "2 <> ALL",
+                "0 < ALL",
+                "0 < ANY",
+                "1 <= ALL",
+                "1 <= ANY");
 
         queryTemplate("SELECT %left% (SELECT 1 WHERE 2 = ?)")
                 .replaceAll(leftValues)
@@ -1590,13 +1717,18 @@ public abstract class AbstractTestEngineOnlyQueries
     public void testExecuteImmediateWithSubqueries()
     {
         List<QueryTemplate.Parameter> leftValues = parameter("left").of(
-                "", "1 = ",
+                "",
+                "1 = ",
                 "EXISTS",
                 "1 IN",
-                "1 = ANY", "1 = ALL",
-                "2 <> ANY", "2 <> ALL",
-                "0 < ALL", "0 < ANY",
-                "1 <= ALL", "1 <= ANY");
+                "1 = ANY",
+                "1 = ALL",
+                "2 <> ANY",
+                "2 <> ALL",
+                "0 < ALL",
+                "0 < ANY",
+                "1 <= ALL",
+                "1 <= ANY");
 
         queryTemplate("SELECT %left% (SELECT 1 WHERE 2 = ?)")
                 .replaceAll(leftValues)
@@ -1679,7 +1811,7 @@ public abstract class AbstractTestEngineOnlyQueries
         for (int i = 0; i < 3; i++) {
             MaterializedResult results = computeActual(format("SELECT shuffle(ARRAY %s) FROM orders LIMIT 10", expected));
             List<MaterializedRow> rows = results.getMaterializedRows();
-            assertThat(rows.size()).isEqualTo(10);
+            assertThat(rows).hasSize(10);
 
             for (MaterializedRow row : rows) {
                 @SuppressWarnings("unchecked")
@@ -2128,7 +2260,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testMergeQuantileDigest()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 WITH
                     a(field_a, field_b) AS (
                         VALUES (DOUBLE '10.3', 'group1'), (DOUBLE '11.3', 'group2')),
@@ -2136,16 +2269,18 @@ public abstract class AbstractTestEngineOnlyQueries
                         SELECT CAST(qdigest_agg(field_a) AS varbinary) AS qdigest_binary
                         FROM a GROUP BY field_b)
                 SELECT CAST(merge(CAST(qdigest_binary AS qdigest(double))) AS varbinary)
-                FROM b"""))
-                .matches("""
-                    VALUES X'
-                        00 7b 14 ae 47 e1 7a 84 3f 00 00 00 00 00 00 00
-                        00 00 00 00 00 00 00 00 00 9a 99 99 99 99 99 24
-                        40 9a 99 99 99 99 99 26 40 03 00 00 00 00 00 00
-                        00 00 00 00 f0 3f 9a 99 99 99 99 99 24 c0 00 00
-                        00 00 00 00 00 f0 3f 9a 99 99 99 99 99 26 c0 c7
-                        00 00 00 00 00 00 00 00 9a 99 99 99 99 99 24 c0'
-                    """);
+                FROM b
+                """))
+                .matches(
+                        """
+                        VALUES X'
+                            00 7b 14 ae 47 e1 7a 84 3f 00 00 00 00 00 00 00
+                            00 00 00 00 00 00 00 00 00 9a 99 99 99 99 99 24
+                            40 9a 99 99 99 99 99 26 40 03 00 00 00 00 00 00
+                            00 00 00 00 f0 3f 9a 99 99 99 99 99 24 c0 00 00
+                            00 00 00 00 00 f0 3f 9a 99 99 99 99 99 26 c0 c7
+                            00 00 00 00 00 00 00 00 9a 99 99 99 99 99 24 c0'
+                        """);
     }
 
     @Test
@@ -2159,7 +2294,8 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT * FROM (VALUES (1.1, 2), (sin(3.3), 2+2))");
         assertQuery("SELECT 1.1 in (VALUES (1.1), (2.2))", "VALUES (TRUE)");
 
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "WITH a AS (VALUES (1.1, 2), (sin(3.3), 2+2)) " +
                         "SELECT * FROM a",
                 "VALUES (1.1, 2), (sin(3.3), 2+2)");
@@ -2176,7 +2312,7 @@ public abstract class AbstractTestEngineOnlyQueries
         MaterializedResult actual = computeActual("VALUES (0E0/0E0, 1E0/0E0, -1E0/0E0)");
 
         List<MaterializedRow> rows = actual.getMaterializedRows();
-        assertThat(rows.size()).isEqualTo(1);
+        assertThat(rows).hasSize(1);
 
         MaterializedRow row = rows.get(0);
         assertThat(((Double) row.getField(0)).isNaN()).isTrue();
@@ -2190,7 +2326,7 @@ public abstract class AbstractTestEngineOnlyQueries
         MaterializedResult actual = computeActual("VALUES (current_timestamp, now())");
 
         List<MaterializedRow> rows = actual.getMaterializedRows();
-        assertThat(rows.size()).isEqualTo(1);
+        assertThat(rows).hasSize(1);
 
         MaterializedRow row = rows.get(0);
         assertThat(row.getField(0)).isEqualTo(row.getField(1));
@@ -2262,14 +2398,18 @@ public abstract class AbstractTestEngineOnlyQueries
         // Using JSON_FORMAT(CAST(_ AS JSON)) because H2 does not support ROW type
         assertQuery("SELECT JSON_FORMAT(CAST(ROW(1 + 2, CONCAT('a', 'b')) AS JSON))", "SELECT '{\"\":3,\"\":\"ab\"}'");
         assertQuery("SELECT JSON_FORMAT(CAST(ROW(a + b) AS JSON)) FROM (VALUES (1, 2)) AS t(a, b)", "SELECT '{\"\":3}'");
-        assertQuery("SELECT JSON_FORMAT(CAST(ROW(1, ROW(9, a, ARRAY[], NULL), ROW(1, 2)) AS JSON)) FROM (VALUES ('a')) t(a)",
+        assertQuery(
+                "SELECT JSON_FORMAT(CAST(ROW(1, ROW(9, a, ARRAY[], NULL), ROW(1, 2)) AS JSON)) FROM (VALUES ('a')) t(a)",
                 "SELECT '{\"\":1,\"\":{\"\":9,\"\":\"a\",\"\":[],\"\":null},\"\":{\"\":1,\"\":2}}'");
-        assertQuery("SELECT JSON_FORMAT(CAST(ROW(ROW(ROW(ROW(ROW(a, b), c), d), e), f) AS JSON)) FROM (VALUES (ROW(0, 1), 2, '3', NULL, ARRAY[5], ARRAY[])) t(a, b, c, d, e, f)",
+        assertQuery(
+                "SELECT JSON_FORMAT(CAST(ROW(ROW(ROW(ROW(ROW(a, b), c), d), e), f) AS JSON)) FROM (VALUES (ROW(0, 1), 2, '3', NULL, ARRAY[5], ARRAY[])) t(a, b, c, d, e, f)",
                 "SELECT '{\"\":{\"\":{\"\":{\"\":{\"\":{\"\":0,\"\":1},\"\":2},\"\":\"3\"},\"\":null},\"\":[5]},\"\":[]}'");
-        assertQuery("SELECT JSON_FORMAT(CAST(ARRAY_AGG(ROW(a, b)) AS JSON)) FROM (VALUES (1, 2), (3, 4), (5, 6)) t(a, b)",
+        assertQuery(
+                "SELECT JSON_FORMAT(CAST(ARRAY_AGG(ROW(a, b)) AS JSON)) FROM (VALUES (1, 2), (3, 4), (5, 6)) t(a, b)",
                 "SELECT '[{\"\":1,\"\":2},{\"\":3,\"\":4},{\"\":5,\"\":6}]'");
         assertQuery("SELECT CONTAINS(ARRAY_AGG(ROW(a, b)), ROW(1, 2)) FROM (VALUES (1, 2), (3, 4), (5, 6)) t(a, b)", "SELECT TRUE");
-        assertQuery("SELECT JSON_FORMAT(CAST(ARRAY_AGG(ROW(c, d)) AS JSON)) FROM (VALUES (ARRAY[1, 3, 5], ARRAY[2, 4, 6])) AS t(a, b) CROSS JOIN UNNEST(a, b) AS u(c, d)",
+        assertQuery(
+                "SELECT JSON_FORMAT(CAST(ARRAY_AGG(ROW(c, d)) AS JSON)) FROM (VALUES (ARRAY[1, 3, 5], ARRAY[2, 4, 6])) AS t(a, b) CROSS JOIN UNNEST(a, b) AS u(c, d)",
                 "SELECT '[{\"\":1,\"\":2},{\"\":3,\"\":4},{\"\":5,\"\":6}]'");
         assertQuery("SELECT JSON_FORMAT(CAST(ROW(x, y, z) AS JSON)) FROM (VALUES ROW(1, NULL, '3')) t(x,y,z)", "SELECT '{\"\":1,\"\":null,\"\":\"3\"}'");
         assertQuery("SELECT JSON_FORMAT(CAST(ROW(x, y, z) AS JSON)) FROM (VALUES ROW(1, CAST(NULL AS INTEGER), '3')) t(x,y,z)", "SELECT '{\"\":1,\"\":null,\"\":\"3\"}'");
@@ -2450,7 +2590,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 "   FROM orders\n" +
                 ") WHERE NOT rn <= 10");
         MaterializedResult all = computeExpected("SELECT orderkey, orderstatus FROM orders", actual.getTypes());
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(all.getMaterializedRows().size() - 10);
+        assertThat(actual.getMaterializedRows()).hasSize(all.getMaterializedRows().size() - 10);
         assertContains(all, actual);
 
         actual = computeActual("" +
@@ -2459,7 +2599,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 "   FROM orders\n" +
                 ") WHERE rn - 5 <= 10");
         all = computeExpected("SELECT orderkey, orderstatus FROM orders", actual.getTypes());
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(15);
+        assertThat(actual.getMaterializedRows()).hasSize(15);
         assertContains(all, actual);
     }
 
@@ -2470,25 +2610,25 @@ public abstract class AbstractTestEngineOnlyQueries
                 "SELECT row_number() OVER (PARTITION BY orderstatus) rn, orderstatus\n" +
                 "FROM orders\n" +
                 "LIMIT 10");
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(10);
+        assertThat(actual.getMaterializedRows()).hasSize(10);
 
         actual = computeActual("" +
                 "SELECT row_number() OVER (PARTITION BY orderstatus ORDER BY orderkey) rn\n" +
                 "FROM orders\n" +
                 "LIMIT 10");
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(10);
+        assertThat(actual.getMaterializedRows()).hasSize(10);
 
         actual = computeActual("" +
                 "SELECT row_number() OVER () rn, orderstatus\n" +
                 "FROM orders\n" +
                 "LIMIT 10");
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(10);
+        assertThat(actual.getMaterializedRows()).hasSize(10);
 
         actual = computeActual("" +
                 "SELECT row_number() OVER (ORDER BY orderkey) rn\n" +
                 "FROM orders\n" +
                 "LIMIT 10");
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(10);
+        assertThat(actual.getMaterializedRows()).hasSize(10);
     }
 
     @Test
@@ -2576,7 +2716,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 .row(2, 1L)
                 .row(2, 2L)
                 .build();
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(2);
+        assertThat(actual.getMaterializedRows()).hasSize(2);
         assertContains(expected, actual);
     }
 
@@ -2589,7 +2729,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 "   FROM orders\n" +
                 ") WHERE rn <= 5 AND orderstatus != 'Z'");
         MaterializedResult all = computeExpected("SELECT orderkey, orderstatus FROM orders", actual.getTypes());
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(5);
+        assertThat(actual.getMaterializedRows()).hasSize(5);
         assertContains(all, actual);
 
         actual = computeActual("" +
@@ -2599,7 +2739,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 ") WHERE rn < 5");
         all = computeExpected("SELECT orderkey, orderstatus FROM orders", actual.getTypes());
 
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(4);
+        assertThat(actual.getMaterializedRows()).hasSize(4);
         assertContains(all, actual);
 
         actual = computeActual("" +
@@ -2609,7 +2749,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 ") LIMIT 5");
         all = computeExpected("SELECT orderkey, orderstatus FROM orders", actual.getTypes());
 
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(5);
+        assertThat(actual.getMaterializedRows()).hasSize(5);
         assertContains(all, actual);
     }
 
@@ -2624,7 +2764,7 @@ public abstract class AbstractTestEngineOnlyQueries
         MaterializedResult all = computeExpected("SELECT orderkey, orderstatus FROM orders", actual.getTypes());
 
         // there are 3 DISTINCT orderstatus, so expect 15 rows.
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(15);
+        assertThat(actual.getMaterializedRows()).hasSize(15);
         assertContains(all, actual);
 
         // Test for unreferenced outputs
@@ -2636,7 +2776,7 @@ public abstract class AbstractTestEngineOnlyQueries
         all = computeExpected("SELECT orderkey FROM orders", actual.getTypes());
 
         // there are 3 distinct orderstatus, so expect 15 rows.
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(15);
+        assertThat(actual.getMaterializedRows()).hasSize(15);
         assertContains(all, actual);
     }
 
@@ -2832,7 +2972,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testWith()
     {
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "WITH a AS (SELECT * FROM orders) " +
                         "SELECT * FROM a",
                 "SELECT * FROM orders");
@@ -2864,7 +3005,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testWithChaining()
     {
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "WITH a AS (SELECT orderkey n FROM orders)\n" +
                         ", b AS (SELECT n + 1 n FROM a)\n" +
                         ", c AS (SELECT n + 1 n FROM b)\n" +
@@ -2909,7 +3051,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testWithHiding()
     {
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "WITH a AS (SELECT 1), " +
                         "     b AS (" +
                         "         WITH a AS (SELECT 2)" +
@@ -3182,7 +3325,7 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testRowFieldAccessor()
     {
-        //Dereference only
+        // Dereference only
         assertQuery("SELECT a.col0 FROM (VALUES ROW (CAST(ROW(1, 2) AS ROW(col0 integer, col1 integer)))) AS t (a)", "SELECT 1");
         assertQuery("SELECT a.col0 FROM (VALUES ROW (CAST(ROW(1.0E0, 2.0E0) AS ROW(col0 integer, col1 integer)))) AS t (a)", "SELECT 1.0");
         assertQuery("SELECT a.col0 FROM (VALUES ROW (CAST(ROW(TRUE, FALSE) AS ROW(col0 boolean, col1 boolean)))) AS t (a)", "SELECT TRUE");
@@ -3203,7 +3346,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testRowFieldAccessorInAggregate()
     {
-        assertQuery("SELECT a.col0, SUM(a.col1[2]), SUM(a.col2.col0), SUM(a.col2.col1) FROM " +
+        assertQuery(
+                "SELECT a.col0, SUM(a.col1[2]), SUM(a.col2.col0), SUM(a.col2.col1) FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(1.0, ARRAY[2, 13, 4], row(11, 4.1E0))   AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
                         "ROW(CAST(ROW(2.0, ARRAY[2, 23, 4], row(12, 14.0E0))  AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
@@ -3211,7 +3355,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY a.col0",
                 "SELECT * FROM VALUES (1.0, 46, 24, 9.1), (2.0, 23, 12, 14.0)");
 
-        assertQuery("SELECT a.col2.col0, SUM(a.col0), SUM(a.col1[2]), SUM(a.col2.col1) FROM " +
+        assertQuery(
+                "SELECT a.col2.col0, SUM(a.col0), SUM(a.col1[2]), SUM(a.col2.col1) FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(1.0, ARRAY[2, 13, 4], row(11, 4.1E0))   AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
                         "ROW(CAST(ROW(2.0, ARRAY[2, 23, 4], row(11, 14.0E0))  AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
@@ -3219,7 +3364,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY a.col2.col0",
                 "SELECT * FROM VALUES (11, 3.0, 36, 18.1), (13, 7.0, 33, 5.0)");
 
-        assertQuery("SELECT a.col1[1].col0, SUM(a.col0), SUM(a.col1[1].col1), SUM(a.col1[2].col0), SUM(a.col2.col1) FROM " +
+        assertQuery(
+                "SELECT a.col1[1].col0, SUM(a.col0), SUM(a.col1[1].col1), SUM(a.col1[2].col0), SUM(a.col2.col1) FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(1.0, ARRAY[row(31, 4.5E0), row(12, 4.2E0)], row(3, 4.0E0)) AS ROW(col0 double, col1 array(row(col0 integer, col1 double)), col2 row(col0 integer, col1 double)))), " +
                         "ROW(CAST(ROW(3.1, ARRAY[row(41, 3.1E0), row(32, 4.2E0)], row(6, 6.0E0)) AS ROW(col0 double, col1 array(row(col0 integer, col1 double)), col2 row(col0 integer, col1 double)))), " +
@@ -3227,7 +3373,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY a.col1[1].col0",
                 "SELECT * FROM VALUES (31, 3.2, 8.7, 34, 8.0), (41, 3.1, 3.1, 32, 6.0)");
 
-        assertQuery("SELECT a.col1[1].col0, SUM(a.col0), SUM(a.col1[1].col1), SUM(a.col1[2].col0), SUM(a.col2.col1) FROM " +
+        assertQuery(
+                "SELECT a.col1[1].col0, SUM(a.col0), SUM(a.col1[1].col1), SUM(a.col1[2].col0), SUM(a.col2.col1) FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(2.2, ARRAY[row(31, 4.2E0), row(22, 4.2E0)], row(5, 4.0E0)) AS ROW(col0 double, col1 array(row(col0 integer, col1 double)), col2 row(col0 integer, col1 double)))), " +
                         "ROW(CAST(ROW(1.0, ARRAY[row(31, 4.5E0), row(12, 4.2E0)], row(3, 4.1E0)) AS ROW(col0 double, col1 array(row(col0 integer, col1 double)), col2 row(col0 integer, col1 double)))), " +
@@ -3237,7 +3384,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY a.col1[1]",
                 "SELECT * FROM VALUES (31, 2.2, 4.2, 22, 4.0), (31, 1.0, 4.5, 12, 4.1), (41, 6.4, 6.2, 64, 12.0)");
 
-        assertQuery("SELECT a.col1[2], SUM(a.col0), SUM(a.col1[1]), SUM(a.col2.col1) FROM " +
+        assertQuery(
+                "SELECT a.col1[2], SUM(a.col0), SUM(a.col1[1]), SUM(a.col2.col1) FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(1.0, ARRAY[2, 13, 4], row(11, 4.1E0))   AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
                         "ROW(CAST(ROW(2.0, ARRAY[2, 13, 4], row(12, 14.0E0))  AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
@@ -3245,7 +3393,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY a.col1[2]",
                 "SELECT * FROM VALUES (13, 3.0, 4, 18.1), (33, 7.0, 22, 5.0)");
 
-        assertQuery("SELECT a.col2.col0, SUM(a.col2.col1) FROM " +
+        assertQuery(
+                "SELECT a.col2.col0, SUM(a.col2.col1) FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(2.2, ARRAY[row(31, 4.2E0), row(22, 4.2E0)], row(5, 4.0E0)) AS ROW(col0 double, col1 array(row(col0 integer, col1 double)), col2 row(col0 integer, col1 double)))), " +
                         "ROW(CAST(ROW(1.0, ARRAY[row(31, 4.5E0), row(12, 4.2E0)], row(3, 4.1E0)) AS ROW(col0 double, col1 array(row(col0 integer, col1 double)), col2 row(col0 integer, col1 double)))), " +
@@ -3255,7 +3404,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY a.col2",
                 "SELECT * FROM VALUES (5, 4.0), (3, 4.1), (6, 12.0)");
 
-        assertQuery("SELECT a.col2.col0, a.col0, SUM(a.col2.col1) FROM " +
+        assertQuery(
+                "SELECT a.col2.col0, a.col0, SUM(a.col2.col1) FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(1.0, ARRAY[2, 13, 4], row(11, 4.1E0))   AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
                         "ROW(CAST(ROW(2.0, ARRAY[2, 23, 4], row(11, 14.0E0))  AS ROW(col0 double, col1 array(integer), col2 row(col0 integer, col1 double)))), " +
@@ -3266,7 +3416,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY 1, 2 ORDER BY 1",
                 "SELECT * FROM VALUES (11, 1.0, 4.1), (11, 1.5, 8.2), (11, 2.0, 14.0)");
 
-        assertQuery("SELECT a[1].col0, COUNT(1) FROM " +
+        assertQuery(
+                "SELECT a[1].col0, COUNT(1) FROM " +
                         "(VALUES " +
                         "(ROW(CAST(ARRAY[row(31, 4.2E0), row(22, 4.2E0)] AS ARRAY(ROW(col0 integer, col1 double))))), " +
                         "(ROW(CAST(ARRAY[row(31, 4.5E0), row(12, 4.2E0)] AS ARRAY(ROW(col0 integer, col1 double))))), " +
@@ -3281,7 +3432,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testRowFieldAccessorInJoin()
     {
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT t.a.col1, custkey, orderkey FROM " +
                         "(VALUES " +
                         "ROW(CAST(ROW(1, 11) AS ROW(col0 integer, col1 integer))), " +
@@ -3308,7 +3460,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testDereferenceInSubquery()
     {
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT x " +
                         "FROM (" +
                         "   SELECT a.x" +
@@ -3317,7 +3470,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY x",
                 "SELECT * FROM VALUES 1, 2, 3");
 
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT t2.*, max(t1.b) AS max_b " +
                         "FROM (VALUES (1, 'a'),  (2, 'b'), (1, 'c'), (3, 'd')) t1(a, b) " +
                         "INNER JOIN " +
@@ -3326,7 +3480,8 @@ public abstract class AbstractTestEngineOnlyQueries
                         "GROUP BY t2.a",
                 "SELECT * FROM VALUES (1, 'c'), (2, 'b'), (3, 'd')");
 
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT t2.*, max(t1.b1) AS max_b1 " +
                         "FROM (VALUES (1, 'a'),  (2, 'b'), (1, 'c'), (3, 'd')) t1(a1, b1) " +
                         "INNER JOIN " +
@@ -3405,24 +3560,29 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT b FROM UNNEST(ARRAY[1, 2, 3], ARRAY[4, 5]) t(a, b)", "SELECT * FROM VALUES 4, 5, NULL");
         assertQuery("SELECT count(*) FROM UNNEST(ARRAY[1, 2, 3], ARRAY[4, 5])", "SELECT 3");
         assertQuery("SELECT a FROM UNNEST(ARRAY['kittens', 'puppies']) t(a)", "SELECT * FROM VALUES ('kittens'), ('puppies')");
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT c " +
                         "FROM UNNEST(ARRAY[1, 2, 3], ARRAY[4, 5]) t(a, b) " +
                         "CROSS JOIN (values (8), (9)) t2(c)",
                 "SELECT * FROM VALUES 8, 8, 8, 9, 9, 9");
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT a.custkey, t.e " +
                         "FROM (SELECT custkey, ARRAY[1, 2, 3] AS my_array FROM orders ORDER BY orderkey LIMIT 1) a " +
                         "CROSS JOIN UNNEST(my_array) t(e)",
                 "SELECT * FROM (SELECT custkey FROM orders ORDER BY orderkey LIMIT 1) CROSS JOIN (VALUES (1), (2), (3))");
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT a.custkey, t.e " +
                         "FROM (SELECT custkey, ARRAY[1, 2, 3] AS my_array FROM orders ORDER BY orderkey LIMIT 1) a, " +
                         "UNNEST(my_array) t(e)",
                 "SELECT * FROM (SELECT custkey FROM orders ORDER BY orderkey LIMIT 1) CROSS JOIN (VALUES (1), (2), (3))");
-        assertQuery("SELECT * FROM UNNEST(ARRAY[0, 1]) CROSS JOIN UNNEST(ARRAY[0, 1]) CROSS JOIN UNNEST(ARRAY[0, 1])",
+        assertQuery(
+                "SELECT * FROM UNNEST(ARRAY[0, 1]) CROSS JOIN UNNEST(ARRAY[0, 1]) CROSS JOIN UNNEST(ARRAY[0, 1])",
                 "SELECT * FROM VALUES (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)");
-        assertQuery("SELECT * FROM UNNEST(ARRAY[0, 1]), UNNEST(ARRAY[0, 1]), UNNEST(ARRAY[0, 1])",
+        assertQuery(
+                "SELECT * FROM UNNEST(ARRAY[0, 1]), UNNEST(ARRAY[0, 1]), UNNEST(ARRAY[0, 1])",
                 "SELECT * FROM VALUES (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)");
         assertQuery("SELECT a, b FROM UNNEST(MAP(ARRAY[1,2], ARRAY['cat', 'dog'])) t(a, b)", "SELECT * FROM VALUES (1, 'cat'), (2, 'dog')");
         assertQuery("SELECT a, b FROM UNNEST(MAP(ARRAY[1,2], ARRAY['cat', NULL])) t(a, b)", "SELECT * FROM VALUES (1, 'cat'), (2, NULL)");
@@ -3432,17 +3592,20 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT b FROM UNNEST(ARRAY[10, 20, 30]) WITH ORDINALITY t(a, b)", "SELECT * FROM VALUES (1), (2), (3)");
         assertQuery("SELECT a, b, c FROM UNNEST(ARRAY[10, 20, 30], ARRAY[4, 5]) WITH ORDINALITY t(a, b, c)", "SELECT * FROM VALUES (10, 4, 1), (20, 5, 2), (30, NULL, 3)");
         assertQuery("SELECT a, b FROM UNNEST(ARRAY['kittens', 'puppies']) WITH ORDINALITY t(a, b)", "SELECT * FROM VALUES ('kittens', 1), ('puppies', 2)");
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT c " +
                         "FROM UNNEST(ARRAY[1, 2, 3], ARRAY[4, 5]) WITH ORDINALITY t(a, b, c) " +
                         "CROSS JOIN (values (8), (9)) t2(d)",
                 "SELECT * FROM VALUES 1, 1, 2, 2, 3, 3");
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT a.custkey, t.e, t.f " +
                         "FROM (SELECT custkey, ARRAY[10, 20, 30] AS my_array FROM orders ORDER BY orderkey LIMIT 1) a " +
                         "CROSS JOIN UNNEST(my_array) WITH ORDINALITY t(e, f)",
                 "SELECT * FROM (SELECT custkey FROM orders ORDER BY orderkey LIMIT 1) CROSS JOIN (VALUES (10, 1), (20, 2), (30, 3))");
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT a.custkey, t.e, t.f " +
                         "FROM (SELECT custkey, ARRAY[10, 20, 30] AS my_array FROM orders ORDER BY orderkey LIMIT 1) a, " +
                         "UNNEST(my_array) WITH ORDINALITY t(e, f)",
@@ -3452,16 +3615,16 @@ public abstract class AbstractTestEngineOnlyQueries
 
         assertQuery(
                 """
-                        WITH array_construct AS (
-                            SELECT ARRAY[1, 2, 3] AS array_actual, '[1,2,3]' AS expected
-                            UNION ALL
-                            SELECT NULL AS array_actual, '[]' AS expected)
-                        SELECT
-                            array_actual,
-                            '[' || (SELECT listagg(CAST(element AS varchar), ',') WITHIN GROUP(ORDER BY element) FROM UNNEST(array_actual) t(element)) || ']' AS actual,
-                            expected
-                        FROM array_construct
-                        """,
+                WITH array_construct AS (
+                    SELECT ARRAY[1, 2, 3] AS array_actual, '[1,2,3]' AS expected
+                    UNION ALL
+                    SELECT NULL AS array_actual, '[]' AS expected)
+                SELECT
+                    array_actual,
+                    '[' || (SELECT listagg(CAST(element AS varchar), ',') WITHIN GROUP(ORDER BY element) FROM UNNEST(array_actual) t(element)) || ']' AS actual,
+                    expected
+                FROM array_construct
+                """,
                 "VALUES (ARRAY[1, 2, 3], CAST('[1,2,3]' AS varchar), '[1,2,3]'), (null, null, '[]')");
     }
 
@@ -3496,7 +3659,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testMaxByN()
     {
-        assertQuery("SELECT y FROM (SELECT MAX_BY(orderkey, totalprice, 2) mx FROM orders) CROSS JOIN UNNEST(mx) u(y)",
+        assertQuery(
+                "SELECT y FROM (SELECT MAX_BY(orderkey, totalprice, 2) mx FROM orders) CROSS JOIN UNNEST(mx) u(y)",
                 "SELECT orderkey FROM orders ORDER BY totalprice DESC LIMIT 2");
     }
 
@@ -3513,7 +3677,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testMinByN()
     {
-        assertQuery("SELECT y FROM (SELECT MIN_BY(orderkey, totalprice, 2) mx FROM orders) CROSS JOIN UNNEST(mx) u(y)",
+        assertQuery(
+                "SELECT y FROM (SELECT MIN_BY(orderkey, totalprice, 2) mx FROM orders) CROSS JOIN UNNEST(mx) u(y)",
                 "SELECT orderkey FROM orders ORDER BY totalprice ASC LIMIT 2");
     }
 
@@ -3549,8 +3714,8 @@ public abstract class AbstractTestEngineOnlyQueries
             Long orderKeyFractionalWeighted = ((Number) row.getField(5)).longValue();
             Double totalPriceFractionalWeighted = (Double) row.getField(6);
 
-            List<Long> orderKeys = Ordering.natural().sortedCopy(orderKeyByStatus.get(status));
-            List<Double> totalPrices = Ordering.natural().sortedCopy(totalPriceByStatus.get(status));
+            List<Long> orderKeys = orderKeyByStatus.get(status).stream().sorted().collect(toImmutableList());
+            List<Double> totalPrices = totalPriceByStatus.get(status).stream().sorted().collect(toImmutableList());
 
             // verify real rank of returned value is within 0.05% of requested rank
             assertThat(orderKey >= orderKeys.get((int) (0.9985 * orderKeys.size()))).isTrue();
@@ -3643,7 +3808,7 @@ public abstract class AbstractTestEngineOnlyQueries
         MaterializedResult actual = computeActual("SELECT x FROM " + values + " OFFSET 2 ROWS");
         MaterializedResult all = computeExpected("SELECT x FROM " + values, actual.getTypes());
 
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(2);
+        assertThat(actual.getMaterializedRows()).hasSize(2);
         assertThat(actual.getMaterializedRows().get(0))
                 .isNotEqualTo(actual.getMaterializedRows().get(1));
         assertContains(all, actual);
@@ -3657,7 +3822,7 @@ public abstract class AbstractTestEngineOnlyQueries
         MaterializedResult actual = computeActual("SELECT x FROM " + values + " OFFSET 2 ROWS FETCH NEXT ROW ONLY");
         MaterializedResult all = computeExpected("SELECT x FROM " + values, actual.getTypes());
 
-        assertThat(actual.getMaterializedRows().size()).isEqualTo(1);
+        assertThat(actual.getMaterializedRows()).hasSize(1);
         assertContains(all, actual);
     }
 
@@ -3810,12 +3975,14 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testSameInPredicateInProjectionAndFilter()
     {
-        assertQuery("SELECT x IN (SELECT * FROM (VALUES 1))\n" +
+        assertQuery(
+                "SELECT x IN (SELECT * FROM (VALUES 1))\n" +
                         "FROM (VALUES 1) t(x)\n" +
                         "WHERE x IN (SELECT * FROM (VALUES 1))",
                 "SELECT 1");
 
-        assertQuery("SELECT x IN (SELECT * FROM (VALUES 1))\n" +
+        assertQuery(
+                "SELECT x IN (SELECT * FROM (VALUES 1))\n" +
                         "FROM (VALUES 2) t(x)\n" +
                         "WHERE x IN (SELECT * FROM (VALUES 1))",
                 "SELECT 1 WHERE false");
@@ -3900,7 +4067,8 @@ public abstract class AbstractTestEngineOnlyQueries
         // multiple exists
         assertQuery("SELECT (EXISTS(SELECT 1)) = (EXISTS(SELECT 1)) WHERE NOT EXISTS(SELECT 1)", "SELECT true WHERE false");
         assertQuery("SELECT (EXISTS(SELECT 1)) = (EXISTS(SELECT 3)) WHERE NOT EXISTS(SELECT 1 WHERE false)", "SELECT true");
-        assertQuery("SELECT COUNT(*) FROM lineitem WHERE " +
+        assertQuery(
+                "SELECT COUNT(*) FROM lineitem WHERE " +
                         "(EXISTS(SELECT min(orderkey) FROM orders))" +
                         "=" +
                         "(NOT EXISTS(SELECT orderkey FROM orders WHERE false))",
@@ -3997,7 +4165,8 @@ public abstract class AbstractTestEngineOnlyQueries
                 "ON o1.orderkey " +
                 "BETWEEN (SELECT avg(orderkey) FROM orders) - 10 AND (SELECT avg(orderkey) FROM orders) + 10 " +
                 "GROUP BY o1.orderkey");
-        assertQuery("SELECT DISTINCT COUNT(*) " +
+        assertQuery(
+                "SELECT DISTINCT COUNT(*) " +
                         "FROM (SELECT * FROM orders ORDER BY orderkey LIMIT 5) o1 " +
                         "FULL JOIN (SELECT * FROM orders ORDER BY orderkey LIMIT 10) o2 " +
                         "ON o1.orderkey " +
@@ -4010,10 +4179,12 @@ public abstract class AbstractTestEngineOnlyQueries
 
         // subquery returns multiple rows
         String multipleRowsErrorMsg = "Scalar sub-query has returned multiple rows";
-        assertQueryFails("SELECT * FROM lineitem WHERE orderkey = (\n" +
+        assertQueryFails(
+                "SELECT * FROM lineitem WHERE orderkey = (\n" +
                         "SELECT orderkey FROM orders ORDER BY totalprice)",
                 multipleRowsErrorMsg);
-        assertQueryFails("SELECT orderkey, totalprice FROM orders ORDER BY (VALUES 1, 2)",
+        assertQueryFails(
+                "SELECT orderkey, totalprice FROM orders ORDER BY (VALUES 1, 2)",
                 multipleRowsErrorMsg);
 
         // exposes a bug in optimize hash generation because EnforceSingleNode does not
@@ -4245,7 +4416,8 @@ public abstract class AbstractTestEngineOnlyQueries
     public void testTwoCorrelatedExistsSubqueries()
     {
         // This is simplified TPC-H q21
-        assertQuery("SELECT\n" +
+        assertQuery(
+                "SELECT\n" +
                         "  count(*) AS numwait\n" +
                         "FROM\n" +
                         "  nation l1\n" +
@@ -4347,21 +4519,25 @@ public abstract class AbstractTestEngineOnlyQueries
                 "FROM nation n1");
 
         // count in subquery
-        assertQuery("SELECT * " +
+        assertQuery(
+                "SELECT * " +
                         "FROM (VALUES (0), (1), (2), (7)) AS v1(c1) " +
                         "WHERE v1.c1 > (SELECT count(c1) FROM (VALUES (0), (1), (2)) AS v2(c1) WHERE v1.c1 = v2.c1)",
                 "VALUES (2), (7)");
 
         // count rows
-        assertQuery("SELECT (SELECT count(*) FROM (VALUES (1, true), (null, true)) inner_table(a, b) WHERE inner_table.b = outer_table.b) FROM (VALUES (true)) outer_table(b)",
+        assertQuery(
+                "SELECT (SELECT count(*) FROM (VALUES (1, true), (null, true)) inner_table(a, b) WHERE inner_table.b = outer_table.b) FROM (VALUES (true)) outer_table(b)",
                 "VALUES (2)");
 
         // count rows
-        assertQuery("SELECT (SELECT count() FROM (VALUES (1, true), (null, true)) inner_table(a, b) WHERE inner_table.b = outer_table.b) FROM (VALUES (true)) outer_table(b)",
+        assertQuery(
+                "SELECT (SELECT count() FROM (VALUES (1, true), (null, true)) inner_table(a, b) WHERE inner_table.b = outer_table.b) FROM (VALUES (true)) outer_table(b)",
                 "VALUES (2)");
 
         // count non null values
-        assertQuery("SELECT (SELECT count(a) FROM (VALUES (1, true), (null, true)) inner_table(a, b) WHERE inner_table.b = outer_table.b) FROM (VALUES (true)) outer_table(b)",
+        assertQuery(
+                "SELECT (SELECT count(a) FROM (VALUES (1, true), (null, true)) inner_table(a, b) WHERE inner_table.b = outer_table.b) FROM (VALUES (true)) outer_table(b)",
                 "VALUES (1)");
     }
 
@@ -4525,7 +4701,8 @@ public abstract class AbstractTestEngineOnlyQueries
         // explicit LIMIT in subquery
         assertQuery("SELECT (SELECT count(*) FROM (VALUES (7,1)) t(orderkey, value) WHERE orderkey = corr_key GROUP BY value LIMIT 1) FROM (values 7) t(corr_key)");
         // Limit(1) and non-constant output symbol of the subquery (count)
-        assertQueryFails("SELECT (SELECT count(*) FROM (VALUES (7,1), (7,2)) t(orderkey, value) WHERE orderkey = corr_key GROUP BY value LIMIT 1) FROM (values 7) t(corr_key)",
+        assertQueryFails(
+                "SELECT (SELECT count(*) FROM (VALUES (7,1), (7,2)) t(orderkey, value) WHERE orderkey = corr_key GROUP BY value LIMIT 1) FROM (values 7) t(corr_key)",
                 UNSUPPORTED_CORRELATED_SUBQUERY_ERROR_MSG);
     }
 
@@ -4811,13 +4988,16 @@ public abstract class AbstractTestEngineOnlyQueries
                 "SELECT a, b, sum(c), grouping(a, b) FROM (VALUES ('h', 'j', 11), ('k', 'l', 7) ) AS t (a, b, c) GROUP BY GROUPING SETS ( (a), (b)) HAVING grouping(a, b) > 1 ",
                 "VALUES (NULL, 'j', 11, 2), (NULL, 'l', 7, 2)");
 
-        assertQuery("SELECT a, grouping(a) * 1.0 FROM (VALUES (1) ) AS t (a) GROUP BY a",
+        assertQuery(
+                "SELECT a, grouping(a) * 1.0 FROM (VALUES (1) ) AS t (a) GROUP BY a",
                 "VALUES (1, 0.0)");
 
-        assertQuery("SELECT a, grouping(a), grouping(a) FROM (VALUES (1) ) AS t (a) GROUP BY a",
+        assertQuery(
+                "SELECT a, grouping(a), grouping(a) FROM (VALUES (1) ) AS t (a) GROUP BY a",
                 "VALUES (1, 0, 0)");
 
-        assertQuery("SELECT grouping(a) FROM (VALUES ('h', 'j', 11), ('k', 'l', 7)) AS t (a, b, c) GROUP BY GROUPING SETS (a,c), c*2",
+        assertQuery(
+                "SELECT grouping(a) FROM (VALUES ('h', 'j', 11), ('k', 'l', 7)) AS t (a, b, c) GROUP BY GROUPING SETS (a,c), c*2",
                 "VALUES (0), (1), (0), (1)");
     }
 
@@ -5070,7 +5250,7 @@ public abstract class AbstractTestEngineOnlyQueries
         // wildcard from aliased table with column aliases
         assertQuery("SELECT a, b, c, d FROM (SELECT T.* FROM nation T (a, b, c, d))");
 
-        //qualified wildcard from inline view
+        // qualified wildcard from inline view
         assertQuery("SELECT T.* FROM (SELECT orderkey + custkey FROM orders) T");
 
         // wildcard from table with order by
@@ -5378,7 +5558,7 @@ public abstract class AbstractTestEngineOnlyQueries
                 getSession().getQueryDataEncoding());
         MaterializedResult result = computeActual(session, "SHOW SESSION");
 
-        ImmutableMap<String, MaterializedRow> properties = Maps.uniqueIndex(result.getMaterializedRows(), input -> {
+        Map<String, MaterializedRow> properties = Maps.uniqueIndex(result.getMaterializedRows(), input -> {
             assertThat(input.getFieldCount()).isEqualTo(5);
             return (String) input.getField(0);
         });
@@ -5423,6 +5603,12 @@ public abstract class AbstractTestEngineOnlyQueries
         result = computeActual(format("SET SESSION %s.connector_double = 11.1", TESTING_CATALOG));
         assertNoRelationalResult(result);
         assertThat(result.getSetSessionProperties()).isEqualTo(ImmutableMap.of(TESTING_CATALOG + ".connector_double", "11.1"));
+
+        assertThatThrownBy(() -> computeActual(format("SET SESSION %s.connector_l = 1", TESTING_CATALOG)))
+                .hasMessage("line 1:43: Session property 'testing_catalog.connector_l' does not exist. Did you mean to use 'testing_catalog.connector_long', 'testing_catalog.connector_double' or 'testing_catalog.connector_boolean'?");
+
+        assertThatThrownBy(() -> computeActual("SET SESSION task_writer_count = 1"))
+                .hasMessage("line 1:33: Session property 'task_writer_count' does not exist. Did you mean to use 'task_max_writer_count' or 'task_min_writer_count'?");
     }
 
     @Test
@@ -5455,6 +5641,77 @@ public abstract class AbstractTestEngineOnlyQueries
 
         assertQueryFails("SHOW TABLES FROM UNKNOWN", "line 1:1: Schema 'unknown' does not exist");
         assertQueryFails("SHOW TABLES FROM UNKNOWNCATALOG.UNKNOWNSCHEMA", "line 1:1: Catalog 'unknowncatalog' not found");
+    }
+
+    @Test
+    public void testShowSchemasLike()
+    {
+        MaterializedResult result = computeActual(format("SHOW SCHEMAS LIKE '%s'", getSession().getSchema().get()));
+        assertThat(result.getOnlyColumnAsSet()).isEqualTo(ImmutableSet.of(getSession().getSchema().get()));
+    }
+
+    @Test
+    public void testShowSchemasFrom()
+    {
+        MaterializedResult result = computeActual(format("SHOW SCHEMAS FROM %s", getSession().getCatalog().get()));
+        assertThat(result.getOnlyColumnAsSet()).contains("information_schema");
+    }
+
+    @Test
+    public void testShowTablesLike()
+    {
+        assertThat(computeActual("SHOW TABLES LIKE 'or%'").getOnlyColumnAsSet())
+                .contains("orders")
+                .allMatch(tableName -> ((String) tableName).startsWith("or"));
+    }
+
+    @Test
+    public void testShowInformationSchemaTables()
+    {
+        assertThat(computeActual("SHOW TABLES FROM information_schema").getOnlyColumnAsSet())
+                .isEqualTo(Set.of("applicable_roles", "columns", "enabled_roles", "roles", "schemata", "table_privileges", "tables", "views"));
+    }
+
+    @Test
+    public void testShowCreateInformationSchema()
+    {
+        assertThat(query("SHOW CREATE SCHEMA information_schema"))
+                .skippingTypesCheck()
+                .matches(format("VALUES 'CREATE SCHEMA %s.information_schema'", getSession().getCatalog().orElseThrow()));
+    }
+
+    @Test
+    public void testShowCreateInformationSchemaTable()
+    {
+        assertQueryFails("SHOW CREATE VIEW information_schema.schemata", "line 1:1: Relation '\\w+.information_schema.schemata' is a table, not a view");
+        assertQueryFails("SHOW CREATE MATERIALIZED VIEW information_schema.schemata", "line 1:1: Relation '\\w+.information_schema.schemata' is a table, not a materialized view");
+
+        assertThat((String) computeScalar("SHOW CREATE TABLE information_schema.schemata"))
+                .isEqualTo("CREATE TABLE " + getSession().getCatalog().orElseThrow() + ".information_schema.schemata (\n" +
+                        "   catalog_name varchar,\n" +
+                        "   schema_name varchar\n" +
+                        ")");
+    }
+
+    @Test
+    public void testSymbolAliasing()
+    {
+        String tableName = "memory.default.test_symbol_aliasing_" + randomNameSuffix();
+        try {
+            assertUpdate("CREATE TABLE " + tableName + " AS SELECT 1 foo_1, 2 foo_2_4", 1);
+            assertQuery("SELECT foo_1, foo_2_4 FROM " + tableName, "SELECT 1, 2");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    public void testDropTableIfExists()
+    {
+        assertThat(getQueryRunner().tableExists(getSession(), "test_drop_if_exists")).isFalse();
+        assertUpdate("DROP TABLE IF EXISTS test_drop_if_exists");
+        assertThat(getQueryRunner().tableExists(getSession(), "test_drop_if_exists")).isFalse();
     }
 
     @Test
@@ -5601,7 +5858,8 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testUnionWithTopN()
     {
-        assertQuery("SELECT * FROM (" +
+        assertQuery(
+                "SELECT * FROM (" +
                         "   SELECT regionkey FROM nation " +
                         "   UNION ALL " +
                         "   SELECT nationkey FROM nation" +
@@ -5619,6 +5877,12 @@ public abstract class AbstractTestEngineOnlyQueries
                         "   UNION ALL " +
                         "   SELECT shipdate ds, orderkey FROM lineitem) a " +
                         "JOIN orders o ON (a.orderkey = o.orderkey)");
+    }
+
+    @Test
+    public void testUnionAllAboveBroadcastJoin()
+    {
+        assertQuery("SELECT COUNT(*) FROM region r JOIN (SELECT nationkey FROM nation UNION ALL SELECT nationkey as key FROM nation) n ON r.regionkey = n.nationkey", "VALUES 10");
     }
 
     @Test
@@ -5977,6 +6241,14 @@ public abstract class AbstractTestEngineOnlyQueries
     }
 
     @Test
+    public void testDefaultExplainJsonFormat()
+    {
+        String query = "SELECT * FROM orders";
+        MaterializedResult result = computeActual("EXPLAIN (FORMAT JSON) " + query);
+        assertThat(getOnlyElement(result.getOnlyColumnAsSet())).isEqualTo(getJsonExplainPlan(query, DISTRIBUTED));
+    }
+
+    @Test
     public void testLogicalExplain()
     {
         String query = "SELECT * FROM orders";
@@ -6009,6 +6281,16 @@ public abstract class AbstractTestEngineOnlyQueries
         String query = "SELECT * FROM orders";
         MaterializedResult result = computeActual("EXPLAIN (TYPE LOGICAL, FORMAT TEXT) " + query);
         assertThat(getOnlyElement(result.getOnlyColumnAsSet())).isEqualTo(getExplainPlan(query, LOGICAL));
+        assertThat(getOnlyElement(result.getOnlyColumnAsSet())).isEqualTo(DEPRECATED_TYPE_LOGICAL_WARNING + getExplainPlan(query, DISTRIBUTED));
+    }
+
+    @Test
+    public void testLogicalExplainJsonFormat()
+    {
+        String query = "SELECT * FROM orders";
+        MaterializedResult result = computeActual("EXPLAIN (TYPE LOGICAL, FORMAT JSON) " + query);
+        assertThat(getOnlyElement(result.getOnlyColumnAsSet())).isEqualTo(getJsonExplainPlan(query, LOGICAL));
+        assertThat(getOnlyElement(result.getOnlyColumnAsSet())).isEqualTo(getJsonExplainPlan(query, DISTRIBUTED));
     }
 
     @Test
@@ -6155,6 +6437,21 @@ public abstract class AbstractTestEngineOnlyQueries
     }
 
     @Test
+    public void testShowSchemasLikeWithEscape()
+    {
+        assertQueryFails("SHOW SCHEMAS LIKE '%$_%' ESCAPE", "line 1:32: mismatched input '<EOF>'. Expecting: <string>");
+        assertQueryFails("SHOW SCHEMAS LIKE 't$_%' ESCAPE ''", "Escape string must be a single character");
+        assertQueryFails("SHOW SCHEMAS LIKE 't$_%' ESCAPE '$$'", "Escape string must be a single character");
+
+        Set<Object> allSchemas = computeActual("SHOW SCHEMAS").getOnlyColumnAsSet();
+        assertThat(allSchemas).isEqualTo(computeActual("SHOW SCHEMAS LIKE '%_%'").getOnlyColumnAsSet());
+        Set<Object> result = computeActual("SHOW SCHEMAS LIKE '%$_%' ESCAPE '$'").getOnlyColumnAsSet();
+        assertThat(allSchemas)
+                .isNotEqualTo(result);
+        assertThat(result).contains("information_schema").allMatch(schemaName -> ((String) schemaName).contains("_"));
+    }
+
+    @Test
     public void testShowCatalogs()
     {
         MaterializedResult result = computeActual("SHOW CATALOGS");
@@ -6180,7 +6477,7 @@ public abstract class AbstractTestEngineOnlyQueries
         assertThat(functions.containsKey("avg"))
                 .describedAs("Expected function names " + functions + " to contain 'avg'")
                 .isTrue();
-        assertThat(functions.get("avg").asList().size()).isEqualTo(6);
+        assertThat(functions.get("avg").asList()).hasSize(7);
         assertThat(functions.get("avg").asList().get(0).getField(1)).isEqualTo("decimal(p,s)");
         assertThat(functions.get("avg").asList().get(0).getField(2)).isEqualTo("decimal(p,s)");
         assertThat(functions.get("avg").asList().get(0).getField(3)).isEqualTo("aggregate");
@@ -6196,9 +6493,12 @@ public abstract class AbstractTestEngineOnlyQueries
         assertThat(functions.get("avg").asList().get(4).getField(1)).isEqualTo("interval year to month");
         assertThat(functions.get("avg").asList().get(4).getField(2)).isEqualTo("interval year to month");
         assertThat(functions.get("avg").asList().get(4).getField(3)).isEqualTo("aggregate");
-        assertThat(functions.get("avg").asList().get(5).getField(1)).isEqualTo("real");
-        assertThat(functions.get("avg").asList().get(5).getField(2)).isEqualTo("real");
+        assertThat(functions.get("avg").asList().get(5).getField(1)).isEqualTo("number");
+        assertThat(functions.get("avg").asList().get(5).getField(2)).isEqualTo("number");
         assertThat(functions.get("avg").asList().get(5).getField(3)).isEqualTo("aggregate");
+        assertThat(functions.get("avg").asList().get(6).getField(1)).isEqualTo("real");
+        assertThat(functions.get("avg").asList().get(6).getField(2)).isEqualTo("real");
+        assertThat(functions.get("avg").asList().get(6).getField(3)).isEqualTo("aggregate");
 
         assertThat(functions.containsKey("abs"))
                 .describedAs("Expected function names " + functions + " to contain 'abs'")
@@ -6232,7 +6532,7 @@ public abstract class AbstractTestEngineOnlyQueries
     private static String pivotQuery(int columnsCount)
     {
         String fields = IntStream.range(0, columnsCount)
-                .mapToObj(columnNumber -> "lower(name)")
+                .mapToObj(_ -> "lower(name)")
                 .collect(joining(", "));
 
         String literals = IntStream.range(0, columnsCount)
@@ -6360,7 +6660,7 @@ public abstract class AbstractTestEngineOnlyQueries
         // returning char(6) (java type Slice)
         assertThat(query("SELECT json_value(json_input, 'strict $?(@[1] > 1 || @[2] == true)[0]' RETURNING char(6)) result " +
                 "              FROM (SELECT format('[\"%s\", %s, %s]', name, regionkey, comment > 'k') FROM region) t(json_input)")) // JSON array[text, number, boolean]
-                .matches("VALUES cast('AFRICA' AS char(6)), null, 'ASIA  ', 'EUROPE', 'MIDDLE'");
+                .matches("VALUES cast('AFRICA' AS char(6)), null, cast('ASIA' AS char(6)), cast('EUROPE' AS char(6)), cast('MIDDLE' AS char(6))");
 
         // returning integer (java type long)
         assertThat(query("SELECT json_value(json_input, 'strict $?(@[0] starts with \"A\" || @[1] < 4)[1]' RETURNING integer) result " +
@@ -6528,10 +6828,19 @@ public abstract class AbstractTestEngineOnlyQueries
     @Test
     public void testSubqueryInJsonFunctions()
     {
-        // subqueries as: input item, passed parameter, empty default, error default
-        assertThat(query("SELECT json_value((SELECT json_input), 'strict $?(@ < $var)' PASSING (SELECT 3) AS \"var\" DEFAULT (SELECT 'x') ON EMPTY DEFAULT (SELECT 'y') ON ERROR) result " +
+        // subqueries as: input item, passed parameter
+        assertThat(query("SELECT json_value((SELECT json_input), 'strict $?(@ < $var)' PASSING (SELECT 3) AS \"var\" DEFAULT 'x' ON EMPTY DEFAULT 'y' ON ERROR) result " +
                 "              FROM (SELECT format('%s', regionkey) FROM region) t(json_input)")) // JSON number
                 .matches("VALUES VARCHAR '0', '1', '2', 'x', 'x'");
+
+        // subqueries are not supported in default expressions; the analyzer rejects them so the spec-mandated
+        // lazy evaluation of CAST(VE AS DT) is not subverted by pre-planning the subquery at the outer level
+        assertQueryFails(
+                "SELECT json_value('{}', 'lax $' DEFAULT (SELECT 'x') ON EMPTY)",
+                ".*Subqueries are not supported in JSON_VALUE default expressions");
+        assertQueryFails(
+                "SELECT json_value('{}', 'lax $' DEFAULT (SELECT 'x') ON ERROR)",
+                ".*Subqueries are not supported in JSON_VALUE default expressions");
     }
 
     @Test
@@ -6619,139 +6928,211 @@ public abstract class AbstractTestEngineOnlyQueries
     }
 
     @Test
-    public void testInlineSqlFunctions()
+    public void testCreateFunctionErrorReporting()
     {
-        assertThat(query("""
-                WITH FUNCTION abc(x integer) RETURNS integer RETURN x * 2
-                SELECT abc(21)
-                """))
-                .matches("VALUES 42");
-        assertThat(query("""
-                WITH FUNCTION abc(x integer) RETURNS integer RETURN abs(x)
-                SELECT abc(-21)
-                """))
-                .matches("VALUES 21");
+        assertQueryFails(
+                "CREATE FUNCTION a.b.c() RETURNS integer DETERMINISTIC DETERMINISTIC RETURN 8",
+                "line 1:55: Multiple deterministic clauses specified");
 
-        assertThat(query("""
-                WITH
-                  FUNCTION abc(x integer) RETURNS integer RETURN x * 2,
-                  FUNCTION xyz(x integer) RETURNS integer RETURN abc(x) + 1
-                SELECT xyz(21)
-                """))
-                .matches("VALUES 43");
-
-        assertThat(query("""
-                WITH
-                  FUNCTION my_pow(n int, p int)
-                  RETURNS int
-                  BEGIN
-                    DECLARE r int DEFAULT n;
-                    top: LOOP
-                      IF p <= 1 THEN
-                        LEAVE top;
-                      END IF;
-                      SET r = r * n;
-                      SET p = p - 1;
-                    END LOOP;
-                    RETURN r;
-                  END
-                SELECT my_pow(2, 8)
-                """))
-                .matches("VALUES 256");
-
-        // invoke function on data from connector to prevent constant folding on the coordinator
-        assertThat(query("""
-                WITH
-                  FUNCTION my_pow(n int, p int)
-                  RETURNS int
-                  BEGIN
-                    DECLARE r int DEFAULT n;
-                    top: LOOP
-                      IF p <= 1 THEN
-                        LEAVE top;
-                      END IF;
-                      SET r = r * n;
-                      SET p = p - 1;
-                    END LOOP;
-                    RETURN r;
-                  END
-                SELECT my_pow(CAST(nationkey AS integer), CAST(regionkey AS integer)) FROM nation WHERE nationkey IN (1,2,3,5,8)
-                """))
-                .matches("VALUES 1, 2, 3, 5, 64");
-
-        // function with dereference
-        assertThat(query("""
-                WITH FUNCTION get(input row(varchar))
-                    RETURNS varchar
-                    RETURN input[1]
-                SELECT get(ROW('abc'))
-                """))
-                .matches("VALUES VARCHAR 'abc'");
-
-        // validations for inline functions
-        assertQueryFails("WITH FUNCTION a.b() RETURNS int RETURN 42 SELECT a.b()",
-                "line 1:6: Inline function names cannot be qualified: a.b");
-
-        assertQueryFails("WITH FUNCTION x() RETURNS int SECURITY INVOKER RETURN 42 SELECT x()",
-                "line 1:31: Security mode not supported for inline functions");
-
-        assertQueryFails("WITH FUNCTION x() RETURNS bigint SECURITY DEFINER RETURN 42 SELECT x()",
-                "line 1:34: Security mode not supported for inline functions");
-
-        // error location reporting
-        assertQueryFails("WITH function x() RETURNS bigint DETERMINISTIC DETERMINISTIC RETURN 42 SELECT x()",
-                "line 1:48: Multiple deterministic clauses specified");
-
-        // Verify the current restrictions on inline functions are enforced
-
-        // inline function can mask a global function
-        assertThat(query("""
-                WITH FUNCTION abs(x integer) RETURNS integer RETURN x * 2
-                SELECT abs(-10)
-                """))
-                .matches("VALUES -20");
-        assertThat(query("""
-                WITH
-                  FUNCTION abs(x integer) RETURNS integer RETURN x * 2,
-                  FUNCTION wrap_abs(x integer) RETURNS integer RETURN abs(x)
-                SELECT wrap_abs(-10)
-                """))
-                .matches("VALUES -20");
-
-        // inline function can have the same name as a global function with a different signature
-        assertThat(query("""
-                WITH FUNCTION abs(x varchar) RETURNS varchar RETURN reverse(x)
-                SELECT abs('abc')
-                """))
-                .skippingTypesCheck()
-                .matches("VALUES 'cba'");
-
-        // inline functions must be declared before they are used
-        assertThat(query("""
-                WITH
-                  FUNCTION a(x integer) RETURNS integer RETURN b(x),
-                  FUNCTION b(x integer) RETURNS integer RETURN x * 2
-                SELECT a(10)
-                """))
-                .failure().hasMessage("line 2:48: Function 'b' not registered");
-
-        // inline function cannot be recursive
-        // note: mutual recursion is not supported either, but it is not tested due to the forward declaration limitation above
-        assertThat(query("""
-                WITH FUNCTION a(x integer) RETURNS integer RETURN a(x)
-                SELECT a(10)
-                """))
-                .failure().hasMessage("line 1:6: Recursive language functions are not supported: a(integer):integer");
+        assertQueryFails(
+                "CREATE FUNCTION a.b.c() RETURNS varchar RETURN 8",
+                "line 1:48: Value of RETURN must evaluate to varchar \\(actual: integer\\)");
     }
 
     @Test
-    public void testCreateFunctionErrorReporting()
+    public void testNumber()
     {
-        assertQueryFails("CREATE FUNCTION a.b.c() RETURNS integer DETERMINISTIC DETERMINISTIC RETURN 8",
-                "line 1:55: Multiple deterministic clauses specified");
+        assertThat(query("SELECT NUMBER '3' + NUMBER '.14159265358979'"))
+                .matches("VALUES NUMBER '3.14159265358979'");
+        assertThat(computeActual("SELECT NUMBER '3' + NUMBER '.14159265358979'").getOnlyValue())
+                .isEqualTo(new BigDecimal("3.14159265358979"));
 
-        assertQueryFails("CREATE FUNCTION a.b.c() RETURNS varchar RETURN 8",
-                "line 1:48: Value of RETURN must evaluate to varchar \\(actual: integer\\)");
+        String maxValue = "9".repeat(getNumberMaxDecimalPrecision()) + "e" + -getNumberScaleMinValue();
+        assertThat(computeActual("SELECT NUMBER '" + maxValue + "'").getOnlyValue())
+                .isEqualTo(new BigDecimal(maxValue));
+
+        String minPositiveValue = "1e" + -getNumberScaleMaxValue();
+        assertThat(computeActual("SELECT NUMBER '" + minPositiveValue + "'").getOnlyValue())
+                .isEqualTo(new BigDecimal(minPositiveValue));
+
+        assertThat(computeActual("SELECT NUMBER '+Infinity'").getOnlyValue())
+                .isEqualTo(Double.POSITIVE_INFINITY);
+        assertThat(computeActual("SELECT NUMBER '-Infinity'").getOnlyValue())
+                .isEqualTo(Double.NEGATIVE_INFINITY);
+        assertThat(computeActual("SELECT NUMBER 'NaN'").getOnlyValue())
+                .isEqualTo(Double.NaN);
+    }
+
+    @Test
+    public void testDivisionOverflow()
+    {
+        assertThat(query("SELECT CAST(-0x80 AS tinyint) / TINYINT '-1'"))
+                .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+        assertThat(query("SELECT CAST(-0x8000 AS smallint) / SMALLINT '-1'"))
+                .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+        assertThat(query("SELECT CAST(-0x80000000 AS integer) / INTEGER '-1'"))
+                .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+        assertThat(query("SELECT CAST(-0x8000000000000000 AS bigint) / BIGINT '-1'"))
+                .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+    }
+
+    @Test
+    public void testCastNumericOutOfRange()
+    {
+        // Rule:
+        //   NaN cast to a target type that has no NaN representation -> INVALID_CAST_ARGUMENT.
+        //   Any other "value cannot be represented in target type"  -> NUMERIC_VALUE_OUT_OF_RANGE.
+        // Targets without NaN/Infinity are: TINYINT, SMALLINT, INTEGER, BIGINT and DECIMAL (any precision/scale).
+
+        // Short decimal: precision <= 18; long decimal: precision > 18.
+        List<String> targetTypesWithoutNan = List.of(
+                "tinyint",
+                "smallint",
+                "integer",
+                "bigint",
+                "decimal(2, 0)",
+                "decimal(20, 0)");
+
+        // Sources that can produce NaN, +/-Infinity, and finite-but-out-of-range values.
+        // Each row: source label, NaN literal, +Infinity literal, -Infinity literal, large positive finite, large negative finite.
+        List<List<String>> floatingSources = List.of(
+                List.of("DOUBLE", "nan()", "infinity()", "-infinity()", "DOUBLE '1e300'", "DOUBLE '-1e300'"),
+                List.of("REAL", "CAST(nan() AS REAL)", "CAST(infinity() AS REAL)", "CAST(-infinity() AS REAL)", "REAL '1e30'", "REAL '-1e30'"),
+                List.of("NUMBER", "NUMBER 'NaN'", "NUMBER '+Infinity'", "NUMBER '-Infinity'", "NUMBER '1e300'", "NUMBER '-1e300'"));
+
+        for (List<String> source : floatingSources) {
+            String nan = source.get(1);
+            String positiveInfinity = source.get(2);
+            String negativeInfinity = source.get(3);
+            String largePositive = source.get(4);
+            String largeNegative = source.get(5);
+            for (String target : targetTypesWithoutNan) {
+                assertThat(query("SELECT CAST(" + nan + " AS " + target + ")"))
+                        .failure().hasErrorCode(INVALID_CAST_ARGUMENT);
+                assertThat(query("SELECT CAST(" + positiveInfinity + " AS " + target + ")"))
+                        .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+                assertThat(query("SELECT CAST(" + negativeInfinity + " AS " + target + ")"))
+                        .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+                assertThat(query("SELECT CAST(" + largePositive + " AS " + target + ")"))
+                        .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+                assertThat(query("SELECT CAST(" + largeNegative + " AS " + target + ")"))
+                        .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+            }
+        }
+
+        // Sources without NaN/Infinity, only finite overflow.
+        // Each row: source expression that is too large for the targets that follow it.
+        List<List<String>> finiteOverflowCases = List.of(
+                List.of("BIGINT '9223372036854775807'", "tinyint", "smallint", "integer", "decimal(2, 0)"),
+                List.of("INTEGER '2147483647'", "tinyint", "smallint", "decimal(2, 0)"),
+                List.of("SMALLINT '32767'", "tinyint", "decimal(2, 0)"),
+                List.of(
+                        "DECIMAL '99999999999999999999999999999999999999'", // DECIMAL(38, 0) max
+                        "tinyint",
+                        "smallint",
+                        "integer",
+                        "bigint",
+                        "decimal(2, 0)",
+                        "decimal(20, 0)"),
+                List.of(
+                        "DECIMAL '99999999999999999999'", // DECIMAL(20, 0) max — long decimal source
+                        "tinyint",
+                        "smallint",
+                        "integer",
+                        "bigint",
+                        "decimal(2, 0)"));
+        for (List<String> finiteCase : finiteOverflowCases) {
+            String sourceExpression = finiteCase.get(0);
+            for (String target : finiteCase.subList(1, finiteCase.size())) {
+                assertThat(query("SELECT CAST(" + sourceExpression + " AS " + target + ")"))
+                        .failure().hasErrorCode(NUMERIC_VALUE_OUT_OF_RANGE);
+            }
+        }
+    }
+
+    @Test
+    public void testQueryLoggingCount()
+    {
+        QueryManager queryManager = getQueryRunner().getCoordinator().getQueryManager();
+        executeExclusively(() -> {
+            assertEventually(
+                    new Duration(1, MINUTES),
+                    () -> assertThat(queryManager.getQueries().stream()
+                            .map(BasicQueryInfo::getQueryId)
+                            .map(queryManager::getFullQueryInfo)
+                            .filter(info -> !info.isFinalQueryInfo())
+                            .collect(toList())).isEqualTo(ImmutableList.of()));
+
+            // We cannot simply get the number of completed queries as soon as all the queries are completed, because this counter may not be up-to-date at that point.
+            // The completed queries counter is updated in a final query info listener, which is called eventually.
+            // Therefore, here we wait until the value of this counter gets stable.
+
+            DispatchManager dispatchManager = getQueryRunner().getCoordinator().getDispatchManager();
+            long beforeCompletedQueriesCount = waitUntilStable(() -> dispatchManager.getStats().getCompletedQueries().getTotalCount(), new Duration(5, SECONDS));
+            long beforeSubmittedQueriesCount = dispatchManager.getStats().getSubmittedQueries().getTotalCount();
+            String tableName = "memory.default.test_logging_count" + randomNameSuffix();
+            assertUpdate("CREATE TABLE " + tableName + "(foo_1 int, foo_2_4 int)");
+            assertQueryReturnsEmptyResult("SELECT foo_1, foo_2_4 FROM " + tableName);
+            assertUpdate("DROP TABLE " + tableName);
+            assertQueryFails("SELECT * FROM " + tableName, ".*Table .* does not exist");
+
+            // TODO: Figure out a better way of synchronization
+            assertEventually(
+                    new Duration(1, MINUTES),
+                    () -> assertThat(dispatchManager.getStats().getCompletedQueries().getTotalCount() - beforeCompletedQueriesCount).isEqualTo(4));
+            assertThat(dispatchManager.getStats().getSubmittedQueries().getTotalCount() - beforeSubmittedQueriesCount).isEqualTo(4);
+        });
+    }
+
+    private static <T> T waitUntilStable(Supplier<T> computation, Duration timeout)
+    {
+        T lastValue = computation.get();
+        long start = System.nanoTime();
+        while (!currentThread().isInterrupted() && nanosSince(start).compareTo(timeout) < 0) {
+            sleepUninterruptibly(100, MILLISECONDS);
+            T currentValue = computation.get();
+            if (currentValue.equals(lastValue)) {
+                return currentValue;
+            }
+            lastValue = currentValue;
+        }
+        throw new UncheckedTimeoutException();
+    }
+
+    private static int getNumberMaxDecimalPrecision()
+    {
+        try {
+            Field field = NumberType.class.getDeclaredField("MAX_DECIMAL_PRECISION");
+            field.setAccessible(true);
+            return (int) field.get(null);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static int getNumberScaleMaxValue()
+    {
+        try {
+            Field field = TrinoNumber.class.getDeclaredField("MAX_SCALE");
+            field.setAccessible(true);
+            return (int) field.get(null);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static int getNumberScaleMinValue()
+    {
+        try {
+            Field field = TrinoNumber.class.getDeclaredField("MIN_SCALE");
+            field.setAccessible(true);
+            return (int) field.get(null);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static ZonedDateTime zonedDateTime(String value)

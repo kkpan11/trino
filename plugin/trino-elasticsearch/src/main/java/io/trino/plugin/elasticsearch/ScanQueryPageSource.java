@@ -17,23 +17,24 @@ import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import io.airlift.log.Logger;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
+import io.trino.plugin.elasticsearch.client.SearchDocument;
+import io.trino.plugin.elasticsearch.client.SearchResult;
 import io.trino.plugin.elasticsearch.decoders.Decoder;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.search.SearchHit;
-import org.elasticsearch.search.SearchHits;
 
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.Supplier;
@@ -54,7 +55,7 @@ public class ScanQueryPageSource
 
     private final List<Decoder> decoders;
 
-    private final SearchHitIterator iterator;
+    private final SearchDocumentIterator iterator;
     private final BlockBuilder[] columnBuilders;
     private final List<ElasticsearchColumnHandle> columns;
     private long totalBytes;
@@ -85,7 +86,7 @@ public class ScanQueryPageSource
         // representations in JSON, but a single normalized representation as doc_field.
         List<String> documentFields = flattenFields(columns).entrySet().stream()
                 .filter(entry -> entry.getValue().equals(TIMESTAMP_MILLIS))
-                .map(Map.Entry::getKey)
+                .map(Entry::getKey)
                 .collect(toImmutableList());
 
         columnBuilders = columns.stream()
@@ -108,7 +109,7 @@ public class ScanQueryPageSource
         }
 
         long start = System.nanoTime();
-        SearchResponse searchResponse = client.beginSearch(
+        SearchResult searchResult = client.beginSearch(
                 split.index(),
                 split.shard(),
                 buildSearchQuery(table.constraint().transformKeys(ElasticsearchColumnHandle.class::cast), table.query(), table.regexes()),
@@ -117,7 +118,7 @@ public class ScanQueryPageSource
                 sort,
                 table.limit());
         readTimeNanos += System.nanoTime() - start;
-        this.iterator = new SearchHitIterator(client, () -> searchResponse, table.limit());
+        this.iterator = new SearchDocumentIterator(client, () -> searchResult, table.limit());
     }
 
     @Override
@@ -139,33 +140,34 @@ public class ScanQueryPageSource
     }
 
     @Override
-    public long getMemoryUsage()
-    {
-        return 0;
-    }
-
-    @Override
     public void close()
     {
         iterator.close();
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         long size = 0;
         while (size < PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES && iterator.hasNext()) {
-            SearchHit hit = iterator.next();
-            Map<String, Object> document = hit.getSourceAsMap();
+            SearchDocument document = iterator.next();
+            Map<String, Object> source = document.sourceAsMap();
 
             for (int i = 0; i < decoders.size(); i++) {
-                String field = columns.get(i).name();
-                decoders.get(i).decode(hit, () -> getField(document, field), columnBuilders[i]);
+                ElasticsearchColumnHandle columnHandle = columns.get(i);
+                if (columnHandle.path().size() == 1) {
+                    decoders.get(i).decode(document, () -> getField(source, columnHandle.path().getFirst()), columnBuilders[i]);
+                    continue;
+                }
+                Map<String, Object> resolvedField = resolveField(source, columnHandle);
+                decoders.get(i)
+                        .decode(
+                                document,
+                                () -> resolvedField == null ? null : getField(resolvedField, columnHandle.path().getLast()),
+                                columnBuilders[i]);
             }
 
-            if (hit.getSourceRef() != null) {
-                totalBytes += hit.getSourceRef().length();
-            }
+            totalBytes += document.sourceLength();
 
             size = Arrays.stream(columnBuilders)
                     .mapToLong(BlockBuilder::getSizeInBytes)
@@ -178,7 +180,24 @@ public class ScanQueryPageSource
             columnBuilders[i] = columnBuilders[i].newBlockBuilderLike(null);
         }
 
-        return new Page(blocks);
+        return SourcePage.create(new Page(blocks));
+    }
+
+    private static Map<String, Object> resolveField(Map<String, Object> document, ElasticsearchColumnHandle columnHandle)
+    {
+        if (document == null) {
+            return null;
+        }
+        Map<String, Object> value = (Map<String, Object>) getField(document, columnHandle.path().getFirst());
+        if (value != null) {
+            for (int i = 1; i < columnHandle.path().size() - 1; i++) {
+                value = (Map<String, Object>) getField(value, columnHandle.path().get(i));
+                if (value == null) {
+                    break;
+                }
+            }
+        }
+        return value;
     }
 
     public static Object getField(Map<String, Object> document, String field)
@@ -187,7 +206,7 @@ public class ScanQueryPageSource
         if (value == null) {
             Map<String, Object> result = new HashMap<>();
             String prefix = field + ".";
-            for (Map.Entry<String, Object> entry : document.entrySet()) {
+            for (Entry<String, Object> entry : document.entrySet()) {
                 String key = entry.getKey();
                 if (key.startsWith(prefix)) {
                     result.put(key.substring(prefix.length()), entry.getValue());
@@ -215,8 +234,8 @@ public class ScanQueryPageSource
 
     private void flattenFields(Map<String, Type> result, String fieldName, Type type)
     {
-        if (type instanceof RowType) {
-            for (RowType.Field field : ((RowType) type).getFields()) {
+        if (type instanceof RowType rowType) {
+            for (RowType.Field field : rowType.getFields()) {
                 flattenFields(result, appendPath(fieldName, field.getName().get()), field.getType());
             }
         }
@@ -242,21 +261,21 @@ public class ScanQueryPageSource
         return base + "." + element;
     }
 
-    private static class SearchHitIterator
-            extends AbstractIterator<SearchHit>
+    private static class SearchDocumentIterator
+            extends AbstractIterator<SearchDocument>
     {
         private final ElasticsearchClient client;
-        private final Supplier<SearchResponse> first;
+        private final Supplier<SearchResult> first;
         private final OptionalLong limit;
 
-        private SearchHits searchHits;
+        private List<SearchDocument> currentHits;
         private String scrollId;
         private int currentPosition;
 
         private long readTimeNanos;
         private long totalRecordCount;
 
-        public SearchHitIterator(ElasticsearchClient client, Supplier<SearchResponse> first, OptionalLong limit)
+        public SearchDocumentIterator(ElasticsearchClient client, Supplier<SearchResult> first, OptionalLong limit)
         {
             this.client = client;
             this.first = first;
@@ -270,41 +289,41 @@ public class ScanQueryPageSource
         }
 
         @Override
-        protected SearchHit computeNext()
+        protected SearchDocument computeNext()
         {
-            if (limit.isPresent() && totalRecordCount == limit.getAsLong()) {
+            if (limit.isPresent() && totalRecordCount == limit.orElseThrow()) {
                 // No more record is necessary.
                 return endOfData();
             }
 
             if (scrollId == null) {
                 long start = System.nanoTime();
-                SearchResponse response = first.get();
+                SearchResult result = first.get();
                 readTimeNanos += System.nanoTime() - start;
-                reset(response);
+                reset(result);
             }
-            else if (currentPosition == searchHits.getHits().length) {
+            else if (currentPosition == currentHits.size()) {
                 long start = System.nanoTime();
-                SearchResponse response = client.nextPage(scrollId);
+                SearchResult result = client.nextPage(scrollId);
                 readTimeNanos += System.nanoTime() - start;
-                reset(response);
+                reset(result);
             }
 
-            if (currentPosition == searchHits.getHits().length) {
+            if (currentPosition == currentHits.size()) {
                 return endOfData();
             }
 
-            SearchHit hit = searchHits.getAt(currentPosition);
+            SearchDocument document = currentHits.get(currentPosition);
             currentPosition++;
             totalRecordCount++;
 
-            return hit;
+            return document;
         }
 
-        private void reset(SearchResponse response)
+        private void reset(SearchResult result)
         {
-            scrollId = response.getScrollId();
-            searchHits = response.getHits();
+            scrollId = result.scrollId().orElse(null);
+            currentHits = result.hits();
             currentPosition = 0;
         }
 

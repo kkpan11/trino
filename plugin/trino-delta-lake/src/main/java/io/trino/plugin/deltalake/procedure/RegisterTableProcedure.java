@@ -14,24 +14,29 @@
 package io.trino.plugin.deltalake.procedure;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import com.google.inject.Provider;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
-import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.metastore.PrincipalPrivileges;
 import io.trino.metastore.Table;
 import io.trino.plugin.base.util.UncheckedCloseable;
 import io.trino.plugin.deltalake.DeltaLakeConfig;
+import io.trino.plugin.deltalake.DeltaLakeFileSystemFactory;
 import io.trino.plugin.deltalake.DeltaLakeMetadata;
 import io.trino.plugin.deltalake.DeltaLakeMetadataFactory;
+import io.trino.plugin.deltalake.DeltaLakeTableCredentials;
 import io.trino.plugin.deltalake.metastore.DeltaLakeMetastore;
+import io.trino.plugin.deltalake.metastore.VendedCredentialsHandle;
 import io.trino.plugin.deltalake.statistics.CachingExtendedStatisticsAccess;
 import io.trino.plugin.deltalake.transactionlog.MetadataEntry;
 import io.trino.plugin.deltalake.transactionlog.TableSnapshot;
 import io.trino.plugin.deltalake.transactionlog.TransactionLogAccess;
+import io.trino.plugin.deltalake.transactionlog.reader.FileSystemTransactionLogReader;
 import io.trino.spi.TrinoException;
 import io.trino.spi.classloader.ThreadContextClassLoader;
+import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
@@ -68,7 +73,7 @@ public class RegisterTableProcedure
 
     static {
         try {
-            REGISTER_TABLE = lookup().unreflect(RegisterTableProcedure.class.getMethod("registerTable", ConnectorSession.class, String.class, String.class, String.class));
+            REGISTER_TABLE = lookup().unreflect(RegisterTableProcedure.class.getMethod("registerTable", ConnectorAccessControl.class, ConnectorSession.class, String.class, String.class, String.class));
         }
         catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
@@ -78,7 +83,7 @@ public class RegisterTableProcedure
     private final DeltaLakeMetadataFactory metadataFactory;
     private final TransactionLogAccess transactionLogAccess;
     private final CachingExtendedStatisticsAccess statisticsAccess;
-    private final TrinoFileSystemFactory fileSystemFactory;
+    private final DeltaLakeFileSystemFactory fileSystemFactory;
     private final boolean registerTableProcedureEnabled;
 
     @Inject
@@ -86,7 +91,7 @@ public class RegisterTableProcedure
             DeltaLakeMetadataFactory metadataFactory,
             TransactionLogAccess transactionLogAccess,
             CachingExtendedStatisticsAccess statisticsAccess,
-            TrinoFileSystemFactory fileSystemFactory,
+            DeltaLakeFileSystemFactory fileSystemFactory,
             DeltaLakeConfig deltaLakeConfig)
     {
         this.metadataFactory = requireNonNull(metadataFactory, "metadataFactory is null");
@@ -110,6 +115,7 @@ public class RegisterTableProcedure
     }
 
     public void registerTable(
+            ConnectorAccessControl accessControl,
             ConnectorSession clientSession,
             String schemaName,
             String tableName,
@@ -117,6 +123,7 @@ public class RegisterTableProcedure
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(getClass().getClassLoader())) {
             doRegisterTable(
+                    accessControl,
                     clientSession,
                     schemaName,
                     tableName,
@@ -125,6 +132,7 @@ public class RegisterTableProcedure
     }
 
     private void doRegisterTable(
+            ConnectorAccessControl accessControl,
             ConnectorSession session,
             String schemaName,
             String tableName,
@@ -138,6 +146,7 @@ public class RegisterTableProcedure
         checkProcedureArgument(!isNullOrEmpty(tableLocation), "table_location cannot be null or empty");
 
         SchemaTableName schemaTableName = new SchemaTableName(schemaName, tableName);
+        accessControl.checkCanCreateTable(null, schemaTableName, ImmutableMap.of());
         DeltaLakeMetadata metadata = metadataFactory.create(session.getIdentity());
         metadata.beginQuery(session);
         try (UncheckedCloseable ignore = () -> metadata.cleanupQuery(session)) {
@@ -147,14 +156,15 @@ public class RegisterTableProcedure
                 throw new SchemaNotFoundException(schemaTableName.getSchemaName());
             }
 
-            TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+            TrinoFileSystem fileSystem;
             try {
+                fileSystem = fileSystemFactory.create(session, tableLocation);
                 Location transactionLogDir = Location.of(getTransactionLogDir(tableLocation));
                 if (!fileSystem.listFiles(transactionLogDir).hasNext()) {
                     throw new TrinoException(GENERIC_USER_ERROR, format("No transaction log found in location %s", transactionLogDir));
                 }
             }
-            catch (IOException e) {
+            catch (IOException | IllegalArgumentException e) {
                 throw new TrinoException(DELTA_LAKE_FILESYSTEM_ERROR, format("Failed checking table location %s", tableLocation), e);
             }
 
@@ -164,8 +174,15 @@ public class RegisterTableProcedure
             TableSnapshot tableSnapshot;
             MetadataEntry metadataEntry;
             try {
-                tableSnapshot = transactionLogAccess.loadSnapshot(session, schemaTableName, tableLocation, Optional.empty());
-                metadataEntry = transactionLogAccess.getMetadataEntry(session, tableSnapshot);
+                Optional<DeltaLakeTableCredentials> tableCredentials = metadata.getTableCredentials(VendedCredentialsHandle.empty(tableLocation));
+                tableSnapshot = transactionLogAccess.loadSnapshot(
+                        session,
+                        new FileSystemTransactionLogReader(tableLocation, tableCredentials, fileSystemFactory),
+                        schemaTableName,
+                        tableLocation,
+                        Optional.empty(),
+                        tableCredentials);
+                metadataEntry = transactionLogAccess.getMetadataEntry(session, fileSystem, tableSnapshot);
             }
             catch (TrinoException e) {
                 throw e;

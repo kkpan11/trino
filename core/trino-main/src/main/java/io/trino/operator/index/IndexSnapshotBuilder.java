@@ -33,6 +33,7 @@ import java.util.OptionalInt;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
+import static io.trino.operator.join.JoinUtils.rowContainsNull;
 import static java.util.Objects.requireNonNull;
 
 public class IndexSnapshotBuilder
@@ -42,7 +43,6 @@ public class IndexSnapshotBuilder
     private final List<Type> outputTypes;
     private final List<Type> missingKeysTypes;
     private final List<Integer> keyOutputChannels;
-    private final OptionalInt keyOutputHashChannel;
     private final List<Integer> missingKeysChannels;
     private final PagesIndex.Factory pagesIndexFactory;
 
@@ -56,9 +56,9 @@ public class IndexSnapshotBuilder
 
     private final PageBuilder missingKeysPageBuilder;
 
-    public IndexSnapshotBuilder(List<Type> outputTypes,
+    public IndexSnapshotBuilder(
+            List<Type> outputTypes,
             List<Integer> keyOutputChannels,
-            OptionalInt keyOutputHashChannel,
             DriverContext driverContext,
             DataSize maxMemoryInBytes,
             int expectedPositions,
@@ -66,7 +66,6 @@ public class IndexSnapshotBuilder
     {
         requireNonNull(outputTypes, "outputTypes is null");
         requireNonNull(keyOutputChannels, "keyOutputChannels is null");
-        requireNonNull(keyOutputHashChannel, "keyOutputHashChannel is null");
         requireNonNull(driverContext, "driverContext is null");
         requireNonNull(maxMemoryInBytes, "maxMemoryInBytes is null");
         requireNonNull(pagesIndexFactory, "pagesIndexFactory is null");
@@ -77,7 +76,6 @@ public class IndexSnapshotBuilder
         this.outputTypes = ImmutableList.copyOf(outputTypes);
         this.expectedPositions = expectedPositions;
         this.keyOutputChannels = ImmutableList.copyOf(keyOutputChannels);
-        this.keyOutputHashChannel = keyOutputHashChannel;
         this.maxMemoryInBytes = maxMemoryInBytes.toBytes();
 
         ImmutableList.Builder<Type> missingKeysTypes = ImmutableList.builder();
@@ -131,7 +129,7 @@ public class IndexSnapshotBuilder
         }
         pages.clear();
 
-        LookupSource lookupSource = outputPagesIndex.createLookupSourceSupplier(session, keyOutputChannels, keyOutputHashChannel, Optional.empty(), Optional.empty(), ImmutableList.of()).get();
+        LookupSource lookupSource = outputPagesIndex.createLookupSourceSupplier(session, keyOutputChannels, Optional.empty(), OptionalInt.empty(), ImmutableList.of()).get();
 
         // Build a page containing the keys that produced no output rows, so in future requests can skip these keys
         verify(missingKeysPageBuilder.isEmpty());
@@ -139,12 +137,12 @@ public class IndexSnapshotBuilder
         while (indexKeysRecordCursor.advanceNextPosition()) {
             Page page = indexKeysRecordCursor.getPage();
             int position = indexKeysRecordCursor.getPosition();
-            if (lookupSource.getJoinPosition(position, page, page) < 0) {
+            // getJoinPosition requires non-null keys; a null key matches nothing, so record it as missing.
+            if (rowContainsNull(page, position) || lookupSource.getJoinPosition(position, page, page) < 0) {
                 missingKeysPageBuilder.declarePosition();
                 for (int i = 0; i < page.getChannelCount(); i++) {
                     Block block = page.getBlock(i);
-                    Type type = indexKeysRecordCursor.getType(i);
-                    type.appendTo(block, position, missingKeysPageBuilder.getBlockBuilder(i));
+                    missingKeysPageBuilder.getBlockBuilder(i).append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
                 }
             }
         }

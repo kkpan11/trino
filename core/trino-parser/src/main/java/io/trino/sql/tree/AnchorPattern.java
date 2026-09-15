@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -28,14 +27,14 @@ public class AnchorPattern
     public enum Type
     {
         PARTITION_START,
-        PARTITION_END
+        PARTITION_END,
     }
 
     private final Type type;
 
     public AnchorPattern(NodeLocation location, Type type)
     {
-        super(Optional.of(location));
+        super(location);
         this.type = requireNonNull(type, "type is null");
     }
 

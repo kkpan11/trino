@@ -44,6 +44,7 @@ import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.SelectionContext;
 import io.trino.spi.resourcegroups.SelectionCriteria;
+import io.trino.spi.security.Identity;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.Flatten;
@@ -58,8 +59,10 @@ import java.util.concurrent.ScheduledExecutorService;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.trino.execution.QueryState.FINISHING;
 import static io.trino.execution.QueryState.QUEUED;
 import static io.trino.execution.QueryState.RUNNING;
+import static io.trino.execution.QueryState.WAITING_FOR_RESOURCES;
 import static io.trino.spi.StandardErrorCode.QUERY_TEXT_TOO_LARGE;
 import static io.trino.tracing.ScopedSpan.scopedSpan;
 import static io.trino.util.Failures.toFailure;
@@ -118,7 +121,7 @@ public class DispatchManager
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
         this.sessionSupplier = requireNonNull(sessionSupplier, "sessionSupplier is null");
         this.sessionPropertyDefaults = requireNonNull(sessionPropertyDefaults, "sessionPropertyDefaults is null");
-        this.sessionPropertyManager = sessionPropertyManager;
+        this.sessionPropertyManager = requireNonNull(sessionPropertyManager, "sessionPropertyManager is null");
         this.tracer = requireNonNull(tracer, "tracer is null");
 
         this.maxQueryLength = queryManagerConfig.getMaxQueryLength();
@@ -228,9 +231,12 @@ public class DispatchManager
                     sessionContext.getIdentity().getPrincipal().isPresent(),
                     sessionContext.getIdentity().getUser(),
                     sessionContext.getIdentity().getGroups(),
+                    sessionContext.getOriginalIdentity().getUser(),
+                    sessionContext.getAuthenticatedIdentity().map(Identity::getUser),
                     sessionContext.getSource(),
                     sessionContext.getClientTags(),
                     sessionContext.getResourceEstimates(),
+                    query,
                     queryType));
 
             // apply system default session properties (does not override user set properties)
@@ -331,11 +337,47 @@ public class DispatchManager
     }
 
     @Managed
+    public long getFinishingQueries()
+    {
+        return queryTracker.getAllQueries().stream()
+                .filter(query -> query.getState() == FINISHING)
+                .count();
+    }
+
+    @Managed
     public long getProgressingQueries()
     {
         return queryTracker.getAllQueries().stream()
                 .filter(query -> query.getState() == RUNNING && !query.getBasicQueryInfo().getQueryStats().isFullyBlocked())
                 .count();
+    }
+
+    @Managed
+    public long getFullyBlockedQueries()
+    {
+        return queryTracker.getAllQueries().stream()
+                .filter(query -> query.getState() == RUNNING && query.getBasicQueryInfo().getQueryStats().isFullyBlocked())
+                .count();
+    }
+
+    @Managed
+    public long getWaitingForResourcesQueries()
+    {
+        return queryTracker.getAllQueries().stream()
+                .filter(query -> query.getState() == WAITING_FOR_RESOURCES)
+                .count();
+    }
+
+    @Managed
+    public double getWaitingForResourcesMaxAgeInSeconds()
+    {
+        // Only materialize BasicQueryInfo for queries currently waiting for resources,
+        // then report the longest resource-waiting time among them (0 when none wait).
+        return queryTracker.getAllQueries().stream()
+                .filter(query -> query.getState() == WAITING_FOR_RESOURCES)
+                .mapToDouble(query -> query.getBasicQueryInfo().getQueryStats().getResourceWaitingTime().getValue(SECONDS))
+                .max()
+                .orElse(0.0);
     }
 
     public boolean isQueryRegistered(QueryId queryId)

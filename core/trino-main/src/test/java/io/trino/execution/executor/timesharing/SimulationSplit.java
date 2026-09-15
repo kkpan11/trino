@@ -104,9 +104,7 @@ abstract class SimulationSplit
     }
 
     @Override
-    public void close()
-    {
-    }
+    public void close() {}
 
     abstract boolean process();
 
@@ -274,7 +272,8 @@ abstract class SimulationSplit
         public String getInfo()
         {
             double pct = (100.0 * getCalls() / numQuantas);
-            return format("intr %3s%% done (wall: %9s, per quanta: %8s, between quanta: %8s)",
+            return format(
+                    "intr %3s%% done (wall: %9s, per quanta: %8s, between quanta: %8s)",
                     (int) (pct > 100.00 ? 100.0 : pct),
                     succinctNanos(wallTimeNanos),
                     succinctNanos(perQuantaNanos),

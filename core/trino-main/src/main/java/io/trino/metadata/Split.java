@@ -14,19 +14,16 @@
 package io.trino.metadata;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableMap;
+import io.trino.connector.CatalogHandle;
 import io.trino.spi.HostAddress;
 import io.trino.spi.SplitWeight;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
-import java.util.Map;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
@@ -44,6 +41,9 @@ public final class Split
     {
         this.catalogHandle = requireNonNull(catalogHandle, "catalogHandle is null");
         this.connectorSplit = requireNonNull(connectorSplit, "connectorSplit is null");
+        checkArgument(connectorSplit.getAffinityKey().isEmpty() || connectorSplit.isRemotelyAccessible(),
+                "Split with an affinity key must be remotely accessible: %s",
+                connectorSplit);
     }
 
     @JsonProperty
@@ -56,12 +56,6 @@ public final class Split
     public ConnectorSplit getConnectorSplit()
     {
         return connectorSplit;
-    }
-
-    @JsonIgnore
-    public Map<String, String> getInfo()
-    {
-        return firstNonNull(connectorSplit.getSplitInfo(), ImmutableMap.of());
     }
 
     public List<HostAddress> getAddresses()

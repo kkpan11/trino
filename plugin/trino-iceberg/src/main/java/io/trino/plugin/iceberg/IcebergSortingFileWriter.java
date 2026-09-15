@@ -13,18 +13,18 @@
  */
 package io.trino.plugin.iceberg;
 
+import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
+import io.trino.plugin.hive.RollbackAction;
 import io.trino.plugin.hive.SortingFileWriter;
-import io.trino.plugin.hive.orc.OrcFileWriterFactory;
 import io.trino.spi.Page;
 import io.trino.spi.PageSorter;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 
-import java.io.Closeable;
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
@@ -42,12 +42,27 @@ public final class IcebergSortingFileWriter
             DataSize maxMemory,
             int maxOpenTempFiles,
             List<Type> types,
-            List<Integer> sortFields,
+            List<List<Integer>> sortIndexPaths,
             List<SortOrder> sortOrders,
             PageSorter pageSorter,
             TypeOperators typeOperators)
     {
         this.outputWriter = requireNonNull(outputWriter, "outputWriter is null");
+
+        // Build sortChannels and nestedPaths in one pass.
+        // Depth-1 paths are already top-level channels; nested paths are appended after originalChannelCount.
+        ImmutableList.Builder<List<Integer>> nestedPaths = ImmutableList.builder();
+        ImmutableList.Builder<Integer> sortChannels = ImmutableList.builder();
+        int nextChannel = types.size();
+        for (List<Integer> path : sortIndexPaths) {
+            if (path.size() == 1) {
+                sortChannels.add(path.getFirst());
+                continue;
+            }
+            nestedPaths.add(path);
+            sortChannels.add(nextChannel++);
+        }
+
         this.sortingFileWriter = new SortingFileWriter(
                 fileSystem,
                 tempFilePrefix,
@@ -55,11 +70,11 @@ public final class IcebergSortingFileWriter
                 maxMemory,
                 maxOpenTempFiles,
                 types,
-                sortFields,
+                sortChannels.build(),
                 sortOrders,
                 pageSorter,
                 typeOperators,
-                OrcFileWriterFactory::createOrcDataSink);
+                nestedPaths.build());
     }
 
     @Override
@@ -87,7 +102,7 @@ public final class IcebergSortingFileWriter
     }
 
     @Override
-    public Closeable commit()
+    public RollbackAction commit()
     {
         return sortingFileWriter.commit();
     }

@@ -16,6 +16,7 @@ package io.trino.filesystem.s3;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.SetMultimap;
 import io.airlift.units.Duration;
+import io.trino.filesystem.EmulatedListFilesStartingFromIterator;
 import io.trino.filesystem.FileIterator;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
@@ -33,6 +34,7 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.OptionalObjectAttributes;
 import software.amazon.awssdk.services.s3.model.RequestPayer;
 import software.amazon.awssdk.services.s3.model.S3Error;
 import software.amazon.awssdk.services.s3.model.S3Object;
@@ -54,17 +56,24 @@ import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.stream.Stream;
 
+import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.partition;
 import static com.google.common.collect.Multimaps.toMultimap;
+import static io.trino.filesystem.TrinoFileSystem.checkStartingFrom;
+import static io.trino.filesystem.s3.S3Exceptions.handleS3Exception;
+import static io.trino.filesystem.s3.S3FileSystemConfig.S3SseType.NONE;
 import static io.trino.filesystem.s3.S3SseCUtils.encoded;
 import static io.trino.filesystem.s3.S3SseCUtils.md5Checksum;
+import static io.trino.filesystem.s3.S3SseRequestConfigurator.setEncryptionSettings;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toMap;
 
 final class S3FileSystem
         implements TrinoFileSystem
 {
+    static final int DELETE_BATCH_SIZE = 1000;
+
     private final Executor uploadExecutor;
     private final S3Client client;
     private final S3Presigner preSigner;
@@ -145,7 +154,7 @@ final class S3FileSystem
             client.deleteObject(request);
         }
         catch (SdkException e) {
-            throw new TrinoFileSystemException("Failed to delete file: " + location, e);
+            throw handleS3Exception(e, "Failed to delete file: " + location);
         }
     }
 
@@ -153,7 +162,7 @@ final class S3FileSystem
     public void deleteDirectory(Location location)
             throws IOException
     {
-        FileIterator iterator = listObjects(location, true);
+        FileIterator iterator = listObjects(location, true, "");
         while (iterator.hasNext()) {
             List<Location> files = new ArrayList<>();
             while ((files.size() < 1000) && iterator.hasNext()) {
@@ -184,7 +193,7 @@ final class S3FileSystem
             String bucket = entry.getKey();
             Collection<String> allKeys = entry.getValue();
 
-            for (List<String> keys : partition(allKeys, 250)) {
+            for (List<String> keys : partition(allKeys, DELETE_BATCH_SIZE)) {
                 List<ObjectIdentifier> objects = keys.stream()
                         .map(key -> ObjectIdentifier.builder().key(key).build())
                         .toList();
@@ -199,11 +208,18 @@ final class S3FileSystem
                 try {
                     DeleteObjectsResponse response = client.deleteObjects(request);
                     for (S3Error error : response.errors()) {
-                        failures.put("s3://%s/%s".formatted(bucket, error.key()), error.code());
+                        String filePath = "s3://%s/%s".formatted(bucket, error.key());
+                        if (error.message() == null) {
+                            // If the error message is null, we just use the error code
+                            failures.put(filePath, error.code());
+                        }
+                        else {
+                            failures.put(filePath, "%s (%s)".formatted(error.message(), error.code()));
+                        }
                     }
                 }
                 catch (SdkException e) {
-                    throw new TrinoFileSystemException("Error while batch deleting files", e);
+                    throw handleS3Exception(e, "Error while batch deleting files");
                 }
             }
         }
@@ -224,35 +240,15 @@ final class S3FileSystem
     public FileIterator listFiles(Location location)
             throws IOException
     {
-        return listObjects(location, false);
+        return listObjects(location, false, "");
     }
 
-    private FileIterator listObjects(Location location, boolean includeDirectoryObjects)
+    @Override
+    public FileIterator listFilesStartingFrom(Location location, String startingFrom)
             throws IOException
     {
-        S3Location s3Location = new S3Location(location);
-
-        String key = s3Location.key();
-        if (!key.isEmpty() && !key.endsWith("/")) {
-            key += "/";
-        }
-
-        ListObjectsV2Request request = ListObjectsV2Request.builder()
-                .overrideConfiguration(context::applyCredentialProviderOverride)
-                .bucket(s3Location.bucket())
-                .prefix(key)
-                .build();
-
-        try {
-            Stream<S3Object> s3ObjectStream = client.listObjectsV2Paginator(request).contents().stream();
-            if (!includeDirectoryObjects) {
-                s3ObjectStream = s3ObjectStream.filter(object -> !object.key().endsWith("/"));
-            }
-            return new S3FileIterator(s3Location, s3ObjectStream.iterator());
-        }
-        catch (SdkException e) {
-            throw new TrinoFileSystemException("Failed to list location: " + location, e);
-        }
+        checkStartingFrom(startingFrom);
+        return listObjects(location, false, startingFrom);
     }
 
     @Override
@@ -287,15 +283,7 @@ final class S3FileSystem
         S3Location s3Location = new S3Location(location);
         Location baseLocation = s3Location.baseLocation();
 
-        String key = s3Location.key();
-        if (!key.isEmpty() && !key.endsWith("/")) {
-            key += "/";
-        }
-
-        ListObjectsV2Request request = ListObjectsV2Request.builder()
-                .overrideConfiguration(context::applyCredentialProviderOverride)
-                .bucket(s3Location.bucket())
-                .prefix(key)
+        ListObjectsV2Request request = listObjectsRequest(s3Location, directoryKey(s3Location.key()))
                 .delimiter("/")
                 .build();
 
@@ -307,7 +295,7 @@ final class S3FileSystem
                     .collect(toImmutableSet());
         }
         catch (SdkException e) {
-            throw new TrinoFileSystemException("Failed to list location: " + location, e);
+            throw handleS3Exception(e, "Failed to list location: " + location);
         }
     }
 
@@ -339,16 +327,19 @@ final class S3FileSystem
         location.verifyValidFileLocation();
         S3Location s3Location = new S3Location(location);
 
+        verify(key.isEmpty() || context.s3SseContext().sseType() == NONE, "Encryption key cannot be used with SSE configuration");
+
         GetObjectRequest request = GetObjectRequest.builder()
                 .overrideConfiguration(context::applyCredentialProviderOverride)
                 .requestPayer(requestPayer)
                 .key(s3Location.key())
                 .bucket(s3Location.bucket())
-                .applyMutation(builder -> key.ifPresent(encryption -> {
-                    builder.sseCustomerKeyMD5(md5Checksum(encryption));
-                    builder.sseCustomerAlgorithm(encryption.algorithm());
-                    builder.sseCustomerKey(encoded(encryption));
-                }))
+                .applyMutation(builder ->
+                        key.ifPresentOrElse(
+                                encryption -> builder.sseCustomerKeyMD5(md5Checksum(encryption))
+                                        .sseCustomerAlgorithm(encryption.algorithm())
+                                        .sseCustomerKey(encoded(encryption)),
+                                () -> setEncryptionSettings(builder, context.s3SseContext())))
                 .build();
 
         GetObjectPresignRequest preSignRequest = GetObjectPresignRequest.builder()
@@ -360,18 +351,76 @@ final class S3FileSystem
             return Optional.of(new UriLocation(preSigned.url().toURI(), filterHeaders(preSigned.httpRequest().headers())));
         }
         catch (SdkException e) {
-            throw new IOException("Failed to generate pre-signed URI", e);
+            throw handleS3Exception(e, "Failed to generate pre-signed URI");
         }
         catch (URISyntaxException e) {
             throw new TrinoFileSystemException("Failed to convert pre-signed URI to URI", e);
         }
     }
 
+    private FileIterator listObjects(Location location, boolean includeDirectoryObjects, String startingFrom)
+            throws IOException
+    {
+        S3Location s3Location = new S3Location(location);
+        String keyPrefix = directoryKey(s3Location.key());
+        ListObjectsV2Request.Builder request = listObjectsRequest(s3Location, keyPrefix);
+
+        try {
+            if (!startingFrom.isEmpty()) {
+                // S3 startAfter is exclusive. Start slightly earlier and filter client-side to
+                // preserve the inclusive listFilesStartingFrom semantics.
+                String startingAfter = keyPrefix + truncateLastCodePoint(startingFrom);
+                if (!startingAfter.isEmpty()) {
+                    request.startAfter(startingAfter);
+                }
+            }
+
+            Stream<S3Object> s3ObjectStream = client.listObjectsV2Paginator(request.build()).contents().stream();
+            if (!includeDirectoryObjects) {
+                s3ObjectStream = s3ObjectStream.filter(object -> !object.key().endsWith("/"));
+            }
+
+            S3FileIterator iterator = new S3FileIterator(s3Location, s3ObjectStream.iterator());
+            if (!startingFrom.isEmpty()) {
+                return new EmulatedListFilesStartingFromIterator(iterator, s3Location.location(), startingFrom);
+            }
+            return iterator;
+        }
+        catch (SdkException e) {
+            throw handleS3Exception(e, "Failed to list location: " + location);
+        }
+    }
+
+    private ListObjectsV2Request.Builder listObjectsRequest(S3Location location, String keyPrefix)
+    {
+        return ListObjectsV2Request.builder()
+                .overrideConfiguration(context::applyCredentialProviderOverride)
+                // Restore status will only be added to the response if requested
+                .optionalObjectAttributes(OptionalObjectAttributes.RESTORE_STATUS)
+                .requestPayer(requestPayer)
+                .bucket(location.bucket())
+                .prefix(keyPrefix);
+    }
+
+    private static String directoryKey(String key)
+    {
+        if (!key.isEmpty() && !key.endsWith("/")) {
+            return key + "/";
+        }
+        return key;
+    }
+
+    private static String truncateLastCodePoint(String value)
+    {
+        verify(!value.isEmpty(), "value is empty");
+        return value.substring(0, value.offsetByCodePoints(value.length(), -1));
+    }
+
     private static Map<String, List<String>> filterHeaders(Map<String, List<String>> headers)
     {
         return headers.entrySet().stream()
                 .filter(entry -> !entry.getKey().equalsIgnoreCase("host"))
-                .collect(toMap(Entry::getKey, Entry::getValue));
+                .collect(toImmutableMap(Entry::getKey, Entry::getValue));
     }
 
     @SuppressWarnings("ResultOfObjectAllocationIgnored")

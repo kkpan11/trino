@@ -16,6 +16,7 @@ package io.trino.plugin.jdbc;
 import io.trino.plugin.jdbc.credential.EmptyCredentialProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
+import io.trino.spi.connector.DynamicFilterSnapshot;
 import io.trino.spi.connector.SchemaTableName;
 import org.h2.Driver;
 
@@ -103,12 +104,12 @@ final class TestingDatabase
     public JdbcSplit getSplit(ConnectorSession session, JdbcTableHandle table)
     {
         ConnectorSplitSource splits = jdbcClient.getSplits(session, table);
-        return (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(1000)).getSplits());
+        return (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(1000, DynamicFilterSnapshot.EMPTY)));
     }
 
     public Map<String, JdbcColumnHandle> getColumnHandles(ConnectorSession session, JdbcTableHandle table)
     {
-        return jdbcClient.getColumns(session, table).stream()
+        return jdbcClient.getColumns(session, table.getRequiredNamedRelation().getSchemaTableName(), table.getRequiredNamedRelation().getRemoteTableName()).stream()
                 .collect(toImmutableMap(column -> column.getColumnMetadata().getName(), identity()));
     }
 }

@@ -67,9 +67,7 @@ public final class ModelUtils
         MODEL_SERIALIZATION_IDS = builder.build();
     }
 
-    private ModelUtils()
-    {
-    }
+    private ModelUtils() {}
 
     /**
      * Serializes the model using the following format
@@ -198,7 +196,7 @@ public final class ModelUtils
         return models.build();
     }
 
-    //TODO: instead of having this function, we should add feature extractors that extend Model and extract features from Strings
+    // TODO: instead of having this function, we should add feature extractors that extend Model and extract features from Strings
     public static FeatureVector toFeatures(SqlMap sqlMap)
     {
         Map<Integer, Double> features = new HashMap<>();

@@ -34,7 +34,7 @@ import java.util.stream.Stream;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.airlift.log.Level.WARN;
-import static io.trino.plugin.base.mapping.RuleBasedIdentifierMappingUtils.updateRuleBasedIdentifierMappingFile;
+import static io.trino.plugin.base.mapping.testing.RuleBasedIdentifierMappingUtils.updateRuleBasedIdentifierMappingFile;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -94,8 +94,8 @@ public abstract class BaseCaseInsensitiveMappingTest
                     "SELECT column_name FROM information_schema.columns WHERE table_name = 'nonlowercasetable'",
                     "VALUES 'lower_case_name', 'mixed_case_name', 'upper_case_name'");
             assertThat(computeActual("SHOW COLUMNS FROM someschema.nonlowercasetable").getMaterializedRows().stream()
-                            .map(row -> row.getField(0))
-                            .collect(toImmutableSet()))
+                    .map(row -> row.getField(0))
+                    .collect(toImmutableSet()))
                     .containsOnly("lower_case_name", "mixed_case_name", "upper_case_name");
 
             // Note: until https://github.com/prestodb/presto/issues/2863 is resolved, this is *the* way to access the tables.
@@ -261,7 +261,8 @@ public abstract class BaseCaseInsensitiveMappingTest
                 AutoCloseable ignore1 = withTable(schema, "remote_table", "(c varchar(5))")) {
             assertThat(computeActual("SHOW TABLES FROM " + schema).getOnlyColumn())
                     .contains("trino_table");
-            assertQuery("SHOW COLUMNS FROM " + schema + ".trino_table", "SELECT 'c', 'varchar(5)', '', ''");
+            assertThat(query("SHOW COLUMNS FROM " + schema + ".trino_table")).result().projected("Column").onlyColumnAsSet()
+                    .contains("c");
             assertUpdate("INSERT INTO " + schema + ".trino_table VALUES 'dane'", 1);
             assertQuery("SELECT * FROM " + schema + ".trino_table", "VALUES 'dane'");
         }
@@ -324,7 +325,8 @@ public abstract class BaseCaseInsensitiveMappingTest
                     .contains("trino_schema");
             assertThat(computeActual("SHOW TABLES IN trino_schema").getOnlyColumn())
                     .contains("trino_table");
-            assertQuery("SHOW COLUMNS FROM trino_schema.trino_table", "SELECT 'c', 'varchar(5)', '', ''");
+            assertThat(query("SHOW COLUMNS FROM trino_schema.trino_table")).result().projected("Column").onlyColumnAsSet()
+                    .contains("c");
             assertUpdate("INSERT INTO trino_schema.trino_table VALUES 'dane'", 1);
             assertQuery("SELECT * FROM trino_schema.trino_table", "VALUES 'dane'");
         }

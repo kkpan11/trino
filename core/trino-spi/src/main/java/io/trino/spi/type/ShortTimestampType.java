@@ -20,11 +20,11 @@ import io.trino.spi.block.BlockBuilderStatus;
 import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.LongArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.BlockIndex;
 import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
@@ -58,7 +58,7 @@ final class ShortTimestampType
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
     private final Range range;
 
-    public ShortTimestampType(int precision)
+    ShortTimestampType(int precision)
     {
         super(precision, long.class, LongArrayBlock.class);
 
@@ -101,18 +101,7 @@ final class ShortTimestampType
     }
 
     @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            writeLong(blockBuilder, getLong(block, position));
-        }
-    }
-
-    @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -127,19 +116,13 @@ final class ShortTimestampType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, Long.BYTES);
-    }
-
-    @Override
     public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
         return new LongArrayBlockBuilder(null, positionCount);
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public Object getObjectValue(Block block, int position)
     {
         if (block.isNull(position)) {
             return null;
@@ -189,7 +172,8 @@ final class ShortTimestampType
     private static long readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
     }
@@ -197,10 +181,10 @@ final class ShortTimestampType
     @ScalarOperator(READ_VALUE)
     private static void writeFlat(
             long value,
-            byte[] fixedSizeSlice,
-            int fixedSizeOffset,
-            byte[] unusedVariableSizeSlice,
-            int unusedVariableSizeOffset)
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         LONG_HANDLE.set(fixedSizeSlice, fixedSizeOffset, value);
     }

@@ -141,12 +141,6 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanSetSchemaAuthorization(SecurityContext context, CatalogSchemaName schemaName, TrinoPrincipal principal)
-    {
-        delegate().checkCanSetSchemaAuthorization(context, schemaName, principal);
-    }
-
-    @Override
     public void checkCanShowSchemas(SecurityContext context, String catalogName)
     {
         delegate().checkCanShowSchemas(context, catalogName);
@@ -267,27 +261,21 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanSetTableAuthorization(SecurityContext context, QualifiedObjectName tableName, TrinoPrincipal principal)
+    public void checkCanInsertIntoTable(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch)
     {
-        delegate().checkCanSetTableAuthorization(context, tableName, principal);
+        delegate().checkCanInsertIntoTable(context, tableName, branch);
     }
 
     @Override
-    public void checkCanInsertIntoTable(SecurityContext context, QualifiedObjectName tableName)
+    public void checkCanDeleteFromTable(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch)
     {
-        delegate().checkCanInsertIntoTable(context, tableName);
+        delegate().checkCanDeleteFromTable(context, tableName, branch);
     }
 
     @Override
-    public void checkCanDeleteFromTable(SecurityContext context, QualifiedObjectName tableName)
+    public void checkCanUpdateTableColumns(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch, Set<String> updatedColumnNames)
     {
-        delegate().checkCanDeleteFromTable(context, tableName);
-    }
-
-    @Override
-    public void checkCanUpdateTableColumns(SecurityContext context, QualifiedObjectName tableName, Set<String> updatedColumnNames)
-    {
-        delegate().checkCanUpdateTableColumns(context, tableName, updatedColumnNames);
+        delegate().checkCanUpdateTableColumns(context, tableName, branch, updatedColumnNames);
     }
 
     @Override
@@ -303,9 +291,9 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanSetViewAuthorization(SecurityContext context, QualifiedObjectName view, TrinoPrincipal principal)
+    public void checkCanRefreshView(SecurityContext context, QualifiedObjectName viewName)
     {
-        delegate().checkCanSetViewAuthorization(context, view, principal);
+        delegate().checkCanRefreshView(context, viewName);
     }
 
     @Override
@@ -315,9 +303,9 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanCreateViewWithSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Set<String> columnNames)
+    public void checkCanCreateViewWithSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch, Set<String> columnNames)
     {
-        delegate().checkCanCreateViewWithSelectFromColumns(context, tableName, columnNames);
+        delegate().checkCanCreateViewWithSelectFromColumns(context, tableName, branch, columnNames);
     }
 
     @Override
@@ -387,6 +375,24 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
+    public void checkCanGrantTableBranchPrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, String branchName, TrinoPrincipal grantee, boolean grantOption)
+    {
+        delegate().checkCanGrantTableBranchPrivilege(context, privilege, tableName, branchName, grantee, grantOption);
+    }
+
+    @Override
+    public void checkCanDenyTableBranchPrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, String branchName, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenyTableBranchPrivilege(context, privilege, tableName, branchName, grantee);
+    }
+
+    @Override
+    public void checkCanRevokeTableBranchPrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, String branchName, TrinoPrincipal revokee, boolean grantOption)
+    {
+        delegate().checkCanRevokeTableBranchPrivilege(context, privilege, tableName, branchName, revokee, grantOption);
+    }
+
+    @Override
     public void checkCanGrantEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee, boolean grantOption)
     {
         delegate().checkCanGrantEntityPrivilege(context, privilege, entity, grantee, grantOption);
@@ -417,9 +423,9 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Set<String> columnNames)
+    public void checkCanSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch, Set<String> columnNames)
     {
-        delegate().checkCanSelectFromColumns(context, tableName, columnNames);
+        delegate().checkCanSelectFromColumns(context, tableName, branch, columnNames);
     }
 
     @Override
@@ -525,6 +531,30 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
+    public void checkCanShowBranches(SecurityContext context, QualifiedObjectName tableName)
+    {
+        delegate().checkCanShowBranches(context, tableName);
+    }
+
+    @Override
+    public void checkCanCreateBranch(SecurityContext context, QualifiedObjectName tableName, String branchName)
+    {
+        delegate().checkCanCreateBranch(context, tableName, branchName);
+    }
+
+    @Override
+    public void checkCanDropBranch(SecurityContext context, QualifiedObjectName tableName, String branchName)
+    {
+        delegate().checkCanDropBranch(context, tableName, branchName);
+    }
+
+    @Override
+    public void checkCanFastForwardBranch(SecurityContext context, QualifiedObjectName tableName, String sourceBranchName, String targetBranchName)
+    {
+        delegate().checkCanFastForwardBranch(context, tableName, sourceBranchName, targetBranchName);
+    }
+
+    @Override
     public List<ViewExpression> getRowFilters(SecurityContext context, QualifiedObjectName tableName)
     {
         return delegate().getRowFilters(context, tableName);
@@ -534,5 +564,11 @@ public abstract class ForwardingAccessControl
     public Map<ColumnSchema, ViewExpression> getColumnMasks(SecurityContext context, QualifiedObjectName tableName, List<ColumnSchema> columns)
     {
         return delegate().getColumnMasks(context, tableName, columns);
+    }
+
+    @Override
+    public void checkCanSetEntityAuthorization(SecurityContext context, EntityKindAndName entityKindAndName, TrinoPrincipal principal)
+    {
+        delegate().checkCanSetEntityAuthorization(context, entityKindAndName, principal);
     }
 }

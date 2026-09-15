@@ -13,53 +13,60 @@
  */
 package io.trino.plugin.hudi.query;
 
-import io.airlift.units.DataSize;
-import io.trino.filesystem.FileEntry.Block;
+import io.airlift.log.Logger;
+import io.trino.filesystem.Location;
 import io.trino.metastore.Column;
 import io.trino.metastore.HiveMetastore;
 import io.trino.metastore.Table;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hudi.HudiFileStatus;
 import io.trino.plugin.hudi.HudiTableHandle;
-import io.trino.plugin.hudi.files.HudiBaseFile;
 import io.trino.plugin.hudi.partition.HiveHudiPartitionInfo;
 import io.trino.plugin.hudi.partition.HudiPartitionInfo;
-import io.trino.plugin.hudi.table.HudiTableFileSystemView;
-import io.trino.plugin.hudi.table.HudiTableMetaClient;
+import org.apache.hudi.common.engine.HoodieLocalEngineContext;
+import org.apache.hudi.common.model.HoodieBaseFile;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
+import org.apache.hudi.storage.StoragePathInfo;
 
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.airlift.units.DataSize.Unit.MEGABYTE;
-import static java.lang.Math.max;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.lang.Math.min;
+import static org.apache.hudi.common.table.view.HoodieTableFileSystemView.fileListingBasedFileSystemView;
 
 public class HudiReadOptimizedDirectoryLister
         implements HudiDirectoryLister
 {
-    private static final long MIN_BLOCK_SIZE = DataSize.of(32, MEGABYTE).toBytes();
+    private static final Logger LOG = Logger.get(HudiReadOptimizedDirectoryLister.class);
 
-    private final HudiTableFileSystemView fileSystemView;
+    private final HoodieTableFileSystemView fileSystemView;
     private final List<Column> partitionColumns;
     private final Map<String, HudiPartitionInfo> allPartitionInfoMap;
+    private final long maxSplitSize;
 
     public HudiReadOptimizedDirectoryLister(
             HudiTableHandle tableHandle,
-            HudiTableMetaClient metaClient,
+            HoodieTableMetaClient metaClient,
             HiveMetastore hiveMetastore,
             Table hiveTable,
             List<HiveColumnHandle> partitionColumnHandles,
-            List<String> hivePartitionNames)
+            List<String> hivePartitionNames,
+            boolean ignoreAbsentPartitions,
+            long maxSplitSize)
     {
-        this.fileSystemView = new HudiTableFileSystemView(metaClient, metaClient.getActiveTimeline().getCommitsTimeline().filterCompletedInstants());
+        this.fileSystemView = fileListingBasedFileSystemView(
+                new HoodieLocalEngineContext(metaClient.getStorageConf()),
+                metaClient,
+                metaClient.getActiveTimeline().getCommitsTimeline().filterCompletedInstants());
         this.partitionColumns = hiveTable.getPartitionColumns();
+        this.maxSplitSize = maxSplitSize;
         this.allPartitionInfoMap = hivePartitionNames.stream()
-                .collect(Collectors.toMap(
+                .collect(toImmutableMap(
                         Function.identity(),
                         hivePartitionName -> new HiveHudiPartitionInfo(
                                 hivePartitionName,
@@ -73,14 +80,15 @@ public class HudiReadOptimizedDirectoryLister
     @Override
     public List<HudiFileStatus> listStatus(HudiPartitionInfo partitionInfo)
     {
+        LOG.debug("List partition: partitionInfo=%s", partitionInfo);
         return fileSystemView.getLatestBaseFiles(partitionInfo.getRelativePartitionPath())
-                .map(HudiBaseFile::getFileEntry)
+                .map(HudiReadOptimizedDirectoryLister::getStoragePathInfo)
                 .map(fileEntry -> new HudiFileStatus(
-                        fileEntry.location(),
+                        Location.of(fileEntry.getPath().toString()),
                         false,
-                        fileEntry.length(),
-                        fileEntry.lastModified().toEpochMilli(),
-                        max(blockSize(fileEntry.blocks()), min(fileEntry.length(), MIN_BLOCK_SIZE))))
+                        fileEntry.getLength(),
+                        fileEntry.getModificationTime(),
+                        min(fileEntry.getLength(), maxSplitSize)))
                 .collect(toImmutableList());
     }
 
@@ -98,12 +106,11 @@ public class HudiReadOptimizedDirectoryLister
         }
     }
 
-    private static long blockSize(Optional<List<Block>> blocks)
+    private static StoragePathInfo getStoragePathInfo(HoodieBaseFile baseFile)
     {
-        return blocks.stream()
-                .flatMap(Collection::stream)
-                .mapToLong(Block::length)
-                .findFirst()
-                .orElse(0);
+        if (baseFile.getBootstrapBaseFile().isPresent()) {
+            return baseFile.getBootstrapBaseFile().get().getPathInfo();
+        }
+        return baseFile.getPathInfo();
     }
 }

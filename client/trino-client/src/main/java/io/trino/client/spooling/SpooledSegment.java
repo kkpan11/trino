@@ -21,37 +21,42 @@ import com.google.common.collect.ImmutableMap;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
 
 public final class SpooledSegment
         extends Segment
 {
     private final URI dataUri;
+    private final URI ackUri;
     private final Map<String, List<String>> headers;
 
     @JsonCreator
     public SpooledSegment(
             @JsonProperty("uri") URI dataUri,
-            @JsonProperty("metadata") Map<String, Object> metadata,
+            @JsonProperty("ackUri") URI ackUri,
+            @JsonProperty("metadata") DataAttributes metadata,
             @JsonProperty("headers") Map<String, List<String>> headers)
-    {
-        this(dataUri, new DataAttributes(metadata), headers);
-    }
-
-    SpooledSegment(URI dataUri, DataAttributes metadata, Map<String, List<String>> headers)
     {
         super(metadata);
         this.dataUri = requireNonNull(dataUri, "dataUri is null");
-        this.headers = firstNonNull(headers, ImmutableMap.of());
+        this.ackUri = requireNonNull(ackUri, "ackUri is null");
+        this.headers = requireNonNullElse(headers, ImmutableMap.of());
     }
 
     @JsonProperty("uri")
     public URI getDataUri()
     {
         return dataUri;
+    }
+
+    @JsonProperty("ackUri")
+    public URI getAckUri()
+    {
+        return ackUri;
     }
 
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
@@ -65,5 +70,24 @@ public final class SpooledSegment
     public String toString()
     {
         return format("SpooledSegment{offset=%d, rows=%d, size=%d, headers=%s}", getOffset(), getRowsCount(), getSegmentSize(), headers.keySet());
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        SpooledSegment that = (SpooledSegment) o;
+        return Objects.equals(dataUri, that.dataUri)
+                && Objects.equals(ackUri, that.ackUri)
+                && Objects.equals(headers, that.headers)
+                && Objects.equals(getMetadata(), that.getMetadata());
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(dataUri, ackUri, headers, getMetadata());
     }
 }

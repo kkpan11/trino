@@ -24,7 +24,6 @@ import io.trino.sql.planner.plan.PlanNode;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.function.Predicate;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -46,14 +45,14 @@ public class TestPruneSemiJoinColumns
                 .matches(
                         strictProject(
                                 ImmutableMap.of("leftValue", expression(new Reference(BIGINT, "leftValue"))),
-                                values("leftKey", "leftKeyHash", "leftValue")));
+                                values("leftKey", "leftValue")));
     }
 
     @Test
     public void testAllColumnsNeeded()
     {
         tester().assertThat(new PruneSemiJoinColumns())
-                .on(p -> buildProjectedSemiJoin(p, symbol -> true))
+                .on(p -> buildProjectedSemiJoin(p, _ -> true))
                 .doesNotFire();
     }
 
@@ -73,12 +72,13 @@ public class TestPruneSemiJoinColumns
                 .matches(
                         strictProject(
                                 ImmutableMap.of("match", expression(new Reference(BOOLEAN, "match"))),
-                                semiJoin("leftKey", "rightKey", "match",
+                                semiJoin("leftKey",
+                                        "rightKey",
+                                        "match",
                                         strictProject(
                                                 ImmutableMap.of(
-                                                        "leftKey", expression(new Reference(BIGINT, "leftKey")),
-                                                        "leftKeyHash", expression(new Reference(BIGINT, "leftKeyHash"))),
-                                                values("leftKey", "leftKeyHash", "leftValue")),
+                                                        "leftKey", expression(new Reference(BIGINT, "leftKey"))),
+                                                values("leftKey", "leftValue")),
                                         values("rightKey"))));
     }
 
@@ -86,10 +86,9 @@ public class TestPruneSemiJoinColumns
     {
         Symbol match = p.symbol("match");
         Symbol leftKey = p.symbol("leftKey");
-        Symbol leftKeyHash = p.symbol("leftKeyHash");
         Symbol leftValue = p.symbol("leftValue");
         Symbol rightKey = p.symbol("rightKey");
-        List<Symbol> outputs = ImmutableList.of(match, leftKey, leftKeyHash, leftValue);
+        List<Symbol> outputs = ImmutableList.of(match, leftKey, leftValue);
         return p.project(
                 Assignments.identity(
                         outputs.stream()
@@ -99,9 +98,7 @@ public class TestPruneSemiJoinColumns
                         leftKey,
                         rightKey,
                         match,
-                        Optional.of(leftKeyHash),
-                        Optional.empty(),
-                        p.values(leftKey, leftKeyHash, leftValue),
+                        p.values(leftKey, leftValue),
                         p.values(rightKey)));
     }
 }

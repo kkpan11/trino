@@ -20,11 +20,13 @@ import com.google.inject.Inject;
 import io.trino.metastore.Database;
 import io.trino.metastore.HivePrincipal;
 import io.trino.metastore.HivePrivilegeInfo;
+import io.trino.metastore.HivePrivilegeInfo.HivePrivilege;
 import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ColumnSchema;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSecurityContext;
+import io.trino.spi.connector.EntityKindAndName;
 import io.trino.spi.connector.SchemaRoutineName;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
@@ -35,7 +37,6 @@ import io.trino.spi.security.Privilege;
 import io.trino.spi.security.RoleGrant;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
-import io.trino.spi.type.Type;
 
 import java.util.List;
 import java.util.Map;
@@ -47,7 +48,6 @@ import java.util.stream.Stream;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.metastore.Database.DEFAULT_DATABASE_NAME;
-import static io.trino.metastore.HivePrivilegeInfo.HivePrivilege;
 import static io.trino.metastore.HivePrivilegeInfo.HivePrivilege.DELETE;
 import static io.trino.metastore.HivePrivilegeInfo.HivePrivilege.INSERT;
 import static io.trino.metastore.HivePrivilegeInfo.HivePrivilege.OWNERSHIP;
@@ -81,24 +81,25 @@ import static io.trino.spi.security.AccessDeniedException.denyDropTable;
 import static io.trino.spi.security.AccessDeniedException.denyDropView;
 import static io.trino.spi.security.AccessDeniedException.denyExecuteTableProcedure;
 import static io.trino.spi.security.AccessDeniedException.denyGrantRoles;
+import static io.trino.spi.security.AccessDeniedException.denyGrantTableBranchPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyGrantTablePrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyInsertTable;
 import static io.trino.spi.security.AccessDeniedException.denyRefreshMaterializedView;
+import static io.trino.spi.security.AccessDeniedException.denyRefreshView;
 import static io.trino.spi.security.AccessDeniedException.denyRenameColumn;
 import static io.trino.spi.security.AccessDeniedException.denyRenameMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyRenameSchema;
 import static io.trino.spi.security.AccessDeniedException.denyRenameTable;
 import static io.trino.spi.security.AccessDeniedException.denyRenameView;
 import static io.trino.spi.security.AccessDeniedException.denyRevokeRoles;
+import static io.trino.spi.security.AccessDeniedException.denyRevokeTableBranchPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyRevokeTablePrivilege;
 import static io.trino.spi.security.AccessDeniedException.denySelectTable;
 import static io.trino.spi.security.AccessDeniedException.denySetCatalogSessionProperty;
+import static io.trino.spi.security.AccessDeniedException.denySetEntityAuthorization;
 import static io.trino.spi.security.AccessDeniedException.denySetMaterializedViewProperties;
 import static io.trino.spi.security.AccessDeniedException.denySetRole;
-import static io.trino.spi.security.AccessDeniedException.denySetSchemaAuthorization;
-import static io.trino.spi.security.AccessDeniedException.denySetTableAuthorization;
 import static io.trino.spi.security.AccessDeniedException.denySetTableProperties;
-import static io.trino.spi.security.AccessDeniedException.denySetViewAuthorization;
 import static io.trino.spi.security.AccessDeniedException.denyShowColumns;
 import static io.trino.spi.security.AccessDeniedException.denyShowCreateFunction;
 import static io.trino.spi.security.AccessDeniedException.denyShowCreateSchema;
@@ -158,14 +159,12 @@ public class SqlStandardAccessControl
     public void checkCanSetSchemaAuthorization(ConnectorSecurityContext context, String schemaName, TrinoPrincipal principal)
     {
         if (!isAdmin(context)) {
-            denySetSchemaAuthorization(schemaName, principal);
+            denySetEntityAuthorization(new EntityKindAndName("SCHEMA", List.of(schemaName)), principal);
         }
     }
 
     @Override
-    public void checkCanShowSchemas(ConnectorSecurityContext context)
-    {
-    }
+    public void checkCanShowSchemas(ConnectorSecurityContext context) {}
 
     @Override
     public Set<String> filterSchemas(ConnectorSecurityContext context, Set<String> schemaNames)
@@ -239,6 +238,14 @@ public class SqlStandardAccessControl
     }
 
     @Override
+    public void checkCanRefreshView(ConnectorSecurityContext context, SchemaTableName viewName)
+    {
+        if (!checkTablePermission(context, viewName, UPDATE, false)) {
+            denyRefreshView(viewName.toString());
+        }
+    }
+
+    @Override
     public void checkCanSetColumnComment(ConnectorSecurityContext context, SchemaTableName tableName)
     {
         if (!isTableOwner(context, tableName)) {
@@ -247,9 +254,7 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public void checkCanShowTables(ConnectorSecurityContext context, String schemaName)
-    {
-    }
+    public void checkCanShowTables(ConnectorSecurityContext context, String schemaName) {}
 
     @Override
     public Set<SchemaTableName> filterTables(ConnectorSecurityContext context, Set<SchemaTableName> tableNames)
@@ -318,33 +323,54 @@ public class SqlStandardAccessControl
     public void checkCanSetTableAuthorization(ConnectorSecurityContext context, SchemaTableName tableName, TrinoPrincipal principal)
     {
         if (!isAdmin(context)) {
-            denySetTableAuthorization(tableName.toString(), principal);
+            denySetEntityAuthorization(new EntityKindAndName("TABLE", List.of(tableName.getSchemaName(), tableName.getTableName())), principal);
         }
     }
 
     @Override
-    public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
+    public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> columnNames)
     {
         // TODO: Implement column level access control
         if (!checkTablePermission(context, tableName, SELECT, false)) {
-            denySelectTable(tableName.toString());
+            denySelectTable(tableName.toString(), branch);
         }
     }
 
+    @Deprecated
+    @Override
+    public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
+    {
+        checkCanSelectFromColumns(context, tableName, Optional.empty(), columnNames);
+    }
+
+    @Override
+    public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
+    {
+        if (!checkTablePermission(context, tableName, INSERT, false)) {
+            denyInsertTable(tableName.toString(), branch);
+        }
+    }
+
+    @Deprecated
     @Override
     public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName)
     {
-        if (!checkTablePermission(context, tableName, INSERT, false)) {
-            denyInsertTable(tableName.toString());
-        }
+        checkCanInsertIntoTable(context, tableName, Optional.empty());
     }
 
     @Override
-    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
     {
         if (!checkTablePermission(context, tableName, DELETE, false)) {
-            denyDeleteTable(tableName.toString());
+            denyDeleteTable(tableName.toString(), branch);
         }
+    }
+
+    @Deprecated
+    @Override
+    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        checkCanDeleteFromTable(context, tableName, Optional.empty());
     }
 
     @Override
@@ -356,11 +382,18 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> updatedColumns)
+    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> updatedColumns)
     {
         if (!checkTablePermission(context, tableName, UPDATE, false)) {
-            denyUpdateTableColumns(tableName.toString(), updatedColumns);
+            denyUpdateTableColumns(tableName.toString(), branch, updatedColumns);
         }
+    }
+
+    @Deprecated
+    @Override
+    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> updatedColumns)
+    {
+        checkCanUpdateTableColumns(context, tableName, Optional.empty(), updatedColumns);
     }
 
     @Override
@@ -383,7 +416,7 @@ public class SqlStandardAccessControl
     public void checkCanSetViewAuthorization(ConnectorSecurityContext context, SchemaTableName viewName, TrinoPrincipal principal)
     {
         if (!isAdmin(context)) {
-            denySetViewAuthorization(viewName.toString(), principal);
+            denySetEntityAuthorization(new EntityKindAndName("VIEW", List.of(viewName.getSchemaName(), viewName.getTableName())), principal);
         }
     }
 
@@ -396,14 +429,21 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
+    public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> columnNames)
     {
-        checkCanSelectFromColumns(context, tableName, columnNames);
+        checkCanSelectFromColumns(context, tableName, branch, columnNames);
 
         // TODO implement column level access control
         if (!checkTablePermission(context, tableName, SELECT, true)) {
-            denyCreateViewWithSelect(tableName.toString(), context.getIdentity());
+            denyCreateViewWithSelect(tableName.toString(), branch, context.getIdentity());
         }
+    }
+
+    @Deprecated
+    @Override
+    public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
+    {
+        checkCanCreateViewWithSelectFromColumns(context, tableName, Optional.empty(), columnNames);
     }
 
     @Override
@@ -435,6 +475,14 @@ public class SqlStandardAccessControl
     {
         if (!isTableOwner(context, viewName)) {
             denyRenameMaterializedView(viewName.toString(), newViewName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanSetMaterializedViewAuthorization(ConnectorSecurityContext context, SchemaTableName viewName, TrinoPrincipal principal)
+    {
+        if (!isAdmin(context)) {
+            denySetEntityAuthorization(new EntityKindAndName("MATERIALIZED VIEW", List.of(viewName.getSchemaName(), viewName.getTableName())), principal);
         }
     }
 
@@ -503,6 +551,36 @@ public class SqlStandardAccessControl
     }
 
     @Override
+    public void checkCanGrantTableBranchPrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, String branchName, TrinoPrincipal grantee, boolean grantOption)
+    {
+        if (isTableOwner(context, tableName)) {
+            return;
+        }
+
+        if (!hasGrantOptionForPrivilege(context, privilege, tableName)) {
+            denyGrantTableBranchPrivilege(privilege.name(), branchName, tableName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanDenyTableBranchPrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, String branchName, TrinoPrincipal grantee)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support deny on branches in tables");
+    }
+
+    @Override
+    public void checkCanRevokeTableBranchPrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, String branchName, TrinoPrincipal revokee, boolean grantOption)
+    {
+        if (isTableOwner(context, tableName)) {
+            return;
+        }
+
+        if (!hasGrantOptionForPrivilege(context, privilege, tableName)) {
+            denyRevokeTableBranchPrivilege(privilege.name(), tableName.getTableName(), branchName, tableName.toString());
+        }
+    }
+
+    @Override
     public void checkCanCreateRole(ConnectorSecurityContext context, String role, Optional<TrinoPrincipal> grantor)
     {
         // currently specifying grantor is supported by metastore, but it is not supported by Hive itself
@@ -523,7 +601,8 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public void checkCanGrantRoles(ConnectorSecurityContext context,
+    public void checkCanGrantRoles(
+            ConnectorSecurityContext context,
             Set<String> roles,
             Set<TrinoPrincipal> grantees,
             boolean adminOption,
@@ -539,7 +618,8 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public void checkCanRevokeRoles(ConnectorSecurityContext context,
+    public void checkCanRevokeRoles(
+            ConnectorSecurityContext context,
             Set<String> roles,
             Set<TrinoPrincipal> grantees,
             boolean adminOption,
@@ -571,25 +651,19 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public void checkCanShowCurrentRoles(ConnectorSecurityContext context)
-    {
-    }
+    public void checkCanShowCurrentRoles(ConnectorSecurityContext context) {}
 
     @Override
-    public void checkCanShowRoleGrants(ConnectorSecurityContext context)
-    {
-    }
+    public void checkCanShowRoleGrants(ConnectorSecurityContext context) {}
 
     @Override
-    public void checkCanExecuteProcedure(ConnectorSecurityContext context, SchemaRoutineName procedure)
-    {
-    }
+    public void checkCanExecuteProcedure(ConnectorSecurityContext context, SchemaRoutineName procedure) {}
 
     @Override
     public void checkCanExecuteTableProcedure(ConnectorSecurityContext context, SchemaTableName tableName, String procedure)
     {
         if (!isTableOwner(context, tableName)) {
-            denyExecuteTableProcedure(tableName.toString(), tableName.toString());
+            denyExecuteTableProcedure(tableName.toString(), procedure);
         }
     }
 
@@ -606,9 +680,7 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public void checkCanShowFunctions(ConnectorSecurityContext context, String schemaName)
-    {
-    }
+    public void checkCanShowFunctions(ConnectorSecurityContext context, String schemaName) {}
 
     @Override
     public Set<SchemaFunctionName> filterFunctions(ConnectorSecurityContext context, Set<SchemaFunctionName> functionNames)
@@ -641,15 +713,33 @@ public class SqlStandardAccessControl
     }
 
     @Override
-    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanShowBranches(ConnectorSecurityContext context, SchemaTableName tableName)
     {
-        return ImmutableList.of();
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support branches");
     }
 
     @Override
-    public Optional<ViewExpression> getColumnMask(ConnectorSecurityContext context, SchemaTableName tableName, String columnName, Type type)
+    public void checkCanCreateBranch(ConnectorSecurityContext context, SchemaTableName tableName, String branchName)
     {
-        return Optional.empty();
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support branches");
+    }
+
+    @Override
+    public void checkCanDropBranch(ConnectorSecurityContext context, SchemaTableName tableName, String branchName)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support branches");
+    }
+
+    @Override
+    public void checkCanFastForwardBranch(ConnectorSecurityContext context, SchemaTableName tableName, String sourceBranchName, String targetBranchName)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support branches");
+    }
+
+    @Override
+    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        return ImmutableList.of();
     }
 
     @Override
@@ -734,7 +824,7 @@ public class SqlStandardAccessControl
         }
 
         // create is not supported
-        if (privilege == Privilege.CREATE) {
+        if (privilege == Privilege.CREATE || privilege == Privilege.CREATE_BRANCH) {
             return false;
         }
 
@@ -757,7 +847,8 @@ public class SqlStandardAccessControl
         return listTablePrivileges(context, databaseName, tableName, principals);
     }
 
-    private Stream<HivePrivilegeInfo> listTablePrivileges(ConnectorSecurityContext context,
+    private Stream<HivePrivilegeInfo> listTablePrivileges(
+            ConnectorSecurityContext context,
             String databaseName,
             String tableName,
             Stream<HivePrincipal> principals)

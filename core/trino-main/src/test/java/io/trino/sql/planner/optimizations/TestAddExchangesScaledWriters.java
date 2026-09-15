@@ -99,7 +99,7 @@ public class TestAddExchangesScaledWriters
     private MockConnectorFactory createMergeConnectorFactory()
     {
         return MockConnectorFactory.builder()
-                .withGetTableHandle((session, schemaTableName) -> {
+                .withGetTableHandle((_, schemaTableName) -> {
                     if (schemaTableName.getTableName().equals("source_table")) {
                         return new MockConnectorTableHandle(schemaTableName);
                     }
@@ -108,9 +108,9 @@ public class TestAddExchangesScaledWriters
                     }
                     return null;
                 })
-                .withGetLayoutForTableExecute((session, tableHandle) -> {
+                .withGetLayoutForTableExecute((_, tableHandle) -> {
                     MockConnector.MockConnectorTableExecuteHandle tableExecuteHandle = (MockConnector.MockConnectorTableExecuteHandle) tableHandle;
-                    if (tableExecuteHandle.getSchemaTableName().getTableName().equals("target_table")) {
+                    if (tableExecuteHandle.schemaTableName().getTableName().equals("target_table")) {
                         return Optional.of(new ConnectorTableLayout(ImmutableList.of("year")));
                     }
                     return Optional.empty();
@@ -119,10 +119,10 @@ public class TestAddExchangesScaledWriters
                         "OPTIMIZE",
                         distributedWithFilteringAndRepartitioning(),
                         ImmutableList.of(PropertyMetadata.stringProperty("file_size_threshold", "file_size_threshold", "10GB", false)))))
-                .withGetColumns(schemaTableName -> ImmutableList.of(
+                .withGetColumns(_ -> ImmutableList.of(
                         new ColumnMetadata("customer", INTEGER),
                         new ColumnMetadata("year", INTEGER)))
-                .withGetInsertLayout((session, tableName) -> {
+                .withGetInsertLayout((_, tableName) -> {
                     if (tableName.getTableName().equals("source_table") || tableName.getTableName().equals("target_table")) {
                         return Optional.of(new ConnectorTableLayout(ImmutableList.of("year")));
                     }
@@ -137,7 +137,7 @@ public class TestAddExchangesScaledWriters
     private MockConnectorFactory createConnectorFactory(String name, boolean writerScalingEnabledAcrossTasks)
     {
         return MockConnectorFactory.builder()
-                .withGetTableHandle((session, schemaTableName) -> null)
+                .withGetTableHandle((_, _) -> null)
                 .withName(name)
                 .withWriterScalingOptions(new WriterScalingOptions(writerScalingEnabledAcrossTasks, true))
                 .build();
@@ -183,7 +183,8 @@ public class TestAddExchangesScaledWriters
     @Test
     public void testScaleWritersDisabledForMerge()
     {
-        @Language("SQL") String query = """
+        @Language("SQL") String query =
+                """
                 MERGE INTO target_table t USING source_table s
                     ON t.customer = s.customer
                     WHEN MATCHED
@@ -236,7 +237,9 @@ public class TestAddExchangesScaledWriters
                                 ImmutableList.of("customer", "year"),
                                 ImmutableList.of("customer", "year"),
                                 exchange(LOCAL, REPARTITION, FIXED_HASH_DISTRIBUTION,
-                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION,
+                                        exchange(REMOTE,
+                                                REPARTITION,
+                                                FIXED_HASH_DISTRIBUTION,
                                                 tableScan("target_table", ImmutableMap.of("customer", "customer", "year", "year")))))));
 
         assertDistributedPlan(
@@ -251,12 +254,15 @@ public class TestAddExchangesScaledWriters
                                 ImmutableList.of("customer", "year"),
                                 ImmutableList.of("customer", "year"),
                                 exchange(LOCAL, REPARTITION, FIXED_HASH_DISTRIBUTION,
-                                        exchange(REMOTE, REPARTITION, FIXED_HASH_DISTRIBUTION,
+                                        exchange(REMOTE,
+                                                REPARTITION,
+                                                FIXED_HASH_DISTRIBUTION,
                                                 tableScan("target_table", ImmutableMap.of("customer", "customer", "year", "year")))))));
     }
 
     @Test
-    public void testScaleWritersEnabledForOptimizeOnUnPartitionedTable() {
+    public void testScaleWritersEnabledForOptimizeOnUnPartitionedTable()
+    {
         assertDistributedPlan(
                 "ALTER TABLE source_table EXECUTE OPTIMIZE(file_size_threshold => '10MB')",
                 Session.builder(getPlanTester().getDefaultSession())
@@ -269,7 +275,9 @@ public class TestAddExchangesScaledWriters
                                 ImmutableList.of("customer", "year"),
                                 ImmutableList.of("customer", "year"),
                                 exchange(LOCAL, GATHER, SINGLE_DISTRIBUTION,
-                                        exchange(REMOTE, REPARTITION, SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION,
+                                        exchange(REMOTE,
+                                                REPARTITION,
+                                                SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION,
                                                 tableScan("source_table", ImmutableMap.of("customer", "customer", "year", "year")))))));
     }
 }

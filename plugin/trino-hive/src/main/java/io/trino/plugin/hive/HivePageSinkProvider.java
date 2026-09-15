@@ -16,17 +16,14 @@ package io.trino.plugin.hive;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.inject.Inject;
-import io.airlift.event.client.EventClient;
 import io.airlift.json.JsonCodec;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.metastore.HiveMetastoreFactory;
 import io.trino.metastore.SortingColumn;
-import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
+import io.trino.metastore.cache.CachingHiveMetastore;
 import io.trino.plugin.hive.metastore.HivePageSinkMetadataProvider;
-import io.trino.plugin.hive.metastore.cache.CachingHiveMetastore;
-import io.trino.spi.NodeManager;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
@@ -37,8 +34,10 @@ import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkId;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.type.TypeManager;
 
 import java.util.List;
@@ -48,11 +47,8 @@ import java.util.OptionalInt;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.util.concurrent.MoreExecutors.listeningDecorator;
-import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.trino.plugin.hive.metastore.cache.CachingHiveMetastore.createPerTransactionCache;
+import static io.trino.metastore.cache.CachingHiveMetastore.createPerTransactionCache;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.Executors.newFixedThreadPool;
 
 public class HivePageSinkProvider
         implements ConnectorPageSinkProvider
@@ -67,11 +63,7 @@ public class HivePageSinkProvider
     private final int maxOpenSortFiles;
     private final DataSize writerSortBufferSize;
     private final LocationService locationService;
-    private final ListeningExecutorService writeVerificationExecutor;
     private final JsonCodec<PartitionUpdate> partitionUpdateCodec;
-    private final NodeManager nodeManager;
-    private final EventClient eventClient;
-    private final HiveSessionProperties hiveSessionProperties;
     private final HiveWriterStats hiveWriterStats;
     private final long perTransactionMetastoreCacheMaximumSize;
     private final boolean temporaryStagingDirectoryEnabled;
@@ -89,9 +81,6 @@ public class HivePageSinkProvider
             SortingFileWriterConfig sortingFileWriterConfig,
             LocationService locationService,
             JsonCodec<PartitionUpdate> partitionUpdateCodec,
-            NodeManager nodeManager,
-            EventClient eventClient,
-            HiveSessionProperties hiveSessionProperties,
             HiveWriterStats hiveWriterStats)
     {
         this.fileWriterFactories = ImmutableSet.copyOf(requireNonNull(fileWriterFactories, "fileWriterFactories is null"));
@@ -104,11 +93,7 @@ public class HivePageSinkProvider
         this.maxOpenSortFiles = sortingFileWriterConfig.getMaxOpenSortFiles();
         this.writerSortBufferSize = requireNonNull(sortingFileWriterConfig.getWriterSortBufferSize(), "writerSortBufferSize is null");
         this.locationService = requireNonNull(locationService, "locationService is null");
-        this.writeVerificationExecutor = listeningDecorator(newFixedThreadPool(config.getWriteValidationThreads(), daemonThreadsNamed("hive-write-validation-%s")));
         this.partitionUpdateCodec = requireNonNull(partitionUpdateCodec, "partitionUpdateCodec is null");
-        this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
-        this.eventClient = requireNonNull(eventClient, "eventClient is null");
-        this.hiveSessionProperties = requireNonNull(hiveSessionProperties, "hiveSessionProperties is null");
         this.hiveWriterStats = requireNonNull(hiveWriterStats, "hiveWriterStats is null");
         this.perTransactionMetastoreCacheMaximumSize = config.getPerTransactionMetastoreCacheMaximumSize();
         this.temporaryStagingDirectoryEnabled = config.isTemporaryStagingDirectoryEnabled();
@@ -116,28 +101,49 @@ public class HivePageSinkProvider
     }
 
     @Override
-    public ConnectorPageSink createPageSink(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorOutputTableHandle tableHandle, ConnectorPageSinkId pageSinkId)
+    public ConnectorPageSink createPageSink(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorOutputTableHandle tableHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
     {
         HiveOutputTableHandle handle = (HiveOutputTableHandle) tableHandle;
         return createPageSink(handle, true, session, handle.getAdditionalTableParameters());
     }
 
     @Override
-    public ConnectorPageSink createPageSink(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorInsertTableHandle tableHandle, ConnectorPageSinkId pageSinkId)
+    public ConnectorPageSink createPageSink(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorInsertTableHandle tableHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
     {
         HiveWritableTableHandle handle = (HiveInsertTableHandle) tableHandle;
         return createPageSink(handle, false, session, ImmutableMap.of() /* for insert properties are taken from metastore */);
     }
 
     @Override
-    public ConnectorPageSink createPageSink(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle, ConnectorPageSinkId pageSinkId)
+    public ConnectorPageSink createPageSink(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorTableExecuteHandle tableExecuteHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
     {
         HiveTableExecuteHandle handle = (HiveTableExecuteHandle) tableExecuteHandle;
         return createPageSink(handle, false, session, ImmutableMap.of());
     }
 
     @Override
-    public ConnectorMergeSink createMergeSink(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorMergeTableHandle mergeHandle, ConnectorPageSinkId pageSinkId)
+    public ConnectorMergeSink createMergeSink(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId,
+            MemoryContext memoryContext)
     {
         HiveMergeTableHandle hiveMergeHandle = (HiveMergeTableHandle) mergeHandle;
         HiveInsertTableHandle insertHandle = hiveMergeHandle.getInsertHandle();
@@ -178,9 +184,6 @@ public class HivePageSinkProvider
                 writerSortBufferSize,
                 maxOpenSortFiles,
                 session,
-                nodeManager,
-                eventClient,
-                hiveSessionProperties,
                 hiveWriterStats,
                 temporaryStagingDirectoryEnabled,
                 temporaryStagingDirectoryPath);
@@ -192,7 +195,6 @@ public class HivePageSinkProvider
                 handle.getBucketInfo(),
                 pageIndexerFactory,
                 maxOpenPartitions,
-                writeVerificationExecutor,
                 partitionUpdateCodec,
                 session);
     }

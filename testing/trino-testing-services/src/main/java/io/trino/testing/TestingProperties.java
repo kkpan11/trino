@@ -24,7 +24,6 @@ import java.util.Properties;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public final class TestingProperties
@@ -50,9 +49,16 @@ public final class TestingProperties
         return getProjectProperty("project.version");
     }
 
+    public static String getTemurinRelease()
+    {
+        return getProjectProperty("temurin.release");
+    }
+
     public static String getDockerImagesVersion()
     {
-        return getProjectProperty("docker.images.version");
+        String version = getProjectProperty("docker.images.version");
+        checkArgument(!version.isEmpty() && !version.equals("latest"), "docker.images.version must be pinned to an explicit version, was '%s'", version);
+        return version;
     }
 
     private static String getProjectProperty(String name)
@@ -63,7 +69,7 @@ public final class TestingProperties
     public static String requiredNonEmptySystemProperty(String propertyName)
     {
         String value = System.getProperty(propertyName);
-        checkArgument(!isNullOrEmpty(value), format("System property %s must be non-empty", propertyName));
+        checkArgument(!isNullOrEmpty(value), "System property %s must be non-empty", propertyName);
         return value;
     }
 }

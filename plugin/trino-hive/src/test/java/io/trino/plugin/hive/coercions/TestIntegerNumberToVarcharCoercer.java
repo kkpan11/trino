@@ -25,12 +25,11 @@ import static io.trino.plugin.hive.HiveStorageFormat.PARQUET;
 import static io.trino.plugin.hive.HiveTimestampPrecision.DEFAULT_PRECISION;
 import static io.trino.plugin.hive.coercions.CoercionUtils.createCoercer;
 import static io.trino.plugin.hive.util.HiveTypeTranslator.toHiveType;
-import static io.trino.spi.block.TestingSession.SESSION;
-import static io.trino.spi.predicate.Utils.nativeValueToBlock;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -149,8 +148,8 @@ public class TestIntegerNumberToVarcharCoercer
     private static void assertIntegerNumberToVarcharCoercion(Type actualType, Object actualValue, HiveStorageFormat storageFormat, Type expectedType, String expectedValue)
     {
         Block coercedBlock = createCoercer(TESTING_TYPE_MANAGER, toHiveType(actualType), toHiveType(expectedType), new CoercionContext(DEFAULT_PRECISION, storageFormat)).orElseThrow()
-                .apply(nativeValueToBlock(actualType, actualValue));
-        Object coercedValue = coercedBlock.isNull(0) ? null : expectedType.getObjectValue(SESSION, coercedBlock, 0);
+                .apply(writeNativeValue(actualType, actualValue));
+        Object coercedValue = coercedBlock.isNull(0) ? null : expectedType.getObjectValue(coercedBlock, 0);
         assertThat(coercedValue).isEqualTo(expectedValue);
     }
 }

@@ -18,10 +18,9 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Closer;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
+import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.trino.spi.Page;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.BlockEncodingSerde;
-import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,6 +42,7 @@ import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static com.google.common.util.concurrent.Futures.getUnchecked;
 import static io.trino.execution.buffer.CompressionCodec.NONE;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spiller.FileSingleStreamSpillerFactory.SPILL_FILE_PREFIX;
 import static io.trino.spiller.FileSingleStreamSpillerFactory.SPILL_FILE_SUFFIX;
@@ -55,7 +55,6 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 @TestInstance(PER_METHOD)
 public class TestFileSingleStreamSpillerFactory
 {
-    private final BlockEncodingSerde blockEncodingSerde = new TestingBlockEncodingSerde();
     private Closer closer;
     private ListeningExecutorService executor;
     private File spillPath1;
@@ -90,22 +89,22 @@ public class TestFileSingleStreamSpillerFactory
         List<Path> spillPaths = ImmutableList.of(spillPath1.toPath(), spillPath2.toPath());
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths);
 
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
 
         Page page = buildPage();
         List<SingleStreamSpiller> spillers = new ArrayList<>();
         for (int i = 0; i < 10; ++i) {
-            SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+            SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
             getUnchecked(singleStreamSpiller.spill(page));
             spillers.add(singleStreamSpiller);
         }
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(5);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(5);
+        assertThat(listFiles(spillPath1.toPath())).hasSize(5);
+        assertThat(listFiles(spillPath2.toPath())).hasSize(5);
 
         spillers.forEach(SingleStreamSpiller::close);
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
     }
 
     @Test
@@ -116,8 +115,8 @@ public class TestFileSingleStreamSpillerFactory
         List<Path> spillPaths = ImmutableList.of(spillPath1.toPath(), spillPath2.toPath());
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths);
 
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
 
         // Set first spiller path to read-only after initialization to emulate a disk failing during runtime
         setPosixFilePermissions(spillPath1.toPath(), ImmutableSet.of(PosixFilePermission.OWNER_READ));
@@ -126,23 +125,23 @@ public class TestFileSingleStreamSpillerFactory
         List<SingleStreamSpiller> spillers = new ArrayList<>();
         int numberOfSpills = 10;
         for (int i = 0; i < numberOfSpills; ++i) {
-            SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+            SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
             getUnchecked(singleStreamSpiller.spill(page));
             spillers.add(singleStreamSpiller);
         }
 
         // bad disk should receive no spills, with the good disk taking the remainder
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(numberOfSpills);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).hasSize(numberOfSpills);
 
         spillers.forEach(SingleStreamSpiller::close);
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
     }
 
     private Page buildPage()
     {
-        BlockBuilder col1 = BIGINT.createBlockBuilder(null, 1);
+        BlockBuilder col1 = BIGINT.createFixedSizeBlockBuilder(1);
         BIGINT.writeLong(col1, 42);
         return new Page(col1.build());
     }
@@ -154,7 +153,7 @@ public class TestFileSingleStreamSpillerFactory
         List<Path> spillPaths = ImmutableList.of(spillPath1.toPath(), spillPath2.toPath());
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths, 0.0);
 
-        assertThatThrownBy(() -> spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test")))
+        assertThatThrownBy(() -> spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test")))
                 .isInstanceOf(RuntimeException.class)
                 .hasMessage("No free or healthy space available for spill");
     }
@@ -166,7 +165,7 @@ public class TestFileSingleStreamSpillerFactory
         List<Type> types = ImmutableList.of(BIGINT);
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths);
 
-        assertThatThrownBy(() -> spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test")))
+        assertThatThrownBy(() -> spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test")))
                 .isInstanceOf(RuntimeException.class)
                 .hasMessage("No spill paths configured");
     }
@@ -179,21 +178,21 @@ public class TestFileSingleStreamSpillerFactory
         spillPath1.mkdirs();
         spillPath2.mkdirs();
 
-        java.nio.file.Files.createTempFile(spillPath1.toPath(), SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX);
-        java.nio.file.Files.createTempFile(spillPath1.toPath(), SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX);
-        java.nio.file.Files.createTempFile(spillPath1.toPath(), SPILL_FILE_PREFIX, "blah");
-        java.nio.file.Files.createTempFile(spillPath2.toPath(), SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX);
-        java.nio.file.Files.createTempFile(spillPath2.toPath(), "blah", SPILL_FILE_SUFFIX);
-        java.nio.file.Files.createTempFile(spillPath2.toPath(), "blah", "blah");
+        Files.createTempFile(spillPath1.toPath(), SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX);
+        Files.createTempFile(spillPath1.toPath(), SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX);
+        Files.createTempFile(spillPath1.toPath(), SPILL_FILE_PREFIX, "blah");
+        Files.createTempFile(spillPath2.toPath(), SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX);
+        Files.createTempFile(spillPath2.toPath(), "blah", SPILL_FILE_SUFFIX);
+        Files.createTempFile(spillPath2.toPath(), "blah", "blah");
 
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(3);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(3);
+        assertThat(listFiles(spillPath1.toPath())).hasSize(3);
+        assertThat(listFiles(spillPath2.toPath())).hasSize(3);
 
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths);
         spillerFactory.cleanupOldSpillFiles();
 
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(1);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(2);
+        assertThat(listFiles(spillPath1.toPath())).hasSize(1);
+        assertThat(listFiles(spillPath2.toPath())).hasSize(2);
     }
 
     @Test
@@ -205,22 +204,22 @@ public class TestFileSingleStreamSpillerFactory
 
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths);
 
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
 
         Page page = buildPage();
         List<SingleStreamSpiller> spillers = new ArrayList<>();
 
-        SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+        SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
         getUnchecked(singleStreamSpiller.spill(page));
         spillers.add(singleStreamSpiller);
 
-        SingleStreamSpiller singleStreamSpiller2 = spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+        SingleStreamSpiller singleStreamSpiller2 = spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
         // Set second spiller path to read-only after initialization to emulate a disk failing during runtime
         setPosixFilePermissions(spillPath2.toPath(), ImmutableSet.of(PosixFilePermission.OWNER_READ));
 
         assertThatThrownBy(() -> getUnchecked(singleStreamSpiller2.spill(page)))
-                .isInstanceOf(com.google.common.util.concurrent.UncheckedExecutionException.class)
+                .isInstanceOf(UncheckedExecutionException.class)
                 .hasMessageContaining("Failed to spill pages");
         spillers.add(singleStreamSpiller2);
 
@@ -231,8 +230,8 @@ public class TestFileSingleStreamSpillerFactory
         // restore permissions to allow cleanup
         setPosixFilePermissions(spillPath2.toPath(), ImmutableSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
         spillers.forEach(SingleStreamSpiller::close);
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
     }
 
     @Test
@@ -244,17 +243,17 @@ public class TestFileSingleStreamSpillerFactory
 
         FileSingleStreamSpillerFactory spillerFactory = spillerFactoryFactory(spillPaths);
 
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
 
         Page page = buildPage();
         List<SingleStreamSpiller> spillers = new ArrayList<>();
 
-        SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+        SingleStreamSpiller singleStreamSpiller = spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
         getUnchecked(singleStreamSpiller.spill(page));
         spillers.add(singleStreamSpiller);
 
-        SingleStreamSpiller singleStreamSpiller2 = spillerFactory.create(types, bytes -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
+        SingleStreamSpiller singleStreamSpiller2 = spillerFactory.create(types, _ -> {}, newSimpleAggregatedMemoryContext().newLocalMemoryContext("test"));
         getUnchecked(singleStreamSpiller2.spill(page));
         spillers.add(singleStreamSpiller2);
 
@@ -263,8 +262,8 @@ public class TestFileSingleStreamSpillerFactory
                 .isEqualTo(2);
 
         spillers.forEach(SingleStreamSpiller::close);
-        assertThat(listFiles(spillPath1.toPath()).size()).isEqualTo(0);
-        assertThat(listFiles(spillPath2.toPath()).size()).isEqualTo(0);
+        assertThat(listFiles(spillPath1.toPath())).isEmpty();
+        assertThat(listFiles(spillPath2.toPath())).isEmpty();
     }
 
     private FileSingleStreamSpillerFactory spillerFactoryFactory(List<Path> paths)
@@ -276,9 +275,10 @@ public class TestFileSingleStreamSpillerFactory
     {
         return new FileSingleStreamSpillerFactory(
                 executor, // executor won't be closed, because we don't call destroy() on the spiller factory
-                blockEncodingSerde,
+                TESTING_BLOCK_ENCODING_SERDE,
                 new SpillerStats(),
                 paths,
+                1,
                 maxUsedSpaceThreshold,
                 NONE,
                 false);

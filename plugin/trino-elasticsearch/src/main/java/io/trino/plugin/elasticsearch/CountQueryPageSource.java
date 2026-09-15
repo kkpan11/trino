@@ -14,8 +14,8 @@
 package io.trino.plugin.elasticsearch;
 
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
-import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.SourcePage;
 
 import static io.trino.plugin.elasticsearch.ElasticsearchQueryBuilder.buildSearchQuery;
 import static java.lang.Math.toIntExact;
@@ -47,7 +47,7 @@ class CountQueryPageSource
         readTimeNanos = System.nanoTime() - start;
 
         if (table.limit().isPresent()) {
-            count = Math.min(table.limit().getAsLong(), count);
+            count = Math.min(table.limit().orElseThrow(), count);
         }
 
         remaining = count;
@@ -60,12 +60,12 @@ class CountQueryPageSource
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         int batch = toIntExact(Math.min(BATCH_SIZE, remaining));
         remaining -= batch;
 
-        return new Page(batch);
+        return SourcePage.create(batch);
     }
 
     @Override
@@ -81,13 +81,5 @@ class CountQueryPageSource
     }
 
     @Override
-    public long getMemoryUsage()
-    {
-        return 0;
-    }
-
-    @Override
-    public void close()
-    {
-    }
+    public void close() {}
 }

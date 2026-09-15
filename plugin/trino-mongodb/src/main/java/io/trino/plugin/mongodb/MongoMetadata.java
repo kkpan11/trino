@@ -22,12 +22,14 @@ import com.mongodb.client.MongoCollection;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.trino.plugin.base.projection.ApplyProjectionUtil;
+import io.trino.plugin.base.projection.ApplyProjectionUtil.ProjectedColumnRepresentation;
 import io.trino.plugin.mongodb.MongoIndex.MongodbIndexKey;
 import io.trino.plugin.mongodb.ptf.Query.QueryFunctionHandle;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
@@ -76,6 +78,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -96,7 +99,6 @@ import static com.mongodb.client.model.Aggregates.project;
 import static com.mongodb.client.model.Filters.ne;
 import static com.mongodb.client.model.Projections.exclude;
 import static io.trino.plugin.base.TemporaryTables.generateTemporaryTableName;
-import static io.trino.plugin.base.projection.ApplyProjectionUtil.ProjectedColumnRepresentation;
 import static io.trino.plugin.base.projection.ApplyProjectionUtil.extractSupportedProjectedColumns;
 import static io.trino.plugin.base.projection.ApplyProjectionUtil.replaceWithNewVariables;
 import static io.trino.plugin.mongodb.MongoSession.COLLECTION_NAME;
@@ -256,7 +258,11 @@ public class MongoMetadata
         if (saveMode == REPLACE) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
         }
-        RemoteTableName remoteTableName = mongoSession.toRemoteSchemaTableName(tableMetadata.getTable());
+        SchemaTableName tableName = tableMetadata.getTable();
+        if (tableName.toString().getBytes(UTF_8).length > MAX_QUALIFIED_IDENTIFIER_BYTE_LENGTH) {
+            throw new TrinoException(NOT_SUPPORTED, format("Qualified identifier name must be shorter than or equal to '%s' bytes: '%s'", MAX_QUALIFIED_IDENTIFIER_BYTE_LENGTH, tableName));
+        }
+        RemoteTableName remoteTableName = mongoSession.toRemoteSchemaTableName(tableName);
         mongoSession.createTable(remoteTableName, buildColumnHandles(tableMetadata), tableMetadata.getComment());
     }
 
@@ -294,9 +300,13 @@ public class MongoMetadata
     }
 
     @Override
-    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column)
+    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
     {
-        mongoSession.addColumn(((MongoTableHandle) tableHandle), column);
+        switch (position) {
+            case ColumnPosition.First _ -> throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding columns with FIRST clause");
+            case ColumnPosition.After _ -> throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding columns with AFTER clause");
+            case ColumnPosition.Last _ -> mongoSession.addColumn(((MongoTableHandle) tableHandle), column);
+        }
     }
 
     @Override
@@ -396,7 +406,11 @@ public class MongoMetadata
         if (replace) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
         }
-        RemoteTableName remoteTableName = mongoSession.toRemoteSchemaTableName(tableMetadata.getTable());
+        SchemaTableName tableName = tableMetadata.getTable();
+        if (tableName.toString().getBytes(UTF_8).length > MAX_QUALIFIED_IDENTIFIER_BYTE_LENGTH) {
+            throw new TrinoException(NOT_SUPPORTED, format("Qualified identifier name must be shorter than or equal to '%s' bytes: '%s'", MAX_QUALIFIED_IDENTIFIER_BYTE_LENGTH, tableName));
+        }
+        RemoteTableName remoteTableName = mongoSession.toRemoteSchemaTableName(tableName);
 
         List<MongoColumnHandle> columns = buildColumnHandles(tableMetadata);
 
@@ -528,10 +542,10 @@ public class MongoMetadata
 
             MongoCollection<Document> temporaryCollection = mongoSession.getCollection(temporaryTable);
             temporaryCollection.aggregate(ImmutableList.of(
-                    lookup(pageSinkIdsTable.collectionName(), pageSinkIdColumnName, pageSinkIdColumnName, "page_sink_id"),
-                    match(ne("page_sink_id", ImmutableList.of())),
-                    project(exclude("page_sink_id")),
-                    merge(targetTable.collectionName())))
+                            lookup(pageSinkIdsTable.collectionName(), pageSinkIdColumnName, pageSinkIdColumnName, "page_sink_id"),
+                            match(ne("page_sink_id", ImmutableList.of())),
+                            project(exclude("page_sink_id")),
+                            merge(targetTable.collectionName())))
                     .toCollection();
         }
         finally {
@@ -574,12 +588,12 @@ public class MongoMetadata
         Map<String, ColumnHandle> columns = getColumnHandles(session, tableHandle);
 
         for (MongoIndex index : tableInfo.indexes()) {
-            for (MongodbIndexKey key : index.getKeys()) {
-                if (key.getSortOrder().isEmpty()) {
+            for (MongodbIndexKey key : index.keys()) {
+                if (key.sortOrder().isEmpty()) {
                     continue;
                 }
-                if (columns.get(key.getName()) != null) {
-                    localProperties.add(new SortingProperty<>(columns.get(key.getName()), key.getSortOrder().get()));
+                if (columns.get(key.name()) != null) {
+                    localProperties.add(new SortingProperty<>(columns.get(key.name()), key.sortOrder().get()));
                 }
             }
         }
@@ -606,7 +620,7 @@ public class MongoMetadata
             return Optional.empty();
         }
 
-        if (handle.limit().isPresent() && handle.limit().getAsInt() <= limit) {
+        if (handle.limit().isPresent() && handle.limit().orElseThrow() <= limit) {
             return Optional.empty();
         }
 
@@ -639,7 +653,7 @@ public class MongoMetadata
             Map<ColumnHandle, Domain> supported = new HashMap<>();
             Map<ColumnHandle, Domain> unsupported = new HashMap<>();
 
-            for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
+            for (Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
                 MongoColumnHandle columnHandle = (MongoColumnHandle) entry.getKey();
                 Domain domain = entry.getValue();
                 Type columnType = columnHandle.type();
@@ -717,7 +731,7 @@ public class MongoMetadata
         ImmutableMap.Builder<ConnectorExpression, Variable> newVariablesBuilder = ImmutableMap.builder();
         ImmutableSet.Builder<MongoColumnHandle> projectedColumnsBuilder = ImmutableSet.builder();
 
-        for (Map.Entry<ConnectorExpression, ProjectedColumnRepresentation> entry : columnProjections.entrySet()) {
+        for (Entry<ConnectorExpression, ProjectedColumnRepresentation> entry : columnProjections.entrySet()) {
             ConnectorExpression expression = entry.getKey();
             ProjectedColumnRepresentation projectedColumn = entry.getValue();
 
@@ -817,17 +831,17 @@ public class MongoMetadata
                 && fields.get(1).getName().orElseThrow().equals(COLLECTION_NAME)
                 && fields.get(1).getType().equals(VARCHAR)
                 && fields.get(2).getName().orElseThrow().equals(ID);
-               // Id type can be of any type
+        // Id type can be of any type
     }
 
     @Override
     public Optional<TableFunctionApplicationResult<ConnectorTableHandle>> applyTableFunction(ConnectorSession session, ConnectorTableFunctionHandle handle)
     {
-        if (!(handle instanceof QueryFunctionHandle)) {
+        if (!(handle instanceof QueryFunctionHandle queryFunctionHandle)) {
             return Optional.empty();
         }
 
-        ConnectorTableHandle tableHandle = ((QueryFunctionHandle) handle).getTableHandle();
+        ConnectorTableHandle tableHandle = queryFunctionHandle.getTableHandle();
         List<ColumnHandle> columnHandles = getColumnHandles(session, tableHandle).values().stream()
                 .filter(column -> !((MongoColumnHandle) column).hidden())
                 .collect(toImmutableList());
@@ -868,7 +882,7 @@ public class MongoMetadata
     private static List<MongoColumnHandle> buildColumnHandles(ConnectorTableMetadata tableMetadata)
     {
         return tableMetadata.getColumns().stream()
-                .map(m -> new MongoColumnHandle(m.getName(), ImmutableList.of(), m.getType(), m.isHidden(), false, Optional.ofNullable(m.getComment())))
+                .map(m -> new MongoColumnHandle(m.getName(), ImmutableList.of(), m.getType(), m.isHidden(), false, m.getComment()))
                 .collect(toList());
     }
 

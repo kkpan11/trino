@@ -14,9 +14,11 @@
 package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.Session;
 import io.trino.metadata.Metadata;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.ir.Call;
 import io.trino.sql.ir.Cast;
@@ -29,7 +31,10 @@ import io.trino.type.UnknownType;
 import java.util.ArrayDeque;
 import java.util.Deque;
 
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
+import static io.trino.operator.scalar.TryCastFunction.TRY_CAST_FUNCTION_NAME;
+import static io.trino.sql.ir.IrExpressions.cast;
 
 /**
  * Transforms expressions of the form
@@ -46,17 +51,21 @@ public class UnwrapRowSubscript
 {
     public UnwrapRowSubscript(PlannerContext context)
     {
-        super((expression, _) -> ExpressionTreeRewriter.rewriteWith(new Rewriter(context.getMetadata()), expression));
+        super((expression, ruleContext) -> ExpressionTreeRewriter.rewriteWith(new Rewriter(context.getMetadata(), context.getTypeManager(), ruleContext.getSession()), expression));
     }
 
     private static class Rewriter
             extends io.trino.sql.ir.ExpressionRewriter<Void>
     {
         private final Metadata metadata;
+        private final TypeManager typeManager;
+        private final Session session;
 
-        public Rewriter(Metadata metadata)
+        public Rewriter(Metadata metadata, TypeManager typeManager, Session session)
         {
             this.metadata = metadata;
+            this.typeManager = typeManager;
+            this.session = session;
         }
 
         @Override
@@ -72,7 +81,7 @@ public class UnwrapRowSubscript
                     safe = false;
                     expression = cast.expression();
                 }
-                else if (base instanceof Call call && call.function().name().equals(builtinFunctionName("$try_cast"))) {
+                else if (base instanceof Call call && call.function().name().equals(builtinFunctionName(TRY_CAST_FUNCTION_NAME))) {
                     safe = true;
                     expression = call.arguments().getFirst();
                 }
@@ -95,9 +104,9 @@ public class UnwrapRowSubscript
                     Coercion coercion = coercions.pop();
                     result = coercion.isSafe() ?
                             new Call(
-                                    metadata.getCoercion(builtinFunctionName("$try_cast"), result.type(), coercion.getType()),
+                                    metadata.getCoercion(getCharVarcharCoercion(session), builtinFunctionName(TRY_CAST_FUNCTION_NAME), result.type(), coercion.getType()),
                                     ImmutableList.of(result)) :
-                            new Cast(result, coercion.getType());
+                            cast(typeManager, getCharVarcharCoercion(session), result, coercion.getType());
                 }
 
                 return result;

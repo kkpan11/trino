@@ -15,6 +15,8 @@ package io.trino.plugin.deltalake;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.plugin.deltalake.metastore.DeltaMetastoreTable;
 import io.trino.plugin.deltalake.transactionlog.MetadataEntry;
 import io.trino.plugin.deltalake.transactionlog.ProtocolEntry;
 import io.trino.plugin.deltalake.transactionlog.TableSnapshot;
@@ -28,7 +30,6 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.FixedPageSource;
-import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.predicate.TupleDomain;
 
@@ -51,17 +52,19 @@ public class DeltaLakePropertiesTable
             .add(new ColumnMetadata("value", VARCHAR))
             .build();
 
-    private final SchemaTableName tableName;
-    private final String tableLocation;
+    private final DeltaLakeFileSystemFactory fileSystemFactory;
+    private final DeltaMetastoreTable table;
     private final TransactionLogAccess transactionLogAccess;
     private final ConnectorTableMetadata tableMetadata;
+    private final Optional<DeltaLakeTableCredentials> tableCredentials;
 
-    public DeltaLakePropertiesTable(SchemaTableName tableName, String tableLocation, TransactionLogAccess transactionLogAccess)
+    public DeltaLakePropertiesTable(DeltaLakeFileSystemFactory fileSystemFactory, DeltaMetastoreTable table, TransactionLogAccess transactionLogAccess, Optional<DeltaLakeTableCredentials> tableCredentials)
     {
-        this.tableName = requireNonNull(tableName, "tableName is null");
-        this.tableLocation = requireNonNull(tableLocation, "tableLocation is null");
+        this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.table = requireNonNull(table, "table is null");
         this.transactionLogAccess = requireNonNull(transactionLogAccess, "transactionLogAccess is null");
-        this.tableMetadata = new ConnectorTableMetadata(requireNonNull(tableName, "tableName is null"), COLUMNS);
+        this.tableMetadata = new ConnectorTableMetadata(requireNonNull(table.schemaTableName(), "tableName is null"), COLUMNS);
+        this.tableCredentials = requireNonNull(tableCredentials, "tableCredentials is null");
     }
 
     @Override
@@ -82,14 +85,14 @@ public class DeltaLakePropertiesTable
         MetadataEntry metadataEntry;
         ProtocolEntry protocolEntry;
 
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session, tableCredentials);
         try {
-            SchemaTableName baseTableName = new SchemaTableName(tableName.getSchemaName(), DeltaLakeTableName.tableNameFrom(tableName.getTableName()));
-            TableSnapshot tableSnapshot = transactionLogAccess.loadSnapshot(session, baseTableName, tableLocation, Optional.empty());
-            metadataEntry = transactionLogAccess.getMetadataEntry(session, tableSnapshot);
-            protocolEntry = transactionLogAccess.getProtocolEntry(session, tableSnapshot);
+            TableSnapshot tableSnapshot = transactionLogAccess.loadSnapshot(session, table, tableCredentials, Optional.empty());
+            metadataEntry = transactionLogAccess.getMetadataEntry(session, fileSystem, tableSnapshot);
+            protocolEntry = transactionLogAccess.getProtocolEntry(session, fileSystem, tableSnapshot);
         }
         catch (IOException e) {
-            throw new TrinoException(DeltaLakeErrorCode.DELTA_LAKE_INVALID_SCHEMA, "Unable to load table metadata from location: " + tableLocation, e);
+            throw new TrinoException(DeltaLakeErrorCode.DELTA_LAKE_INVALID_SCHEMA, "Unable to load table metadata from location: " + table.location(), e);
         }
 
         return new FixedPageSource(buildPages(metadataEntry, protocolEntry));
@@ -98,6 +101,11 @@ public class DeltaLakePropertiesTable
     private List<Page> buildPages(MetadataEntry metadataEntry, ProtocolEntry protocolEntry)
     {
         PageListBuilder pagesBuilder = PageListBuilder.forTable(tableMetadata);
+
+        pagesBuilder.beginRow();
+        pagesBuilder.appendVarchar("location");
+        pagesBuilder.appendVarchar(table.location());
+        pagesBuilder.endRow();
 
         metadataEntry.getConfiguration().forEach((key, value) -> {
             pagesBuilder.beginRow();

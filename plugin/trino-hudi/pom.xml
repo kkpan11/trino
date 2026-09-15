@@ -5,25 +5,21 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>459-SNAPSHOT</version>
+        <version>484-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>trino-hudi</artifactId>
     <packaging>trino-plugin</packaging>
+    <name>${project.artifactId}</name>
     <description>Trino - Hudi connector</description>
 
     <properties>
         <air.compiler.fail-warnings>true</air.compiler.fail-warnings>
-        <dep.hudi.version>0.15.0</dep.hudi.version>
+        <dep.hudi.version>1.2.0</dep.hudi.version>
     </properties>
 
     <dependencies>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-        </dependency>
-
         <dependency>
             <groupId>com.google.errorprone</groupId>
             <artifactId>error_prone_annotations</artifactId>
@@ -33,11 +29,6 @@
         <dependency>
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>com.google.inject</groupId>
-            <artifactId>guice</artifactId>
         </dependency>
 
         <dependency>
@@ -57,7 +48,7 @@
 
         <dependency>
             <groupId>io.airlift</groupId>
-            <artifactId>event</artifactId>
+            <artifactId>guice</artifactId>
         </dependency>
 
         <dependency>
@@ -126,6 +117,24 @@
         </dependency>
 
         <dependency>
+            <groupId>org.apache.hudi</groupId>
+            <artifactId>hudi-common</artifactId>
+            <version>${dep.hudi.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.hudi</groupId>
+            <artifactId>hudi-io</artifactId>
+            <version>${dep.hudi.version}</version>
+        </dependency>
+
+        <dependency>
             <groupId>org.apache.parquet</groupId>
             <artifactId>parquet-column</artifactId>
         </dependency>
@@ -155,6 +164,18 @@
 
         <dependency>
             <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api-incubator</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-common</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
             <artifactId>opentelemetry-context</artifactId>
             <scope>provided</scope>
         </dependency>
@@ -166,39 +187,27 @@
         </dependency>
 
         <dependency>
-            <groupId>org.openjdk.jol</groupId>
-            <artifactId>jol-core</artifactId>
+            <groupId>org.locationtech.jts</groupId>
+            <artifactId>jts-core</artifactId>
             <scope>provided</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>io.airlift</groupId>
-            <artifactId>log-manager</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>io.dropwizard.metrics</groupId>
-            <artifactId>metrics-core</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>io.trino</groupId>
-            <artifactId>trino-hive-formats</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>org.jetbrains</groupId>
-            <artifactId>annotations</artifactId>
-            <scope>runtime</scope>
         </dependency>
 
         <dependency>
             <groupId>com.esotericsoftware</groupId>
             <artifactId>kryo-shaded</artifactId>
             <version>4.0.3</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>configuration-testing</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -210,7 +219,20 @@
 
         <dependency>
             <groupId>io.airlift</groupId>
+            <artifactId>log-manager</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
             <artifactId>testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <!-- required by hudi-client-common's LockManager used when writing test tables -->
+            <groupId>io.dropwizard.metrics</groupId>
+            <artifactId>metrics-core</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -222,8 +244,21 @@
 
         <dependency>
             <groupId>io.trino</groupId>
+            <artifactId>trino-hdfs</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
             <artifactId>trino-hive</artifactId>
             <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
+            <artifactId>trino-hive-formats</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -243,13 +278,6 @@
         <dependency>
             <groupId>io.trino</groupId>
             <artifactId>trino-parser</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>io.trino</groupId>
-            <artifactId>trino-spi</artifactId>
-            <type>test-jar</type>
             <scope>test</scope>
         </dependency>
 
@@ -304,19 +332,6 @@
 
         <dependency>
             <groupId>org.apache.hudi</groupId>
-            <artifactId>hudi-common</artifactId>
-            <version>${dep.hudi.version}</version>
-            <scope>test</scope>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.hudi</groupId>
             <artifactId>hudi-hadoop-common</artifactId>
             <version>${dep.hudi.version}</version>
             <scope>test</scope>
@@ -332,6 +347,7 @@
             <groupId>org.apache.hudi</groupId>
             <artifactId>hudi-io</artifactId>
             <version>${dep.hudi.version}</version>
+            <classifier>tests</classifier>
             <scope>test</scope>
             <exclusions>
                 <exclusion>
@@ -373,6 +389,12 @@
         </dependency>
 
         <dependency>
+            <groupId>org.jetbrains</groupId>
+            <artifactId>annotations</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
             <scope>test</scope>
@@ -396,6 +418,10 @@
                         <ignoredResourcePattern>log4j.properties</ignoredResourcePattern>
                         <ignoredResourcePattern>log4j-surefire.properties</ignoredResourcePattern>
                     </ignoredResourcePatterns>
+
+                    <ignoredClassPatterns>
+                        <ignoredClassPattern>org.apache.parquet.conf.ParquetConfiguration</ignoredClassPattern>
+                    </ignoredClassPatterns>
                 </configuration>
             </plugin>
         </plugins>

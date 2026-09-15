@@ -35,7 +35,7 @@ public class TestIssue14317
                 .setCreateTpchSchemas(false);
 
         try (QueryRunner queryRunner = builder.build();
-                QueryAssertions assertions = new QueryAssertions(queryRunner);) {
+                QueryAssertions assertions = new QueryAssertions(queryRunner)) {
             queryRunner.execute("CREATE SCHEMA s");
 
             queryRunner.execute("CREATE TABLE s.t (a bigint, b bigint)");
@@ -46,7 +46,8 @@ public class TestIssue14317
             queryRunner.execute("INSERT INTO s.u VALUES (5, 6)");
             queryRunner.execute("INSERT INTO s.v VALUES (5, 6)");
 
-            assertThat(assertions.query("""
+            assertThat(assertions.query(
+                    """
                     WITH t1 AS (
                       SELECT a
                       FROM (

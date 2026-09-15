@@ -172,11 +172,11 @@ public class BenchmarkWindowOperator
         private RowPagesBuilder buildPages(int currentPartitionIdentifier, List<Type> typesArray)
         {
             int groupIdentifier = 100;
-            RowPagesBuilder rowPagesBuilder = RowPagesBuilder.rowPagesBuilder(false, ImmutableList.of(0), typesArray);
+            RowPagesBuilder rowPagesBuilder = RowPagesBuilder.rowPagesBuilder(typesArray);
 
             for (int i = 0; i < TOTAL_PAGES; i++) {
-                BlockBuilder firstColumnBlockBuilder = BIGINT.createBlockBuilder(null, ROWS_PER_PAGE);
-                BlockBuilder secondColumnBlockBuilder = BIGINT.createBlockBuilder(null, ROWS_PER_PAGE);
+                BlockBuilder firstColumnBlockBuilder = BIGINT.createFixedSizeBlockBuilder(ROWS_PER_PAGE);
+                BlockBuilder secondColumnBlockBuilder = BIGINT.createFixedSizeBlockBuilder(ROWS_PER_PAGE);
                 int currentNumberOfRowsInPartition = 0;
                 int numberOfPartitionsInCurrentGroup = 0;
                 int currentGroupIdentifier = groupIdentifier++;
@@ -330,7 +330,7 @@ public class BenchmarkWindowOperator
         context.cleanup();
     }
 
-    public static void main(String[] args)
+    static void main()
             throws RunnerException
     {
         Benchmarks.benchmark(BenchmarkWindowOperator.class).run();

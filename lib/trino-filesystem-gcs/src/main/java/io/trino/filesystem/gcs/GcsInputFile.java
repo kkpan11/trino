@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.OptionalLong;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.trino.filesystem.gcs.GcsUtils.encodedKey;
 import static io.trino.filesystem.gcs.GcsUtils.getBlob;
 import static io.trino.filesystem.gcs.GcsUtils.getBlobOrThrow;
@@ -59,7 +60,7 @@ public class GcsInputFile
             throws IOException
     {
         // Note: Only pass predeclared length, to keep the contract of TrinoFileSystem.newInputFile
-        return new GcsInput(location, storage, readBlockSize, predeclaredLength, key);
+        return new GcsInput(location, storage, predeclaredLength, key);
     }
 
     @Override
@@ -75,7 +76,7 @@ public class GcsInputFile
             throws IOException
     {
         if (predeclaredLength.isPresent()) {
-            return predeclaredLength.getAsLong();
+            return predeclaredLength.orElseThrow();
         }
         if (length.isEmpty()) {
             loadProperties();
@@ -107,6 +108,17 @@ public class GcsInputFile
         return location.location();
     }
 
+    @Override
+    public String toString()
+    {
+        return toStringHelper(this)
+                .add("location", location)
+                .add("predeclaredLength", predeclaredLength)
+                .add("length", length)
+                .add("lastModified", lastModified)
+                .toString();
+    }
+
     private void loadProperties()
             throws IOException
     {
@@ -125,7 +137,7 @@ public class GcsInputFile
     private Storage.BlobGetOption[] blobGetOptions()
     {
         return key
-                .map(encryption -> new Storage.BlobGetOption[]{Storage.BlobGetOption.decryptionKey(encodedKey(encryption))})
+                .map(encryption -> new Storage.BlobGetOption[] {Storage.BlobGetOption.decryptionKey(encodedKey(encryption))})
                 .orElseGet(() -> new Storage.BlobGetOption[0]);
     }
 }

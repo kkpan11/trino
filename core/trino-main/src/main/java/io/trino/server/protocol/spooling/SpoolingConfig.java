@@ -16,72 +16,63 @@ package io.trino.server.protocol.spooling;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
+import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.DataSize;
-import io.trino.util.Ciphers;
+import io.airlift.units.MaxDataSize;
+import io.airlift.units.MinDataSize;
 import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 
-import java.util.Optional;
-
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.trino.util.Ciphers.is256BitSecretKeySpec;
 import static java.util.Base64.getDecoder;
 
 public class SpoolingConfig
 {
-    private boolean useWorkers;
+    private SecretKey sharedSecretKey;
+    private SegmentRetrievalMode retrievalMode = SegmentRetrievalMode.STORAGE;
 
-    // This is implemented by the S3 and GCS which is the most common use case
-    private boolean directStorageAccess = true;
-    private boolean directStorageFallback;
-
-    private boolean inlineSegments = true;
-
+    private boolean inliningEnabled = true;
+    private long inliningMaxRows = 50_000;
+    private DataSize inliningMaxSize = DataSize.of(3, MEGABYTE);
     private DataSize initialSegmentSize = DataSize.of(8, MEGABYTE);
     private DataSize maximumSegmentSize = DataSize.of(16, MEGABYTE);
 
-    private Optional<SecretKey> sharedEncryptionKey = Optional.empty();
-
-    public boolean isUseWorkers()
+    @NotNull
+    public SecretKey getSharedSecretKey()
     {
-        return useWorkers;
+        return sharedSecretKey;
     }
 
-    @Config("protocol.spooling.worker-access")
-    @ConfigDescription("Use worker nodes to retrieve data from spooling location")
-    public SpoolingConfig setUseWorkers(boolean useWorkers)
+    @ConfigDescription("256 bit, base64-encoded secret key used to secure segment identifiers")
+    @Config("protocol.spooling.shared-secret-key")
+    @ConfigSecuritySensitive
+    public SpoolingConfig setSharedSecretKey(String sharedEncryptionKey)
     {
-        this.useWorkers = useWorkers;
+        this.sharedSecretKey = sharedEncryptionKey != null ? new SecretKeySpec(getDecoder().decode(sharedEncryptionKey), "AES") : null;
         return this;
     }
 
-    public boolean isDirectStorageAccess()
+    public SegmentRetrievalMode getRetrievalMode()
     {
-        return directStorageAccess;
+        return retrievalMode;
     }
 
-    @Config("protocol.spooling.direct-storage-access")
-    @ConfigDescription("Retrieve segments directly from the spooling location")
-    public SpoolingConfig setDirectStorageAccess(boolean directStorageAccess)
+    @Config("protocol.spooling.retrieval-mode")
+    @ConfigDescription("Determines how the client will retrieve the segment")
+    public SpoolingConfig setRetrievalMode(SegmentRetrievalMode retrievalMode)
     {
-        this.directStorageAccess = directStorageAccess;
+        this.retrievalMode = retrievalMode;
         return this;
     }
 
-    public boolean isDirectStorageFallback()
-    {
-        return directStorageFallback;
-    }
-
-    @Config("protocol.spooling.direct-storage-fallback")
-    @ConfigDescription("Fallback segment retrieval through the coordinator when direct storage access is not possible")
-    public SpoolingConfig setDirectStorageFallback(boolean directStorageFallback)
-    {
-        this.directStorageFallback = directStorageFallback;
-        return this;
-    }
-
+    @MinDataSize("1kB")
+    @MaxDataSize("128MB")
     public DataSize getInitialSegmentSize()
     {
         return initialSegmentSize;
@@ -95,12 +86,15 @@ public class SpoolingConfig
         return this;
     }
 
+    @MinDataSize("1kB")
+    @MaxDataSize("128MB")
     public DataSize getMaximumSegmentSize()
     {
         return maximumSegmentSize;
     }
 
-    @Config("protocol.spooling.maximum-segment-size")
+    @LegacyConfig("protocol.spooling.maximum-segment-size")
+    @Config("protocol.spooling.max-segment-size")
     @ConfigDescription("Maximum size of the spooled segments in bytes")
     public SpoolingConfig setMaximumSegmentSize(DataSize maximumSegmentSize)
     {
@@ -108,45 +102,67 @@ public class SpoolingConfig
         return this;
     }
 
-    public boolean isInlineSegments()
+    public boolean isInliningEnabled()
     {
-        return inlineSegments;
+        return inliningEnabled;
     }
 
-    @ConfigDescription("Allow protocol to inline data")
-    @Config("protocol.spooling.inline-segments")
-    public SpoolingConfig setInlineSegments(boolean inlineSegments)
+    @ConfigDescription("Allow spooling protocol to inline data")
+    @Config("protocol.spooling.inlining.enabled")
+    public SpoolingConfig setInliningEnabled(boolean inliningEnabled)
     {
-        this.inlineSegments = inlineSegments;
+        this.inliningEnabled = inliningEnabled;
         return this;
     }
 
-    public Optional<SecretKey> getSharedEncryptionKey()
+    @Min(1)
+    @Max(1_000_000)
+    public long getInliningMaxRows()
     {
-        return sharedEncryptionKey;
+        return inliningMaxRows;
     }
 
-    @ConfigDescription("256 bit, base64-encoded secret key used to secure segment identifiers")
-    @Config("protocol.spooling.shared-secret-key")
-    @ConfigSecuritySensitive
-    public SpoolingConfig setSharedEncryptionKey(String sharedEncryptionKey)
+    @Config("protocol.spooling.inlining.max-rows")
+    @ConfigDescription("Maximum number of rows that are allowed to be inlined per worker")
+    public SpoolingConfig setInliningMaxRows(long inliningMaxRows)
     {
-        this.sharedEncryptionKey = Optional.ofNullable(sharedEncryptionKey)
-                .map(value -> new SecretKeySpec(getDecoder().decode(value), "AES"));
+        this.inliningMaxRows = inliningMaxRows;
+        return this;
+    }
+
+    @MinDataSize("1kB")
+    @MaxDataSize("3MB")
+    public DataSize getInliningMaxSize()
+    {
+        return inliningMaxSize;
+    }
+
+    @Config("protocol.spooling.inlining.max-size")
+    @ConfigDescription("Maximum size of rows that are allowed to be inlined per worker")
+    public SpoolingConfig setInliningMaxSize(DataSize inliningMaxSize)
+    {
+        this.inliningMaxSize = inliningMaxSize;
         return this;
     }
 
     @AssertTrue(message = "protocol.spooling.shared-secret-key must be 256 bits long")
     public boolean isSharedEncryptionKeyAes256()
     {
-        return sharedEncryptionKey
-                .map(Ciphers::is256BitSecretKeySpec)
-                .orElse(true);
+        return sharedSecretKey != null && is256BitSecretKeySpec(sharedSecretKey);
     }
 
-    @AssertTrue(message = "protocol.spooling.shared-secret-key must be set")
-    public boolean isSharedEncryptionKeySet()
+    @AssertTrue(message = "protocol.spooling.initial-segment-size must be smaller than protocol.spooling.maximum-segment-size")
+    public boolean areSegmentSizesCorrect()
     {
-        return sharedEncryptionKey.isPresent();
+        return getInitialSegmentSize().compareTo(getMaximumSegmentSize()) < 0;
+    }
+
+    public enum SegmentRetrievalMode
+    {
+        // Client goes for the data to:
+        STORAGE, // directly to the storage with the pre-signed URI (1 round trip)
+        COORDINATOR_STORAGE_REDIRECT, // coordinator and gets redirected to the storage with the pre-signed URI (2 round trips)
+        COORDINATOR_PROXY, // coordinator and gets segment data through it (1 round trip)
+        WORKER_PROXY, // coordinator and gets redirected to one of the available workers and gets data through it (2 round trips)
     }
 }

@@ -32,6 +32,44 @@ SELECT timestamp '2012-10-31 01:00 UTC' AT TIME ZONE 'America/Los_Angeles';
 -- 2012-10-30 18:00:00.000 America/Los_Angeles
 ```
 
+The `AT LOCAL` operator renders a datetime in the current session time zone:
+
+```
+SELECT timestamp '2012-10-31 01:00 UTC' AT LOCAL;
+-- 2012-10-30 18:00:00.000 America/Los_Angeles  (session zone)
+```
+
+## OVERLAPS
+
+The `OVERLAPS` predicate tests whether two periods of time share any instant.
+Each operand is a row value of two elements:
+
+* The first element is the period's start point, a datetime value.
+* The second element is either the period's end point (a datetime value) or
+  the period's length (an interval value, in which case the end is computed
+  as `start + interval`).
+
+```
+SELECT (DATE '2020-01-01', DATE '2020-06-01') OVERLAPS (DATE '2020-05-01', DATE '2020-12-31');
+-- true
+
+SELECT (DATE '2020-01-01', DATE '2020-03-01') OVERLAPS (DATE '2020-05-01', DATE '2020-07-01');
+-- false
+
+SELECT (DATE '2020-01-01', INTERVAL '5' MONTH) OVERLAPS (DATE '2020-05-01', INTERVAL '7' MONTH);
+-- true
+```
+
+If the start and end of an operand are given in reverse, they are normalized
+before evaluation. The half-open semantics mean that periods which touch only
+at a boundary (one period's end equal to the other's start) do not overlap;
+however, two periods that share the same start point always overlap.
+
+If one endpoint of a period is `NULL`, the period is treated as open-ended on
+that side: its known endpoint still anchors the comparison, so the result is
+`true` whenever that known endpoint falls inside the other period, and `NULL`
+(unknown) only when the open side leaves the outcome undetermined.
+
 ## Date and time functions
 
 :::{data} current_date
@@ -71,6 +109,8 @@ This is an alias for `CAST(x AS date)`.
 
 :::{function} last_day_of_month(x) -> date
 Returns the last day of the month.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} from_iso8601_timestamp(string) -> timestamp(3) with time zone
@@ -120,19 +160,17 @@ SELECT from_iso8601_date('2020-123');
 ```
 :::
 
-:::{function} at_timezone(timestamp(p), zone) -> timestamp(p) with time zone
-Returns the timestamp specified in `timestamp` with the time zone
-converted from the session time zone to the time zone specified in `zone`
-with precision `p`. In the following example, the session time zone is set
-to `America/New_York`, which is three hours ahead of
-`America/Los_Angeles`:
+:::{function} at_timezone(x, zone) -> timestamp(p) with time zone
+Converts `x` to a time zone specified in `zone`.
 
-```
-SELECT current_timezone()
--- America/New_York
+The type of `x` can be `time with time zone` or `timestamp with time zone`.
 
-SELECT at_timezone(TIMESTAMP '2022-11-01 09:08:07.321', 'America/Los_Angeles')
--- 2022-11-01 06:08:07.321 America/Los_Angeles
+In the following example, the input timezone is `GMT`, which is seven hours
+ahead of `America/Los_Angeles` in November 2022:
+
+```sql
+SELECT at_timezone(TIMESTAMP '2022-11-01 09:08:07.321 GMT', 'America/Los_Angeles')
+-- 2022-11-01 02:08:07.321 America/Los_Angeles
 ```
 :::
 
@@ -215,8 +253,10 @@ This is an alias for `current_timestamp`.
 :::
 
 :::{function} to_iso8601(x) -> varchar
-Formats `x` as an ISO 8601 string. `x` can be date, timestamp, or
-timestamp with time zone.
+Formats `x` as an ISO 8601 string.
+
+The type of `x` can be `date`, `time`, `time with timezone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} to_milliseconds(interval) -> bigint
@@ -355,7 +395,7 @@ SELECT parse_duration('5m');
 :::
 
 :::{function} human_readable_seconds(double) -> varchar
-Formats the double value of `seconds` into a human readable string containing
+Formats the double value of `seconds` into a human-readable string containing
 `weeks`, `days`, `hours`, `minutes`, and `seconds`:
 
 ```
@@ -491,6 +531,8 @@ This SQL-standard function uses special syntax for specifying the arguments.
 
 :::{function} day(x) -> bigint
 Returns the day of the month from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} day_of_month(x) -> bigint
@@ -500,11 +542,15 @@ This is an alias for {func}`day`.
 :::{function} day_of_week(x) -> bigint
 Returns the ISO day of the week from `x`.
 The value ranges from `1` (Monday) to `7` (Sunday).
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} day_of_year(x) -> bigint
 Returns the day of the year from `x`.
 The value ranges from `1` to `366`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} dow(x) -> bigint
@@ -518,27 +564,43 @@ This is an alias for {func}`day_of_year`.
 :::{function} hour(x) -> bigint
 Returns the hour of the day from `x`.
 The value ranges from `0` to `23`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} millisecond(x) -> bigint
 Returns the millisecond of the second from `x`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} minute(x) -> bigint
 Returns the minute of the hour from `x`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} month(x) -> bigint
 Returns the month of the year from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} quarter(x) -> bigint
 Returns the quarter of the year from `x`.
 The value ranges from `1` to `4`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} second(x) -> bigint
 Returns the second of the minute from `x`.
+
+The type of `x` can be `time`, `time with time zone`, `timestamp` or
+`timestamp with time zone`.
 :::
 
 :::{function} timezone_hour(timestamp) -> bigint
@@ -552,6 +614,8 @@ Returns the minute of the time zone offset from `timestamp`.
 :::{function} week(x) -> bigint
 Returns the [ISO week] of the year from `x`.
 The value ranges from `1` to `53`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} week_of_year(x) -> bigint
@@ -560,14 +624,42 @@ This is an alias for {func}`week`.
 
 :::{function} year(x) -> bigint
 Returns the year from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} year_of_week(x) -> bigint
 Returns the year of the [ISO week] from `x`.
+
+The type of `x` can be `date`, `timestamp` or `timestamp with time zone`.
 :::
 
 :::{function} yow(x) -> bigint
 This is an alias for {func}`year_of_week`.
+:::
+
+:::{function} timezone(timestamp(p) with time zone) -> varchar 
+
+Returns the timezone identifier from `timestamp(p) with time zone`. The format
+of the returned identifier is identical to the [format used in the input
+timestamp](timestamp-p-with-time-zone-data-type):
+
+```sql
+SELECT timezone(TIMESTAMP '2024-01-01 12:00:00 Asia/Tokyo'); -- Asia/Tokyo
+SELECT timezone(TIMESTAMP '2024-01-01 12:00:00 +01:00'); -- +01:00
+SELECT timezone(TIMESTAMP '2024-02-29 12:00:00 UTC'); -- UTC
+```
+:::
+
+:::{function} timezone(time(p) with time zone) -> varchar
+:no-index:
+Returns the timezone identifier from a `time(p) with time zone`. The format
+of the returned identifier is identical to the [format used in the input
+time](time-with-time-zone-data-type):
+
+```sql
+SELECT timezone(TIME '12:00:00+09:00'); -- +09:00
+```
 :::
 
 [datetimeformat]: http://joda-time.sourceforge.net/apidocs/org/joda/time/format/DateTimeFormat.html

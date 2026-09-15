@@ -46,7 +46,7 @@ public class TestCountNullAggregation
     @Override
     protected Block[] getSequenceBlocks(int start, int length)
     {
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, length);
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(length);
         for (int i = start; i < start + length; i++) {
             BIGINT.writeLong(blockBuilder, i);
         }
@@ -89,6 +89,7 @@ public class TestCountNullAggregation
             state.setNull(state.isNull() && scratchState.isNull());
         }
 
+        @SqlNullable
         @OutputFunction(StandardTypes.BIGINT)
         public static void output(@AggregationState NullableLongState state, BlockBuilder out)
         {

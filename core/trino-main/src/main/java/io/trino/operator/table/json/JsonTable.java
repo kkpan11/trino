@@ -29,6 +29,7 @@ import io.trino.spi.function.table.TableFunctionProcessorState;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
+import io.trino.sql.gen.PageFunctionCompiler;
 
 import java.util.Arrays;
 import java.util.List;
@@ -51,7 +52,7 @@ import static java.util.Objects.requireNonNull;
  * Implements feature ISO/IEC 9075-2:2023(E) 7.11 'JSON table'
  * including features T824, T827, T838
  */
-public class JsonTable
+public final class JsonTable
 {
     private JsonTable() {}
 
@@ -62,8 +63,8 @@ public class JsonTable
      * @param outer the parent-child relationship between the input relation and the processingPlan result
      * @param errorOnError the error behavior: true for ERROR ON ERROR, false for EMPTY ON ERROR
      * @param parametersType type of the row containing JSON path parameters for the root JSON path. The function expects the parameters row in the channel 1.
-     * Other channels in the input page correspond to JSON context item (channel 0), and default values for the value columns. Each value column in the processingPlan
-     * knows the indexes of its default channels.
+     *         Other channels in the input page correspond to JSON context item (channel 0), and default values for the value columns. Each value column in the processingPlan
+     *         knows the indexes of its default channels.
      * @param outputTypes types of the proper columns produced by the function
      */
     public record JsonTableFunctionHandle(JsonTablePlanNode processingPlan, boolean outer, boolean errorOnError, Type parametersType, Type[] outputTypes)
@@ -82,6 +83,7 @@ public class JsonTable
 
     public static TableFunctionProcessorProvider getJsonTableFunctionProcessorProvider(Metadata metadata, TypeManager typeManager, FunctionManager functionManager)
     {
+        PageFunctionCompiler pageFunctionCompiler = new PageFunctionCompiler(functionManager, metadata, typeManager, 0);
         return new TableFunctionProcessorProvider()
         {
             @Override
@@ -93,11 +95,11 @@ public class JsonTable
                         jsonTableFunctionHandle.processingPlan(),
                         newRow,
                         jsonTableFunctionHandle.errorOnError(),
-                        jsonTableFunctionHandle.outputTypes(),
                         session,
                         metadata,
                         typeManager,
-                        functionManager);
+                        functionManager,
+                        pageFunctionCompiler);
                 return new JsonTableFunctionProcessor(executionPlan, newRow, jsonTableFunctionHandle.outputTypes(), (RowType) jsonTableFunctionHandle.parametersType(), jsonTableFunctionHandle.outer());
             }
         };
@@ -106,8 +108,8 @@ public class JsonTable
     public static class JsonTableFunctionProcessor
             implements TableFunctionDataProcessor
     {
+        private final Type[] outputTypes;
         private final PageBuilder pageBuilder;
-        private final int properColumnsCount;
         private final JsonTableProcessingFragment executionPlan;
         private final Object[] newRow;
         private final RowType parametersType;
@@ -119,11 +121,11 @@ public class JsonTable
 
         public JsonTableFunctionProcessor(JsonTableProcessingFragment executionPlan, Object[] newRow, Type[] outputTypes, RowType parametersType, boolean outer)
         {
+            this.outputTypes = requireNonNull(outputTypes, "outputTypes is null");
             this.pageBuilder = new PageBuilder(ImmutableList.<Type>builder()
                     .add(outputTypes)
                     .add(BIGINT) // add additional position for pass-through index
                     .build());
-            this.properColumnsCount = outputTypes.length;
             this.executionPlan = requireNonNull(executionPlan, "executionPlan is null");
             this.newRow = requireNonNull(newRow, "newRow is null");
             this.parametersType = requireNonNull(parametersType, "parametersType is null");
@@ -203,11 +205,11 @@ public class JsonTable
         private void addOutputRow()
         {
             pageBuilder.declarePosition();
-            for (int channel = 0; channel < properColumnsCount; channel++) {
-                writeNativeValue(pageBuilder.getType(channel), pageBuilder.getBlockBuilder(channel), newRow[channel]);
+            for (int channel = 0; channel < outputTypes.length; channel++) {
+                writeNativeValue(outputTypes[channel], pageBuilder.getBlockBuilder(channel), newRow[channel]);
             }
             // pass-through index from partition start
-            BIGINT.writeLong(pageBuilder.getBlockBuilder(properColumnsCount), totalPositionsProcessed - 1);
+            BIGINT.writeLong(pageBuilder.getBlockBuilder(outputTypes.length), totalPositionsProcessed - 1);
         }
 
         private void addNullPaddedRow()

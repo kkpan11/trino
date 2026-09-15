@@ -50,22 +50,24 @@ public final class IntBitUnpackers
             new Unpacker29(),
             new Unpacker30(),
             new Unpacker31(),
-            new Unpacker32()};
+            new Unpacker32(),
+    };
 
     public static IntBitUnpacker getIntBitUnpacker(int bitWidth)
     {
         return UNPACKERS[bitWidth];
     }
 
-    private IntBitUnpackers()
-    {
-    }
+    private IntBitUnpackers() {}
 
     private static final class Unpacker0
             implements IntBitUnpacker
     {
         @Override
-        public void unpack(int[] output, int outputOffset, SimpleSliceInputStream input,
+        public void unpack(
+                int[] output,
+                int outputOffset,
+                SimpleSliceInputStream input,
                 int length)
         {
             // Do nothing
@@ -604,7 +606,10 @@ public final class IntBitUnpackers
         }
 
         @Override
-        public void unpack(int[] output, int outputOffset, SimpleSliceInputStream input,
+        public void unpack(
+                int[] output,
+                int outputOffset,
+                SimpleSliceInputStream input,
                 int length)
         {
             while (length >= 64) {
@@ -1282,7 +1287,10 @@ public final class IntBitUnpackers
         }
 
         @Override
-        public void unpack(int[] output, int outputOffset, SimpleSliceInputStream input,
+        public void unpack(
+                int[] output,
+                int outputOffset,
+                SimpleSliceInputStream input,
                 int length)
         {
             while (length >= 8) {
@@ -1314,7 +1322,10 @@ public final class IntBitUnpackers
         }
 
         @Override
-        public void unpack(int[] output, int outputOffset, SimpleSliceInputStream input,
+        public void unpack(
+                int[] output,
+                int outputOffset,
+                SimpleSliceInputStream input,
                 int length)
         {
             while (length >= 8) {

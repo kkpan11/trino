@@ -138,10 +138,10 @@ public class TestPruneTableScanColumns
 
         // Create catalog with applyProjection
         MockConnectorFactory factory = MockConnectorFactory.builder()
-                .withListSchemaNames(connectorSession -> ImmutableList.of(testSchema))
-                .withListTables((connectorSession, schema) -> testSchema.equals(schema) ? ImmutableList.of(testTable) : ImmutableList.of())
-                .withGetColumns(schemaTableName -> assignments.entrySet().stream()
-                        .map(entry -> new ColumnMetadata(entry.getKey(), ((MockConnectorColumnHandle) entry.getValue()).getType()))
+                .withListSchemaNames(_ -> ImmutableList.of(testSchema))
+                .withListTables((_, schema) -> testSchema.equals(schema) ? ImmutableList.of(testTable) : ImmutableList.of())
+                .withGetColumns(_ -> assignments.entrySet().stream()
+                        .map(entry -> new ColumnMetadata(entry.getKey(), ((MockConnectorColumnHandle) entry.getValue()).type()))
                         .collect(toImmutableList()))
                 .withApplyProjection(this::mockApplyProjection)
                 .build();
@@ -199,7 +199,7 @@ public class TestPruneTableScanColumns
                                 .map(variable -> new Assignment(
                                         variable.getName(),
                                         assignments.get(variable.getName()),
-                                        ((MockConnectorColumnHandle) assignments.get(variable.getName())).getType()))
+                                        ((MockConnectorColumnHandle) assignments.get(variable.getName())).type()))
                                 .collect(toImmutableList()),
                         false));
     }

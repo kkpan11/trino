@@ -14,10 +14,9 @@
 package io.trino.filesystem;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Ordering;
-import com.google.common.io.ByteStreams;
 import com.google.common.io.Closer;
 import io.airlift.slice.Slice;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.filesystem.encryption.EncryptionEnforcingFileSystem;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,8 +53,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.lang.Math.min;
+import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Comparator.comparing;
@@ -74,6 +75,13 @@ public abstract class AbstractTestTrinoFileSystem
 {
     protected static final String TEST_BLOB_CONTENT_PREFIX = "test blob content for ";
     private static final int MEGABYTE = 1024 * 1024;
+
+    // A size large enough that could trigger different code paths in file system implementations.
+    // The test subclasses are encouraged to use this constant in their configurations.
+    protected static final DataSize LARGER_FILE_DATA_SIZE = DataSize.of(10, DataSize.Unit.MEGABYTE);
+
+    // Smaller than LARGER_FILE_DATA_SIZE so streaming file system tests exercise multipart writes.
+    protected static final DataSize STREAMING_PART_SIZE = DataSize.valueOf("5.5MB");
 
     protected abstract boolean isHierarchical();
 
@@ -269,6 +277,31 @@ public abstract class AbstractTestTrinoFileSystem
     }
 
     @Test
+    public void testReadingEmptyFile()
+            throws IOException
+    {
+        try (TempBlob tempBlob = randomBlobLocation("inputStream")) {
+            tempBlob.outputFile().createOrOverwrite(new byte[0]);
+
+            TrinoInputFile inputFile = getFileSystem().newInputFile(tempBlob.location());
+            try (TrinoInputStream inputStream = inputFile.newStream()) {
+                assertThat(inputStream.readAllBytes()).isEmpty();
+            }
+
+            try (TrinoInputStream inputStream = inputFile.newStream()) {
+                assertThat(inputStream.read()).isEqualTo(-1);
+            }
+
+            try (TrinoInput input = inputFile.newInput()) {
+                assertThat(input.readFully(0, 0))
+                        .extracting(Slice::length).isEqualTo(0);
+                assertThat(input.readTail(13))
+                        .extracting(Slice::length).isEqualTo(0);
+            }
+        }
+    }
+
+    @Test
     public void testInputFile()
             throws IOException
     {
@@ -458,6 +491,10 @@ public abstract class AbstractTestTrinoFileSystem
                 assertThatThrownBy(() -> inputStream.read(new byte[1], 1, 3))
                         .isInstanceOf(IndexOutOfBoundsException.class);
 
+                // negative seek is not allowed
+                assertThatThrownBy(() -> inputStream.seek(-1))
+                        .isInstanceOf(IOException.class);
+
                 // verify all the methods throw after close
                 inputStream.close();
                 assertThatThrownBy(inputStream::available)
@@ -516,6 +553,10 @@ public abstract class AbstractTestTrinoFileSystem
                     assertThat(slice.getInt(4 + i * 4)).isEqualTo(totalPositions - 9 + i);
                 }
 
+                // negative position is not allowed
+                assertThatThrownBy(() -> trinoInput.readFully(-1, 10))
+                        .isInstanceOf(IOException.class);
+
                 // verify all the methods throw after close
                 trinoInput.close();
                 assertThatThrownBy(() -> trinoInput.readFully(0, 10))
@@ -541,7 +582,7 @@ public abstract class AbstractTestTrinoFileSystem
     }
 
     @Test
-    void testOutputFile()
+    public void testOutputFile()
             throws IOException
     {
         // an output file cannot be created at the root of the file system
@@ -566,26 +607,12 @@ public abstract class AbstractTestTrinoFileSystem
                 outputStream.write("initial".getBytes(UTF_8));
             }
 
-            if (isCreateExclusive()) {
+            boolean isCreateExclusive = isCreateExclusive();
+            if (isCreateExclusive) {
                 // re-create without overwrite is an error
                 assertThatThrownBy(() -> outputFile.create().close())
                         .isInstanceOf(FileAlreadyExistsException.class)
                         .hasMessageContaining(tempBlob.location().toString());
-
-                // verify nothing changed
-                assertThat(tempBlob.read()).isEqualTo("initial");
-
-                // re-create exclusive is an error
-                if (supportsCreateExclusive()) {
-                    assertThatThrownBy(() -> outputFile.createExclusive(new byte[0]))
-                            .isInstanceOf(FileAlreadyExistsException.class)
-                            .hasMessageContaining(tempBlob.location().toString());
-                }
-                else {
-                    assertThatThrownBy(() -> outputFile.createExclusive(new byte[0]))
-                            .isInstanceOf(UnsupportedOperationException.class)
-                            .hasMessageStartingWith("createExclusive not supported");
-                }
 
                 // verify nothing changed
                 assertThat(tempBlob.read()).isEqualTo("initial");
@@ -598,19 +625,29 @@ public abstract class AbstractTestTrinoFileSystem
 
                 // verify contents changed
                 assertThat(tempBlob.read()).isEqualTo("replaced");
-
-                // create exclusive is an error
-                if (supportsCreateExclusive()) {
-                    assertThatThrownBy(() -> outputFile.createExclusive(new byte[0]))
-                            .isInstanceOf(FileAlreadyExistsException.class)
-                            .hasMessageContaining(tempBlob.location().toString());
-                }
-                else {
-                    assertThatThrownBy(() -> outputFile.createExclusive(new byte[0]))
-                            .isInstanceOf(UnsupportedOperationException.class)
-                            .hasMessageStartingWith("createExclusive not supported");
-                }
             }
+
+            // re-create exclusive is an error
+            if (supportsCreateExclusive()) {
+                assertThatThrownBy(() -> outputFile.createExclusive(new byte[0]))
+                        .isInstanceOf(FileAlreadyExistsException.class)
+                        .hasMessageContaining(tempBlob.location().toString());
+
+                // likely larger than any internal buffering or potential multipart threshold a filesystem may have
+                byte[] largerData = new byte[toIntExact(LARGER_FILE_DATA_SIZE.toBytes())];
+                assertThatThrownBy(() -> outputFile.createExclusive(largerData))
+                        .isInstanceOf(FileAlreadyExistsException.class)
+                        .hasMessageContaining(tempBlob.location().toString());
+            }
+            else {
+                assertThatThrownBy(() -> outputFile.createExclusive(new byte[0]))
+                        .isInstanceOf(UnsupportedOperationException.class)
+                        .hasMessageStartingWith("createExclusive not supported");
+            }
+
+            // verify re-create did not change the file
+            assertThat(tempBlob.read())
+                    .isEqualTo(isCreateExclusive ? "initial" : "replaced");
 
             // overwrite file
             outputFile.createOrOverwrite("overwrite".getBytes(UTF_8));
@@ -876,7 +913,7 @@ public abstract class AbstractTestTrinoFileSystem
 
             getFileSystem().deleteDirectory(createLocation("level0"));
             Location deletedLocationPrefix = createLocation("level0/");
-            for (Location location : Ordering.usingToString().sortedCopy(locations)) {
+            for (Location location : locations.stream().sorted(comparing(Object::toString)).toList()) {
                 assertThat(getFileSystem().newInputFile(location).exists()).as("%s exists", location)
                         .isEqualTo(!location.toString().startsWith(deletedLocationPrefix.toString()));
             }
@@ -1002,6 +1039,13 @@ public abstract class AbstractTestTrinoFileSystem
     }
 
     @Test
+    public void testListFilesStartingFrom()
+            throws IOException
+    {
+        testListFilesStartingFrom(isHierarchical());
+    }
+
+    @Test
     public void testPreSignedUris()
             throws IOException
     {
@@ -1014,20 +1058,28 @@ public abstract class AbstractTestTrinoFileSystem
                 abort("Generating pre-signed URI is not supported");
             }
 
-            Optional<UriLocation> directLocation = getFileSystem()
-                    .preSignedUri(location, new Duration(3, SECONDS));
+            UriLocation directLocation = assertThat(getFileSystem()
+                    .preSignedUri(location, new Duration(30, SECONDS)))
+                    .get().actual();
 
-            assertThat(directLocation).isPresent();
-            assertThat(retrieveUri(directLocation.get()))
-                    .isEqualTo(TEST_BLOB_CONTENT_PREFIX + location);
+            UriLocation expiredDirectLocation = assertThat(getFileSystem()
+                    .preSignedUri(location, new Duration(3, SECONDS)))
+                    .get().actual();
+
+            assertEventually(new Duration(5, SECONDS), () -> assertThat(retrieveUri(directLocation))
+                    .isEqualTo(TEST_BLOB_CONTENT_PREFIX + location));
 
             // Check if it can be retrieved more than once
-            assertThat(retrieveUri(directLocation.get()))
-                    .isEqualTo(TEST_BLOB_CONTENT_PREFIX + location);
+            assertEventually(new Duration(5, SECONDS), () -> assertThat(retrieveUri(directLocation))
+                    .isEqualTo(TEST_BLOB_CONTENT_PREFIX + location));
 
             // Check if after a timeout the pre-signed URI is no longer valid
-            assertEventually(new Duration(5, SECONDS), new Duration(1, SECONDS), () -> assertThatThrownBy(() -> retrieveUri(directLocation.get()))
-                    .isInstanceOf(IOException.class));
+            assertEventually(
+                    new Duration(10, SECONDS),
+                    new Duration(1, SECONDS),
+                    () -> assertThatThrownBy(() -> retrieveUri(expiredDirectLocation))
+                            .isInstanceOf(IOException.class)
+                            .hasMessageContaining("Failed to retrieve"));
         }
     }
 
@@ -1057,7 +1109,7 @@ public abstract class AbstractTestTrinoFileSystem
 
     private static HttpRequest.Builder addHeaders(HttpRequest.Builder builder, Map<String, List<String>> headers)
     {
-        headers.forEach((headerName, headerValues) -> headerValues.forEach((headerValue) -> builder.header(headerName, headerValue)));
+        headers.forEach((headerName, headerValues) -> headerValues.forEach(headerValue -> builder.header(headerName, headerValue)));
         return builder;
     }
 
@@ -1111,6 +1163,177 @@ public abstract class AbstractTestTrinoFileSystem
         }
     }
 
+    protected void testListFilesStartingFrom(boolean hierarchicalNamingConstraints)
+            throws IOException
+    {
+        try (Closer closer = Closer.create()) {
+            createTestDirectoryStructure(closer, hierarchicalNamingConstraints);
+
+            ImmutableList.Builder<Location> rootAllBuilder = ImmutableList.<Location>builder()
+                    .add(
+                            createLocation("level0-file0"),
+                            createLocation("level0-file1"),
+                            createLocation("level0-file2"),
+                            createLocation("level0/level1-file0"),
+                            createLocation("level0/level1-file1"),
+                            createLocation("level0/level1-file2"),
+                            createLocation("level0/level1/level2-file0"),
+                            createLocation("level0/level1/level2-file1"),
+                            createLocation("level0/level1/level2-file2"));
+            if (!hierarchicalNamingConstraints) {
+                rootAllBuilder.add(
+                        createLocation("level0"),
+                        createLocation("level0/level1"),
+                        createLocation("level0/level1/level2"));
+            }
+            ImmutableList<Location> rootAll = rootAllBuilder.build();
+
+            ImmutableList.Builder<Location> rootStartingFromLevel1File1Builder = ImmutableList.<Location>builder()
+                    .add(
+                            createLocation("level0/level1-file1"),
+                            createLocation("level0/level1-file2"),
+                            createLocation("level0/level1/level2-file0"),
+                            createLocation("level0/level1/level2-file1"),
+                            createLocation("level0/level1/level2-file2"));
+            if (!hierarchicalNamingConstraints) {
+                rootStartingFromLevel1File1Builder.add(createLocation("level0/level1/level2"));
+            }
+            ImmutableList<Location> rootStartingFromLevel1File1 = rootStartingFromLevel1File1Builder.build();
+
+            ImmutableList.Builder<Location> level0AllBuilder = ImmutableList.<Location>builder()
+                    .add(
+                            createLocation("level0/level1-file0"),
+                            createLocation("level0/level1-file1"),
+                            createLocation("level0/level1-file2"),
+                            createLocation("level0/level1/level2-file0"),
+                            createLocation("level0/level1/level2-file1"),
+                            createLocation("level0/level1/level2-file2"));
+            if (!hierarchicalNamingConstraints) {
+                level0AllBuilder.add(
+                        createLocation("level0/level1"),
+                        createLocation("level0/level1/level2"));
+            }
+            ImmutableList<Location> level0All = level0AllBuilder.build();
+
+            ImmutableList.Builder<Location> level0StartingFromLevel1File0zBuilder = ImmutableList.<Location>builder()
+                    .add(
+                            createLocation("level0/level1-file1"),
+                            createLocation("level0/level1-file2"),
+                            createLocation("level0/level1/level2-file0"),
+                            createLocation("level0/level1/level2-file1"),
+                            createLocation("level0/level1/level2-file2"));
+            if (!hierarchicalNamingConstraints) {
+                level0StartingFromLevel1File0zBuilder.add(createLocation("level0/level1/level2"));
+            }
+            ImmutableList<Location> level0StartingFromLevel1File0z = level0StartingFromLevel1File0zBuilder.build();
+
+            ImmutableList<Location> level0StartingFromLevel1Level2File1 = ImmutableList.of(
+                    createLocation("level0/level1/level2-file1"),
+                    createLocation("level0/level1/level2-file2"));
+
+            ImmutableList.Builder<Location> level1AllBuilder = ImmutableList.<Location>builder()
+                    .add(
+                            createLocation("level0/level1/level2-file0"),
+                            createLocation("level0/level1/level2-file1"),
+                            createLocation("level0/level1/level2-file2"));
+            if (!hierarchicalNamingConstraints) {
+                level1AllBuilder.add(createLocation("level0/level1/level2"));
+            }
+            ImmutableList<Location> level1All = level1AllBuilder.build();
+
+            ImmutableList.Builder<Location> level1StartingFromLevel2Builder = ImmutableList.<Location>builder()
+                    .add(
+                            createLocation("level0/level1/level2-file0"),
+                            createLocation("level0/level1/level2-file1"),
+                            createLocation("level0/level1/level2-file2"));
+            if (!hierarchicalNamingConstraints) {
+                level1StartingFromLevel2Builder.add(createLocation("level0/level1/level2"));
+            }
+            ImmutableList<Location> level1StartingFromLevel2 = level1StartingFromLevel2Builder.build();
+
+            ImmutableList<Location> level1StartingFromLevel2File1 = ImmutableList.of(
+                    createLocation("level0/level1/level2-file1"),
+                    createLocation("level0/level1/level2-file2"));
+
+            assertThat(listPathStartingFrom("", ""))
+                    .containsExactlyInAnyOrderElementsOf(rootAll);
+            assertThat(listPathStartingFrom("", "level0/level1-file1"))
+                    .containsExactlyInAnyOrderElementsOf(rootStartingFromLevel1File1);
+            assertThat(listPathStartingFrom("", "zzz")).isEmpty();
+
+            assertThat(listPathStartingFrom("level0", ""))
+                    .containsExactlyInAnyOrderElementsOf(level0All);
+            assertThat(listPathStartingFrom("level0/", ""))
+                    .containsExactlyInAnyOrderElementsOf(level0All);
+            assertThat(listPathStartingFrom("level0", "level1"))
+                    .containsExactlyInAnyOrderElementsOf(level0All);
+            assertThat(listPathStartingFrom("level0", "level1-file0z"))
+                    .containsExactlyInAnyOrderElementsOf(level0StartingFromLevel1File0z);
+            assertThat(listPathStartingFrom("level0", "level1/level2-file1"))
+                    .containsExactlyInAnyOrderElementsOf(level0StartingFromLevel1Level2File1);
+            assertThat(listPathStartingFrom("level0/", "level1-file0z"))
+                    .containsExactlyInAnyOrderElementsOf(level0StartingFromLevel1File0z);
+            assertThat(listPathStartingFrom("level0", "zzz")).isEmpty();
+
+            assertThat(listPathStartingFrom("level0/level1/", ""))
+                    .containsExactlyInAnyOrderElementsOf(level1All);
+            assertThat(listPathStartingFrom("level0/level1", ""))
+                    .containsExactlyInAnyOrderElementsOf(level1All);
+            assertThat(listPathStartingFrom("level0/level1", "level2"))
+                    .containsExactlyInAnyOrderElementsOf(level1StartingFromLevel2);
+            assertThat(listPathStartingFrom("level0/level1", "level2-file1"))
+                    .containsExactlyInAnyOrderElementsOf(level1StartingFromLevel2File1);
+            assertThat(listPathStartingFrom("level0/level1", "zzz")).isEmpty();
+
+            assertThat(listPathStartingFrom("level0/level1/level2/", "")).isEmpty();
+            assertThat(listPathStartingFrom("level0/level1/level2", "")).isEmpty();
+            assertThat(listPathStartingFrom("level0/level1/level2", "zzz")).isEmpty();
+
+            assertThat(listPathStartingFrom("level0/level1/level2/level3", "")).isEmpty();
+            assertThat(listPathStartingFrom("level0/level1/level2/level3/", "")).isEmpty();
+
+            assertThat(listPathStartingFrom("unknown/", "")).isEmpty();
+
+            for (String directory : ImmutableList.of(
+                    "",
+                    "level0",
+                    "level0/level1",
+                    "level0/level1/level2",
+                    "level0/level1/level2/level3")) {
+                assertThat(listPathStartingFrom(directory, ""))
+                        .containsExactlyInAnyOrderElementsOf(listPath(directory));
+
+                if (!directory.isEmpty()) {
+                    assertThat(listPathStartingFrom(directory + "/", ""))
+                            .containsExactlyInAnyOrderElementsOf(listPath(directory + "/"));
+                }
+            }
+
+            if (isHierarchical()) {
+                assertThatThrownBy(() -> listPathStartingFrom("level0-file0", ""))
+                        .isInstanceOf(IOException.class)
+                        .hasMessageContaining(createLocation("level0-file0").toString());
+            }
+            else {
+                assertThat(listPathStartingFrom("level0-file0", "")).isEmpty();
+            }
+
+            if (!hierarchicalNamingConstraints && !normalizesListFilesResult()) {
+                assertThat(listPathStartingFrom("/", "")).isEmpty();
+            }
+
+            assertThatThrownBy(() -> listPathStartingFrom("", "é"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("ASCII");
+            assertThatThrownBy(() -> listPathStartingFrom("", "level0/é"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("ASCII");
+            assertThatThrownBy(() -> listPathStartingFrom("", "💡"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("ASCII");
+        }
+    }
+
     @Test
     public void testDirectoryExists()
             throws IOException
@@ -1153,7 +1376,7 @@ public abstract class AbstractTestTrinoFileSystem
             TrinoInputFile inputFile = getFileSystem().newInputFile(location);
             assertThat(inputFile.exists()).as("exists").isTrue();
             try (TrinoInputStream inputStream = inputFile.newStream()) {
-                byte[] bytes = ByteStreams.toByteArray(inputStream);
+                byte[] bytes = inputStream.readAllBytes();
                 assertThat(bytes).isEqualTo(("test blob content for " + location).getBytes(UTF_8));
             }
 
@@ -1165,7 +1388,7 @@ public abstract class AbstractTestTrinoFileSystem
             // This can break some file system read operations (e.g., TrinoInput.readTail for most filesystems, newStream for caching file systems).
             TrinoInputFile newInputFile = getFileSystem().newInputFile(location);
             try (TrinoInputStream inputStream = newInputFile.newStream()) {
-                byte[] bytes = ByteStreams.toByteArray(inputStream);
+                byte[] bytes = inputStream.readAllBytes();
                 assertThat(bytes).isEqualTo(newContents);
             }
 
@@ -1182,7 +1405,7 @@ public abstract class AbstractTestTrinoFileSystem
                 assertThat(getFileSystem().newInputFile(target).exists()).as("target exists after rename").isTrue();
 
                 try (TrinoInputStream inputStream = getFileSystem().newInputFile(target).newStream()) {
-                    byte[] bytes = ByteStreams.toByteArray(inputStream);
+                    byte[] bytes = inputStream.readAllBytes();
                     assertThat(bytes).isEqualTo(("test blob content for " + source).getBytes(UTF_8));
                 }
 
@@ -1197,11 +1420,11 @@ public abstract class AbstractTestTrinoFileSystem
             throws IOException
     {
         try (Closer closer = Closer.create()) {
-            List<TempBlob> blobs = randomBlobs(closer);
+            List<TempBlob> blobs = randomBlobs(closer, 100);
 
             List<Location> sortedLocations = blobs.stream()
-                        .map(TempBlob::location)
-                        .sorted(comparing(Location::fileName))
+                    .map(TempBlob::location)
+                    .sorted(comparing(Location::fileName))
                     .toList();
 
             assertThat(listPath("")).isEqualTo(sortedLocations);
@@ -1373,6 +1596,20 @@ public abstract class AbstractTestTrinoFileSystem
         return locations;
     }
 
+    private List<Location> listPathStartingFrom(String path, String startingFrom)
+            throws IOException
+    {
+        List<Location> locations = new ArrayList<>();
+        FileIterator fileIterator = getFileSystem().listFilesStartingFrom(createListingLocation(path), startingFrom);
+        while (fileIterator.hasNext()) {
+            FileEntry fileEntry = fileIterator.next();
+            Location location = fileEntry.location();
+            assertThat(fileEntry.length()).isEqualTo(TEST_BLOB_CONTENT_PREFIX.length() + location.toString().length());
+            locations.add(location);
+        }
+        return locations;
+    }
+
     private Location createListingLocation(String path)
     {
         // allow listing a directory with a trailing slash
@@ -1453,11 +1690,16 @@ public abstract class AbstractTestTrinoFileSystem
         }
 
         // Try to read it without a key
-        assertThatThrownBy(() -> encryptionEnforcingFileSystem.getDelegate().newInputFile(location).newStream().readAllBytes())
-                .isInstanceOf(IOException.class);
+        assertThatThrownBy(() -> {
+            try (InputStream stream = encryptionEnforcingFileSystem.getDelegate().newInputFile(location).newStream()) {
+                stream.readAllBytes();
+            }
+        }).isInstanceOf(IOException.class);
 
-        assertThat(getFileSystem().newInputFile(location).newStream().readAllBytes())
-                .isEqualTo(data);
+        try (InputStream stream = getFileSystem().newInputFile(location).newStream()) {
+            assertThat(stream.readAllBytes())
+                    .isEqualTo(data);
+        }
 
         getFileSystem().deleteFile(location);
     }
@@ -1516,11 +1758,11 @@ public abstract class AbstractTestTrinoFileSystem
         return tempBlob;
     }
 
-    private List<TempBlob> randomBlobs(Closer closer)
+    protected List<TempBlob> randomBlobs(Closer closer, int count)
     {
-        char[] chars = new char[] {'a', 'b', 'c', 'd', 'A', 'B', 'C', 'D'};
+        char[] chars = {'a', 'b', 'c', 'd', 'A', 'B', 'C', 'D'};
         ImmutableList.Builder<TempBlob> names = ImmutableList.builder();
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < count; i++) {
             StringBuilder name = new StringBuilder();
             for (int j = 0; j < 10; j++) {
                 name.append(chars[ThreadLocalRandom.current().nextInt(chars.length)]);

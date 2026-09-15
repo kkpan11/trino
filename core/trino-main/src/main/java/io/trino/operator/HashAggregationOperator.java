@@ -15,7 +15,6 @@ package io.trino.operator;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.trino.memory.context.LocalMemoryContext;
@@ -25,20 +24,16 @@ import io.trino.operator.aggregation.builder.InMemoryHashAggregationBuilder;
 import io.trino.operator.aggregation.builder.SpillableHashAggregationBuilder;
 import io.trino.operator.aggregation.partial.PartialAggregationController;
 import io.trino.operator.aggregation.partial.SkipAggregationBuilder;
-import io.trino.operator.scalar.CombineHashFunction;
-import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
-import io.trino.spi.metrics.Metrics;
-import io.trino.spi.type.BigintType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
 import io.trino.spiller.SpillerFactory;
 import io.trino.sql.planner.plan.AggregationNode.Step;
 import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -46,14 +41,11 @@ import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.operator.aggregation.builder.InMemoryHashAggregationBuilder.toTypes;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.sql.planner.optimizations.HashGenerationOptimizer.INITIAL_HASH_VALUE;
-import static io.trino.type.TypeUtils.NULL_HASH_CODE;
 import static java.util.Objects.requireNonNull;
 
 public class HashAggregationOperator
         implements Operator
 {
-    static final String INPUT_ROWS_WITH_PARTIAL_AGGREGATION_DISABLED_METRIC_NAME = "Input rows processed without partial aggregation enabled";
     private static final double MERGE_WITH_MEMORY_RATIO = 0.9;
 
     public static class HashAggregationOperatorFactory
@@ -67,8 +59,7 @@ public class HashAggregationOperator
         private final Step step;
         private final boolean produceDefaultOutput;
         private final List<AggregatorFactory> aggregatorFactories;
-        private final Optional<Integer> hashChannel;
-        private final Optional<Integer> groupIdChannel;
+        private final OptionalInt groupIdChannel;
 
         private final int expectedGroups;
         private final Optional<DataSize> maxPartialMemory;
@@ -77,7 +68,6 @@ public class HashAggregationOperator
         private final DataSize memoryLimitForMergeWithMemory;
         private final SpillerFactory spillerFactory;
         private final FlatHashStrategyCompiler hashStrategyCompiler;
-        private final TypeOperators typeOperators;
         private final Optional<PartialAggregationController> partialAggregationController;
 
         private boolean closed;
@@ -91,12 +81,10 @@ public class HashAggregationOperator
                 List<Integer> globalAggregationGroupIds,
                 Step step,
                 List<AggregatorFactory> aggregatorFactories,
-                Optional<Integer> hashChannel,
-                Optional<Integer> groupIdChannel,
+                OptionalInt groupIdChannel,
                 int expectedGroups,
                 Optional<DataSize> maxPartialMemory,
                 FlatHashStrategyCompiler hashStrategyCompiler,
-                TypeOperators typeOperators,
                 Optional<PartialAggregationController> partialAggregationController)
         {
             this(operatorId,
@@ -107,18 +95,16 @@ public class HashAggregationOperator
                     step,
                     false,
                     aggregatorFactories,
-                    hashChannel,
                     groupIdChannel,
                     expectedGroups,
                     maxPartialMemory,
                     false,
                     DataSize.of(0, MEGABYTE),
                     DataSize.of(0, MEGABYTE),
-                    (types, spillContext, memoryContext) -> {
+                    (_, _, _) -> {
                         throw new UnsupportedOperationException();
                     },
                     hashStrategyCompiler,
-                    typeOperators,
                     partialAggregationController);
         }
 
@@ -131,15 +117,13 @@ public class HashAggregationOperator
                 Step step,
                 boolean produceDefaultOutput,
                 List<AggregatorFactory> aggregatorFactories,
-                Optional<Integer> hashChannel,
-                Optional<Integer> groupIdChannel,
+                OptionalInt groupIdChannel,
                 int expectedGroups,
                 Optional<DataSize> maxPartialMemory,
                 boolean spillEnabled,
                 DataSize unspillMemoryLimit,
                 SpillerFactory spillerFactory,
                 FlatHashStrategyCompiler hashStrategyCompiler,
-                TypeOperators typeOperators,
                 Optional<PartialAggregationController> partialAggregationController)
         {
             this(operatorId,
@@ -150,7 +134,6 @@ public class HashAggregationOperator
                     step,
                     produceDefaultOutput,
                     aggregatorFactories,
-                    hashChannel,
                     groupIdChannel,
                     expectedGroups,
                     maxPartialMemory,
@@ -159,7 +142,6 @@ public class HashAggregationOperator
                     DataSize.succinctBytes((long) (unspillMemoryLimit.toBytes() * MERGE_WITH_MEMORY_RATIO)),
                     spillerFactory,
                     hashStrategyCompiler,
-                    typeOperators,
                     partialAggregationController);
         }
 
@@ -173,8 +155,7 @@ public class HashAggregationOperator
                 Step step,
                 boolean produceDefaultOutput,
                 List<AggregatorFactory> aggregatorFactories,
-                Optional<Integer> hashChannel,
-                Optional<Integer> groupIdChannel,
+                OptionalInt groupIdChannel,
                 int expectedGroups,
                 Optional<DataSize> maxPartialMemory,
                 boolean spillEnabled,
@@ -182,12 +163,10 @@ public class HashAggregationOperator
                 DataSize memoryLimitForMergeWithMemory,
                 SpillerFactory spillerFactory,
                 FlatHashStrategyCompiler hashStrategyCompiler,
-                TypeOperators typeOperators,
                 Optional<PartialAggregationController> partialAggregationController)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
-            this.hashChannel = requireNonNull(hashChannel, "hashChannel is null");
             this.groupIdChannel = requireNonNull(groupIdChannel, "groupIdChannel is null");
             this.groupByTypes = ImmutableList.copyOf(groupByTypes);
             this.groupByChannels = ImmutableList.copyOf(groupByChannels);
@@ -202,7 +181,6 @@ public class HashAggregationOperator
             this.memoryLimitForMergeWithMemory = requireNonNull(memoryLimitForMergeWithMemory, "memoryLimitForMergeWithMemory is null");
             this.spillerFactory = requireNonNull(spillerFactory, "spillerFactory is null");
             this.hashStrategyCompiler = requireNonNull(hashStrategyCompiler, "hashStrategyCompiler is null");
-            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
             this.partialAggregationController = requireNonNull(partialAggregationController, "partialAggregationController is null");
         }
 
@@ -212,7 +190,7 @@ public class HashAggregationOperator
             checkState(!closed, "Factory is already closed");
 
             OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, planNodeId, HashAggregationOperator.class.getSimpleName());
-            HashAggregationOperator hashAggregationOperator = new HashAggregationOperator(
+            return new HashAggregationOperator(
                     operatorContext,
                     groupByTypes,
                     groupByChannels,
@@ -220,7 +198,6 @@ public class HashAggregationOperator
                     step,
                     produceDefaultOutput,
                     aggregatorFactories,
-                    hashChannel,
                     groupIdChannel,
                     expectedGroups,
                     maxPartialMemory,
@@ -229,9 +206,7 @@ public class HashAggregationOperator
                     memoryLimitForMergeWithMemory,
                     spillerFactory,
                     hashStrategyCompiler,
-                    typeOperators,
                     partialAggregationController);
-            return hashAggregationOperator;
         }
 
         @Override
@@ -252,7 +227,6 @@ public class HashAggregationOperator
                     step,
                     produceDefaultOutput,
                     aggregatorFactories,
-                    hashChannel,
                     groupIdChannel,
                     expectedGroups,
                     maxPartialMemory,
@@ -261,7 +235,6 @@ public class HashAggregationOperator
                     memoryLimitForMergeWithMemory,
                     spillerFactory,
                     hashStrategyCompiler,
-                    typeOperators,
                     partialAggregationController.map(PartialAggregationController::duplicate));
         }
     }
@@ -274,8 +247,7 @@ public class HashAggregationOperator
     private final Step step;
     private final boolean produceDefaultOutput;
     private final List<AggregatorFactory> aggregatorFactories;
-    private final Optional<Integer> hashChannel;
-    private final Optional<Integer> groupIdChannel;
+    private final OptionalInt groupIdChannel;
     private final int expectedGroups;
     private final Optional<DataSize> maxPartialMemory;
     private final boolean spillEnabled;
@@ -283,15 +255,12 @@ public class HashAggregationOperator
     private final DataSize memoryLimitForMergeWithMemory;
     private final SpillerFactory spillerFactory;
     private final FlatHashStrategyCompiler flatHashStrategyCompiler;
-    private final TypeOperators typeOperators;
-
-    private final List<Type> types;
+    private final AggregationMetrics aggregationMetrics = new AggregationMetrics();
 
     private HashAggregationBuilder aggregationBuilder;
     private final LocalMemoryContext memoryContext;
     private WorkProcessor<Page> outputPages;
     private long totalInputRowsProcessed;
-    private long inputRowsProcessedWithPartialAggregationDisabled;
     private boolean finishing;
     private boolean finished;
 
@@ -309,8 +278,7 @@ public class HashAggregationOperator
             Step step,
             boolean produceDefaultOutput,
             List<AggregatorFactory> aggregatorFactories,
-            Optional<Integer> hashChannel,
-            Optional<Integer> groupIdChannel,
+            OptionalInt groupIdChannel,
             int expectedGroups,
             Optional<DataSize> maxPartialMemory,
             boolean spillEnabled,
@@ -318,7 +286,6 @@ public class HashAggregationOperator
             DataSize memoryLimitForMergeWithMemory,
             SpillerFactory spillerFactory,
             FlatHashStrategyCompiler flatHashStrategyCompiler,
-            TypeOperators typeOperators,
             Optional<PartialAggregationController> partialAggregationController)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
@@ -332,19 +299,16 @@ public class HashAggregationOperator
         this.groupByChannels = ImmutableList.copyOf(groupByChannels);
         this.globalAggregationGroupIds = ImmutableList.copyOf(globalAggregationGroupIds);
         this.aggregatorFactories = ImmutableList.copyOf(aggregatorFactories);
-        this.hashChannel = requireNonNull(hashChannel, "hashChannel is null");
         this.groupIdChannel = requireNonNull(groupIdChannel, "groupIdChannel is null");
         this.step = step;
         this.produceDefaultOutput = produceDefaultOutput;
         this.expectedGroups = expectedGroups;
         this.maxPartialMemory = requireNonNull(maxPartialMemory, "maxPartialMemory is null");
-        this.types = toTypes(groupByTypes, aggregatorFactories, hashChannel);
         this.spillEnabled = spillEnabled;
         this.memoryLimitForMerge = requireNonNull(memoryLimitForMerge, "memoryLimitForMerge is null");
         this.memoryLimitForMergeWithMemory = requireNonNull(memoryLimitForMergeWithMemory, "memoryLimitForMergeWithMemory is null");
         this.spillerFactory = requireNonNull(spillerFactory, "spillerFactory is null");
         this.flatHashStrategyCompiler = requireNonNull(flatHashStrategyCompiler, "hashStrategyCompiler is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
 
         this.memoryContext = operatorContext.localUserMemoryContext();
     }
@@ -353,6 +317,17 @@ public class HashAggregationOperator
     public OperatorContext getOperatorContext()
     {
         return operatorContext;
+    }
+
+    @Override
+    public ListenableFuture<Void> isBlocked()
+    {
+        if (outputPages == null || !outputPages.isBlocked()) {
+            return NOT_BLOCKED;
+        }
+
+        // We can block e.g. because of self-triggered spill
+        return outputPages.getBlockedFuture();
     }
 
     @Override
@@ -392,7 +367,7 @@ public class HashAggregationOperator
                     .map(PartialAggregationController::isPartialAggregationDisabled)
                     .orElse(false);
             if (step.isOutputPartial() && partialAggregationDisabled) {
-                aggregationBuilder = new SkipAggregationBuilder(groupByChannels, hashChannel, aggregatorFactories, memoryContext);
+                aggregationBuilder = new SkipAggregationBuilder(groupByChannels, aggregatorFactories, memoryContext, aggregationMetrics);
             }
             else if (step.isOutputPartial() || !spillEnabled || !isSpillable()) {
                 // TODO: We ignore spillEnabled here if any aggregate has ORDER BY clause or DISTINCT because they are not yet implemented for spilling.
@@ -402,7 +377,7 @@ public class HashAggregationOperator
                         expectedGroups,
                         groupByTypes,
                         groupByChannels,
-                        hashChannel,
+                        false, // spillable
                         operatorContext,
                         maxPartialMemory,
                         flatHashStrategyCompiler,
@@ -413,7 +388,8 @@ public class HashAggregationOperator
                                 return true;
                             }
                             return operatorContext.isWaitingForMemory().isDone();
-                        });
+                        },
+                        aggregationMetrics);
             }
             else {
                 aggregationBuilder = new SpillableHashAggregationBuilder(
@@ -422,13 +398,12 @@ public class HashAggregationOperator
                         expectedGroups,
                         groupByTypes,
                         groupByChannels,
-                        hashChannel,
                         operatorContext,
                         memoryLimitForMerge,
                         memoryLimitForMergeWithMemory,
                         spillerFactory,
                         flatHashStrategyCompiler,
-                        typeOperators);
+                        aggregationMetrics);
             }
 
             // assume initial aggregationBuilder is not full
@@ -537,9 +512,7 @@ public class HashAggregationOperator
     private void closeAggregationBuilder()
     {
         if (aggregationBuilder instanceof SkipAggregationBuilder) {
-            inputRowsProcessedWithPartialAggregationDisabled += aggregationInputRowsProcessed;
-            operatorContext.setLatestMetrics(new Metrics(ImmutableMap.of(
-                    INPUT_ROWS_WITH_PARTIAL_AGGREGATION_DISABLED_METRIC_NAME, new LongCount(inputRowsProcessedWithPartialAggregationDisabled))));
+            aggregationMetrics.recordInputRowsProcessedWithPartialAggregationDisabled(aggregationInputRowsProcessed);
             partialAggregationController.ifPresent(controller -> controller.onFlush(aggregationInputBytesProcessed, aggregationInputRowsProcessed, OptionalLong.empty()));
         }
         else {
@@ -548,6 +521,8 @@ public class HashAggregationOperator
         aggregationInputBytesProcessed = 0;
         aggregationInputRowsProcessed = 0;
         aggregationUniqueRowsProduced = 0;
+
+        operatorContext.setLatestMetrics(aggregationMetrics.getMetrics());
 
         outputPages = null;
         if (aggregationBuilder != null) {
@@ -563,7 +538,7 @@ public class HashAggregationOperator
     {
         // global aggregation output page will only be constructed once,
         // so a new PageBuilder is constructed (instead of using PageBuilder.reset)
-        PageBuilder output = new PageBuilder(globalAggregationGroupIds.size(), types);
+        PageBuilder output = new PageBuilder(globalAggregationGroupIds.size(), toTypes(groupByTypes, aggregatorFactories));
 
         for (int groupId : globalAggregationGroupIds) {
             output.declarePosition();
@@ -579,14 +554,8 @@ public class HashAggregationOperator
                 channel++;
             }
 
-            if (hashChannel.isPresent()) {
-                long hashValue = calculateDefaultOutputHash(groupByTypes, groupIdChannel.orElseThrow(), groupId);
-                BIGINT.writeLong(output.getBlockBuilder(channel), hashValue);
-                channel++;
-            }
-
             for (AggregatorFactory aggregatorFactory : aggregatorFactories) {
-                aggregatorFactory.createAggregator().evaluate(output.getBlockBuilder(channel));
+                aggregatorFactory.createAggregator(aggregationMetrics).evaluate(output.getBlockBuilder(channel), UpdateMemory.NOOP);
                 channel++;
             }
         }
@@ -595,20 +564,5 @@ public class HashAggregationOperator
             return null;
         }
         return output.build();
-    }
-
-    private static long calculateDefaultOutputHash(List<Type> groupByChannels, int groupIdChannel, int groupId)
-    {
-        // Default output has NULLs on all columns except of groupIdChannel
-        long result = INITIAL_HASH_VALUE;
-        for (int channel = 0; channel < groupByChannels.size(); channel++) {
-            if (channel != groupIdChannel) {
-                result = CombineHashFunction.getHash(result, NULL_HASH_CODE);
-            }
-            else {
-                result = CombineHashFunction.getHash(result, BigintType.hash(groupId));
-            }
-        }
-        return result;
     }
 }

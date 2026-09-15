@@ -19,12 +19,11 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
 import io.trino.spi.type.SqlVarbinary;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeOperatorDeclaration;
 import io.trino.spi.type.TypeOperators;
-import io.trino.spi.type.TypeSignature;
 
 public class ObjectIdType
         extends AbstractVariableWidthType
@@ -40,7 +39,13 @@ public class ObjectIdType
     @JsonCreator
     public ObjectIdType()
     {
-        super(new TypeSignature("ObjectId"), Slice.class);
+        super(new TypeDescriptor("ObjectId"), Slice.class);
+    }
+
+    @Override
+    public String getDisplayName()
+    {
+        return "ObjectId";
     }
 
     @Override
@@ -62,7 +67,7 @@ public class ObjectIdType
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public Object getObjectValue(Block block, int position)
     {
         if (block.isNull(position)) {
             return null;

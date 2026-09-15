@@ -13,20 +13,21 @@
  */
 package io.trino.spi.block;
 
-import io.trino.spi.Experimental;
 import jakarta.annotation.Nullable;
 
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.function.ObjLongConsumer;
 
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
+import static io.trino.spi.block.Bitmap.checkBitRange;
+import static io.trino.spi.block.Bitmap.compactBitmap;
+import static io.trino.spi.block.Bitmap.copyBitmapAndAppendUnset;
+import static io.trino.spi.block.Bitmap.set;
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
-import static io.trino.spi.block.BlockUtil.checkReadablePosition;
+import static io.trino.spi.block.BlockUtil.checkValidPosition;
 import static io.trino.spi.block.BlockUtil.checkValidRegion;
 import static io.trino.spi.block.BlockUtil.compactArray;
-import static io.trino.spi.block.BlockUtil.copyIsNullAndAppendNull;
 import static io.trino.spi.block.BlockUtil.ensureCapacity;
 
 public final class IntArrayBlock
@@ -38,17 +39,17 @@ public final class IntArrayBlock
     private final int arrayOffset;
     private final int positionCount;
     @Nullable
-    private final boolean[] valueIsNull;
+    private final long[] valueIsValid;
     private final int[] values;
 
     private final long retainedSizeInBytes;
 
-    public IntArrayBlock(int positionCount, Optional<boolean[]> valueIsNull, int[] values)
+    public IntArrayBlock(int positionCount, Optional<long[]> valueIsValid, int[] values)
     {
-        this(0, positionCount, valueIsNull.orElse(null), values);
+        this(0, positionCount, valueIsValid.orElse(null), values);
     }
 
-    IntArrayBlock(int arrayOffset, int positionCount, boolean[] valueIsNull, int[] values)
+    IntArrayBlock(int arrayOffset, int positionCount, long[] valueIsValid, int[] values)
     {
         if (arrayOffset < 0) {
             throw new IllegalArgumentException("arrayOffset is negative");
@@ -64,18 +65,10 @@ public final class IntArrayBlock
         }
         this.values = values;
 
-        if (valueIsNull != null && valueIsNull.length - arrayOffset < positionCount) {
-            throw new IllegalArgumentException("isNull length is less than positionCount");
-        }
-        this.valueIsNull = valueIsNull;
+        checkBitRange(valueIsValid, arrayOffset, positionCount);
+        this.valueIsValid = valueIsValid;
 
-        retainedSizeInBytes = INSTANCE_SIZE + sizeOf(valueIsNull) + sizeOf(values);
-    }
-
-    @Override
-    public OptionalInt fixedSizeInBytesPerPosition()
-    {
-        return OptionalInt.of(SIZE_IN_BYTES_PER_POSITION);
+        retainedSizeInBytes = INSTANCE_SIZE + sizeOf(valueIsValid) + sizeOf(values);
     }
 
     @Override
@@ -88,12 +81,6 @@ public final class IntArrayBlock
     public long getRegionSizeInBytes(int position, int length)
     {
         return SIZE_IN_BYTES_PER_POSITION * (long) length;
-    }
-
-    @Override
-    public long getPositionsSizeInBytes(boolean[] positions, int selectedPositionsCount)
-    {
-        return (long) SIZE_IN_BYTES_PER_POSITION * selectedPositionsCount;
     }
 
     @Override
@@ -112,8 +99,8 @@ public final class IntArrayBlock
     public void retainedBytesForEachPart(ObjLongConsumer<Object> consumer)
     {
         consumer.accept(values, sizeOf(values));
-        if (valueIsNull != null) {
-            consumer.accept(valueIsNull, sizeOf(valueIsNull));
+        if (valueIsValid != null) {
+            consumer.accept(valueIsValid, sizeOf(valueIsValid));
         }
         consumer.accept(this, INSTANCE_SIZE);
     }
@@ -126,31 +113,40 @@ public final class IntArrayBlock
 
     public int getInt(int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
         return values[position + arrayOffset];
     }
 
     @Override
     public boolean mayHaveNull()
     {
-        return valueIsNull != null;
+        return valueIsValid != null;
+    }
+
+    @Override
+    public boolean hasNull()
+    {
+        return Bitmap.hasUnsetBit(valueIsValid, arrayOffset, positionCount);
     }
 
     @Override
     public boolean isNull(int position)
     {
-        checkReadablePosition(this, position);
-        return valueIsNull != null && valueIsNull[position + arrayOffset];
+        if (!mayHaveNull()) {
+            return false;
+        }
+        checkValidPosition(position, positionCount);
+        return !Bitmap.isSet(valueIsValid, arrayOffset, position);
     }
 
     @Override
     public IntArrayBlock getSingleValueBlock(int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
         return new IntArrayBlock(
                 0,
                 1,
-                isNull(position) ? new boolean[] {true} : null,
+                isNull(position) ? new long[] {0} : null,
                 new int[] {values[position + arrayOffset]});
     }
 
@@ -159,20 +155,20 @@ public final class IntArrayBlock
     {
         checkArrayRange(positions, offset, length);
 
-        boolean[] newValueIsNull = null;
-        if (valueIsNull != null) {
-            newValueIsNull = new boolean[length];
+        long[] newValueIsValid = null;
+        if (valueIsValid != null) {
+            newValueIsValid = new long[Bitmap.wordsForBits(length)];
         }
         int[] newValues = new int[length];
         for (int i = 0; i < length; i++) {
             int position = positions[offset + i];
-            checkReadablePosition(this, position);
-            if (valueIsNull != null) {
-                newValueIsNull[i] = valueIsNull[position + arrayOffset];
+            checkValidPosition(position, positionCount);
+            if (valueIsValid != null && Bitmap.isSet(valueIsValid, arrayOffset, position)) {
+                set(newValueIsValid, 0, i);
             }
             newValues[i] = values[position + arrayOffset];
         }
-        return new IntArrayBlock(0, length, newValueIsNull, newValues);
+        return new IntArrayBlock(0, length, Bitmap.hasUnsetBit(newValueIsValid, 0, length) ? newValueIsValid : null, newValues);
     }
 
     @Override
@@ -180,7 +176,7 @@ public final class IntArrayBlock
     {
         checkValidRegion(getPositionCount(), positionOffset, length);
 
-        return new IntArrayBlock(positionOffset + arrayOffset, length, valueIsNull, values);
+        return new IntArrayBlock(positionOffset + arrayOffset, length, valueIsValid, values);
     }
 
     @Override
@@ -189,28 +185,22 @@ public final class IntArrayBlock
         checkValidRegion(getPositionCount(), positionOffset, length);
 
         positionOffset += arrayOffset;
-        boolean[] newValueIsNull = valueIsNull == null ? null : compactArray(valueIsNull, positionOffset, length);
+        long[] newValueIsValid = compactBitmap(valueIsValid, positionOffset, length);
         int[] newValues = compactArray(values, positionOffset, length);
 
-        if (newValueIsNull == valueIsNull && newValues == values) {
+        if (newValueIsValid == valueIsValid && newValues == values) {
             return this;
         }
-        return new IntArrayBlock(0, length, newValueIsNull, newValues);
-    }
-
-    @Override
-    public String getEncodingName()
-    {
-        return IntArrayBlockEncoding.NAME;
+        return new IntArrayBlock(0, length, newValueIsValid, newValues);
     }
 
     @Override
     public IntArrayBlock copyWithAppendedNull()
     {
-        boolean[] newValueIsNull = copyIsNullAndAppendNull(valueIsNull, arrayOffset, positionCount);
+        long[] newValueIsValid = copyBitmapAndAppendUnset(valueIsValid, arrayOffset, positionCount);
         int[] newValues = ensureCapacity(values, arrayOffset + positionCount + 1);
 
-        return new IntArrayBlock(arrayOffset, positionCount + 1, newValueIsNull, newValues);
+        return new IntArrayBlock(arrayOffset, positionCount + 1, newValueIsValid, newValues);
     }
 
     @Override
@@ -226,23 +216,29 @@ public final class IntArrayBlock
     }
 
     @Override
-    public Optional<ByteArrayBlock> getNulls()
+    public Optional<Bitmap> getValidityBitmap()
     {
-        return BlockUtil.getNulls(valueIsNull, arrayOffset, positionCount);
+        if (valueIsValid == null) {
+            return Optional.empty();
+        }
+        return Optional.of(new Bitmap(valueIsValid, arrayOffset, positionCount));
     }
 
-    boolean[] getRawValueIsNull()
+    /// Returns raw validity bitmap words using the [Bitmap] encoding, or null if all positions are valid.
+    ///
+    /// The returned array is raw block storage. Use [getValidityBitmap()] unless the caller already has the matching
+    /// raw bit offset.
+    @Nullable
+    public long[] getRawValueIsValid()
     {
-        return valueIsNull;
+        return valueIsValid;
     }
 
-    @Experimental(eta = "2023-12-31")
     public int[] getRawValues()
     {
         return values;
     }
 
-    @Experimental(eta = "2023-12-31")
     public int getRawValuesOffset()
     {
         return arrayOffset;

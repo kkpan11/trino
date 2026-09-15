@@ -13,10 +13,8 @@
  */
 package io.trino.operator;
 
-import com.google.common.base.Suppliers;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.metadata.Split;
 import io.trino.spi.Page;
 import io.trino.spi.metrics.Metrics;
@@ -24,7 +22,6 @@ import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.Map;
 
 import static io.trino.operator.WorkProcessor.ProcessState.blocked;
 import static io.trino.operator.WorkProcessor.ProcessState.finished;
@@ -60,14 +57,10 @@ public class WorkProcessorSourceOperatorAdapter
         this.sourceOperator = sourceOperatorFactory
                 .create(
                         operatorContext,
-                        new MemoryTrackingContext(
-                                operatorContext.aggregateUserMemoryContext(),
-                                operatorContext.aggregateRevocableMemoryContext()),
                         operatorContext.getDriverContext().getYieldSignal(),
                         WorkProcessor.create(splitBuffer));
         this.pages = sourceOperator.getOutputPages()
-                .map(Page::getLoadedPage)
-                .withProcessStateMonitor(state -> updateOperatorStats())
+                .withProcessStateMonitor(_ -> updateOperatorStats())
                 .finishWhen(() -> operatorFinishing);
         operatorContext.setInfoSupplier(() -> sourceOperator.getOperatorInfo().orElse(null));
     }
@@ -83,11 +76,6 @@ public class WorkProcessorSourceOperatorAdapter
     {
         if (operatorFinishing) {
             return;
-        }
-
-        Map<String, String> splitInfo = split.getInfo();
-        if (!splitInfo.isEmpty()) {
-            operatorContext.setInfoSupplier(Suppliers.ofInstance(new SplitOperatorInfo(split.getCatalogHandle(), splitInfo)));
         }
 
         splitBuffer.add(split);

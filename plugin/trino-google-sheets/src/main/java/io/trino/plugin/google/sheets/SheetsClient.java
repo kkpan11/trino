@@ -15,12 +15,16 @@ package io.trino.plugin.google.sheets;
 
 import com.google.api.client.auth.oauth2.Credential;
 import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
+import com.google.api.client.http.HttpBackOffIOExceptionHandler;
+import com.google.api.client.http.HttpBackOffUnsuccessfulResponseHandler;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.client.util.ExponentialBackOff;
 import com.google.api.services.sheets.v4.Sheets;
 import com.google.api.services.sheets.v4.SheetsScopes;
 import com.google.api.services.sheets.v4.model.ValueRange;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
@@ -54,10 +58,12 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.plugin.google.sheets.SheetsErrorCode.SHEETS_BAD_CREDENTIALS_ERROR;
 import static io.trino.plugin.google.sheets.SheetsErrorCode.SHEETS_INSERT_ERROR;
+import static io.trino.plugin.google.sheets.SheetsErrorCode.SHEETS_INVALID_TABLE_FORMAT;
 import static io.trino.plugin.google.sheets.SheetsErrorCode.SHEETS_METASTORE_ERROR;
 import static io.trino.plugin.google.sheets.SheetsErrorCode.SHEETS_TABLE_LOAD_ERROR;
 import static io.trino.plugin.google.sheets.SheetsErrorCode.SHEETS_UNKNOWN_TABLE_ERROR;
 import static java.lang.Math.toIntExact;
+import static java.time.Duration.ofMillis;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -67,6 +73,8 @@ public class SheetsClient
     public static final String DEFAULT_RANGE = "$1:$10000";
     public static final String RANGE_SEPARATOR = "#";
     private static final Logger log = Logger.get(SheetsClient.class);
+
+    private static final int HTTP_TOO_MANY_REQUESTS = 429;
 
     private static final String APPLICATION_NAME = "trino google sheets integration";
     private static final JsonFactory JSON_FACTORY = JacksonFactory.getDefaultInstance();
@@ -98,7 +106,7 @@ public class SheetsClient
         long maxCacheSize = config.getSheetsDataMaxCacheSize();
 
         this.tableSheetMappingCache = buildNonEvictableCache(
-                CacheBuilder.newBuilder().expireAfterWrite(expiresAfterWriteMillis, MILLISECONDS).maximumSize(maxCacheSize),
+                CacheBuilder.newBuilder().expireAfterWrite(ofMillis(expiresAfterWriteMillis)).maximumSize(maxCacheSize),
                 new CacheLoader<>()
                 {
                     @Override
@@ -270,7 +278,7 @@ public class SheetsClient
     {
         if (sheetsConfig.getCredentialsFilePath().isPresent()) {
             try (InputStream in = new FileInputStream(sheetsConfig.getCredentialsFilePath().get())) {
-                return credentialFromStream(in);
+                return credentialFromStream(in, sheetsConfig.getDelegatedUserEmail());
             }
             catch (IOException e) {
                 throw new TrinoException(SHEETS_BAD_CREDENTIALS_ERROR, e);
@@ -280,7 +288,7 @@ public class SheetsClient
         if (sheetsConfig.getCredentialsKey().isPresent()) {
             try {
                 return credentialFromStream(
-                                new ByteArrayInputStream(Base64.getDecoder().decode(sheetsConfig.getCredentialsKey().get())));
+                        new ByteArrayInputStream(Base64.getDecoder().decode(sheetsConfig.getCredentialsKey().get())), sheetsConfig.getDelegatedUserEmail());
             }
             catch (IOException e) {
                 throw new TrinoException(SHEETS_BAD_CREDENTIALS_ERROR, e);
@@ -290,10 +298,11 @@ public class SheetsClient
         throw new TrinoException(SHEETS_BAD_CREDENTIALS_ERROR, "No sheets credentials were provided");
     }
 
-    private static Credential credentialFromStream(InputStream inputStream)
+    private static Credential credentialFromStream(InputStream inputStream, Optional<String> delegatedUserEmail)
             throws IOException
     {
-        return GoogleCredential.fromStream(inputStream).createScoped(SCOPES);
+        GoogleCredential credential = GoogleCredential.fromStream(inputStream).createScoped(SCOPES);
+        return delegatedUserEmail.map(credential::createDelegated).orElse(credential);
     }
 
     private List<List<Object>> readAllValuesFromSheetExpression(String sheetExpression)
@@ -309,7 +318,7 @@ public class SheetsClient
             log.debug("Accessing sheet id [%s] with range [%s]", sheetId, defaultRange);
             List<List<Object>> values = sheetsService.spreadsheets().values().get(sheetId, defaultRange).execute().getValues();
             if (values == null) {
-                throw new TrinoException(SHEETS_TABLE_LOAD_ERROR, "No non-empty cells found in sheet: " + sheetExpression);
+                throw new TrinoException(SHEETS_INVALID_TABLE_FORMAT, "No non-empty cells found in sheet: " + sheetExpression);
             }
             return values;
         }
@@ -331,6 +340,27 @@ public class SheetsClient
             httpRequest.setConnectTimeout(toIntExact(config.getConnectionTimeout().toMillis()));
             httpRequest.setReadTimeout(toIntExact(config.getReadTimeout().toMillis()));
             httpRequest.setWriteTimeout(toIntExact(config.getWriteTimeout().toMillis()));
+            httpRequest.setUnsuccessfulResponseHandler(newUnsuccessfulResponseHandler());
+            httpRequest.setIOExceptionHandler(new HttpBackOffIOExceptionHandler(newBackOff()));
         };
+    }
+
+    @VisibleForTesting
+    static HttpBackOffUnsuccessfulResponseHandler newUnsuccessfulResponseHandler()
+    {
+        return new HttpBackOffUnsuccessfulResponseHandler(newBackOff())
+                .setBackOffRequired(response -> response.getStatusCode() == HTTP_TOO_MANY_REQUESTS ||
+                        (response.getStatusCode() >= 500 && response.getStatusCode() <= 599));
+    }
+
+    @VisibleForTesting
+    static ExponentialBackOff newBackOff()
+    {
+        return new ExponentialBackOff.Builder()
+                .setInitialIntervalMillis(500)
+                .setMaxIntervalMillis(10_000)
+                .setMaxElapsedTimeMillis(60_000)
+                .setMultiplier(1.5)
+                .build();
     }
 }

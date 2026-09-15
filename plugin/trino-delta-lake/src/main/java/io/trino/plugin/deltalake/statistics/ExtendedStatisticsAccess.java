@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.deltalake.statistics;
 
+import io.trino.plugin.deltalake.DeltaLakeTableCredentials;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SchemaTableName;
 
@@ -23,16 +24,19 @@ public interface ExtendedStatisticsAccess
     Optional<ExtendedStatistics> readExtendedStatistics(
             ConnectorSession session,
             SchemaTableName schemaTableName,
-            String tableLocation);
+            String tableLocation,
+            Optional<DeltaLakeTableCredentials> tableCredentials);
 
     void updateExtendedStatistics(
             ConnectorSession session,
             SchemaTableName schemaTableName,
             String tableLocation,
+            Optional<DeltaLakeTableCredentials> tableCredentials,
             ExtendedStatistics statistics);
 
     void deleteExtendedStatistics(
             ConnectorSession session,
             SchemaTableName schemaTableName,
-            String tableLocation);
+            String tableLocation,
+            Optional<DeltaLakeTableCredentials> tableCredentials);
 }

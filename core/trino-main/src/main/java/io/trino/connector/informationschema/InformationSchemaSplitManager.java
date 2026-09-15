@@ -13,31 +13,26 @@
  */
 package io.trino.connector.informationschema;
 
-import com.google.common.collect.ImmutableList;
-import io.trino.metadata.InternalNodeManager;
 import io.trino.spi.HostAddress;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 
-import java.util.List;
-
-import static java.util.Objects.requireNonNull;
+import java.util.Set;
 
 public class InformationSchemaSplitManager
         implements ConnectorSplitManager
 {
-    private final InternalNodeManager nodeManager;
+    private final InformationSchemaSplit split;
 
-    public InformationSchemaSplitManager(InternalNodeManager nodeManager)
+    public InformationSchemaSplitManager(HostAddress hostAndPort)
     {
-        this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
+        split = new InformationSchemaSplit(hostAndPort);
     }
 
     @Override
@@ -45,11 +40,9 @@ public class InformationSchemaSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            DynamicFilter dynamicFilter,
+            Set<ColumnHandle> dynamicFilterColumns,
             Constraint constraint)
     {
-        List<HostAddress> localAddress = ImmutableList.of(nodeManager.getCurrentNode().getHostAndPort());
-        ConnectorSplit split = new InformationSchemaSplit(localAddress);
-        return new FixedSplitSource(ImmutableList.of(split));
+        return new FixedSplitSource(split);
     }
 }

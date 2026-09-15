@@ -44,6 +44,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.sql.ir.Booleans.TRUE;
@@ -227,9 +228,9 @@ public class PushFilterThroughCountAggregation
         // Try to simplify filter above the aggregation.
         if (countDomain.getValues().contains(ValueSet.ofRanges(Range.greaterThanOrEqual(countDomain.getType(), 1L)))) {
             // After filtering out `0` values, filter predicate's domain contains all remaining countSymbol values. Remove the countSymbol domain.
-            TupleDomain<Symbol> newTupleDomain = tupleDomain.filter((symbol, domain) -> !symbol.equals(countSymbol));
+            TupleDomain<Symbol> newTupleDomain = tupleDomain.filter((symbol, _) -> !symbol.equals(countSymbol));
             Expression newPredicate = combineConjuncts(
-                    new DomainTranslator(plannerContext.getMetadata()).toPredicate(newTupleDomain),
+                    new DomainTranslator(plannerContext.getMetadata()).toPredicate(getCharVarcharCoercion(context.getSession()), newTupleDomain),
                     extractionResult.getRemainingExpression());
             if (newPredicate.equals(TRUE)) {
                 return Result.ofPlanNode(filterSource);

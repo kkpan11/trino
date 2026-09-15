@@ -15,8 +15,8 @@ package io.trino.orc;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
-import io.trino.spi.Page;
 import io.trino.spi.block.Block;
+import io.trino.spi.connector.SourcePage;
 import org.joda.time.DateTimeZone;
 import org.junit.jupiter.api.Test;
 
@@ -60,6 +60,7 @@ public class TestOrcLz4
         try (OrcRecordReader reader = orcReader.createRecordReader(
                 orcReader.getRootColumn().getNestedColumns(),
                 ImmutableList.of(BIGINT, INTEGER, BIGINT),
+                false,
                 OrcPredicate.TRUE,
                 DateTimeZone.UTC,
                 newSimpleAggregatedMemoryContext(),
@@ -67,11 +68,10 @@ public class TestOrcLz4
                 RuntimeException::new)) {
             int rows = 0;
             while (true) {
-                Page page = reader.nextPage();
+                SourcePage page = reader.nextPage();
                 if (page == null) {
                     break;
                 }
-                page = page.getLoadedPage();
                 rows += page.getPositionCount();
 
                 Block xBlock = page.getBlock(0);
@@ -106,7 +106,7 @@ public class TestOrcLz4
                     LZ4,
                     ImmutableList.of("x", "y", "z"),
                     ImmutableList.of(BIGINT, INTEGER, BIGINT),
-                    Stream.generate(() -> (Function<Integer, Object>) (fieldIndex) -> switch (fieldIndex) {
+                    Stream.generate(() -> (Function<Integer, Object>) fieldIndex -> switch (fieldIndex) {
                         case 0, 2 -> random.nextLong();
                         case 1 -> random.nextInt();
                         default -> new IllegalArgumentException();

@@ -13,7 +13,6 @@
  */
 package io.trino.spi.function.table;
 
-import io.trino.spi.Experimental;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTransactionHandle;
@@ -21,12 +20,16 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import java.util.List;
 import java.util.Map;
 
-@Experimental(eta = "2022-10-31")
 public interface ConnectorTableFunction
 {
     String getSchema();
 
     String getName();
+
+    default String getDescription()
+    {
+        return "";
+    }
 
     List<ArgumentSpecification> getArguments();
 

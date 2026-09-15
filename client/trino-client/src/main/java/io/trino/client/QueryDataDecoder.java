@@ -23,12 +23,22 @@ public interface QueryDataDecoder
 {
     interface Factory
     {
-        QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes);
+        QueryDataDecoder create(List<Column> columns, DataAttributes attributes, boolean supportsVariantBinary);
 
         String encoding();
     }
 
-    Iterable<List<Object>> decode(InputStream input, DataAttributes segmentAttributes)
+    /**
+     * Decodes the input stream into a lazy ResultRows.
+     * <p>
+     * Decoder is responsible for closing input stream when
+     * all values are decoded or exception was thrown.
+     *
+     * @param input Input stream to decode (in memory or over the network)
+     * @param segmentAttributes Attributes of the segment
+     * @throws IOException if an I/O error occurs
+     */
+    CloseableIterator<List<Object>> decode(InputStream input, DataAttributes segmentAttributes)
             throws IOException;
 
     String encoding();

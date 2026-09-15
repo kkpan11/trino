@@ -13,27 +13,20 @@
  */
 package io.trino.server.protocol;
 
-import com.google.common.collect.Ordering;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Inject;
 import io.airlift.concurrent.BoundedExecutor;
 import io.airlift.log.Logger;
-import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.client.ProtocolHeaders;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.QueryManager;
 import io.trino.operator.DirectExchangeClientSupplier;
-import io.trino.server.DisconnectionAwareAsyncResponse;
 import io.trino.server.ExternalUriInfo;
 import io.trino.server.ForStatementResource;
 import io.trino.server.ServerConfig;
-import io.trino.server.protocol.spooling.QueryDataEncoder;
-import io.trino.server.protocol.spooling.QueryDataEncoders;
-import io.trino.server.protocol.spooling.RawQueryDataProducer;
-import io.trino.server.protocol.spooling.SpooledQueryDataProducer;
 import io.trino.server.security.ResourceSecurity;
 import io.trino.spi.QueryId;
 import io.trino.spi.block.BlockEncodingSerde;
@@ -41,11 +34,12 @@ import jakarta.annotation.PreDestroy;
 import jakarta.ws.rs.BeanParam;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.container.AsyncResponse;
 import jakarta.ws.rs.container.Suspended;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -54,15 +48,14 @@ import jakarta.ws.rs.core.Response.ResponseBuilder;
 import java.net.URLEncoder;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.Threads.threadsNamed;
-import static io.airlift.units.DataSize.Unit.MEGABYTE;
-import static io.trino.server.DisconnectionAwareAsyncResponse.bindDisconnectionAwareAsyncResponse;
+import static io.airlift.jaxrs.AsyncResponseHandler.bindAsyncResponse;
+import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.server.protocol.Slug.Context.EXECUTING_QUERY;
 import static io.trino.server.security.ResourceSecurity.AccessType.PUBLIC;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -72,17 +65,12 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 @Path("/v1/statement/executing")
+@ResourceSecurity(PUBLIC)
 public class ExecutingStatementResource
 {
     private static final Logger log = Logger.get(ExecutingStatementResource.class);
     private static final Duration MAX_WAIT_TIME = new Duration(1, SECONDS);
-    private static final Ordering<Comparable<Duration>> WAIT_ORDERING = Ordering.natural().nullsLast();
-
-    private static final DataSize DEFAULT_TARGET_RESULT_SIZE = DataSize.of(1, MEGABYTE);
-    private static final DataSize MAX_TARGET_RESULT_SIZE = DataSize.of(128, MEGABYTE);
-
     private final QueryManager queryManager;
-    private final QueryDataEncoders encoders;
     private final DirectExchangeClientSupplier directExchangeClientSupplier;
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private final BlockEncodingSerde blockEncodingSerde;
@@ -98,7 +86,6 @@ public class ExecutingStatementResource
     @Inject
     public ExecutingStatementResource(
             QueryManager queryManager,
-            QueryDataEncoders encoders,
             DirectExchangeClientSupplier directExchangeClientSupplier,
             ExchangeManagerRegistry exchangeManagerRegistry,
             BlockEncodingSerde blockEncodingSerde,
@@ -109,7 +96,6 @@ public class ExecutingStatementResource
             ServerConfig serverConfig)
     {
         this.queryManager = requireNonNull(queryManager, "queryManager is null");
-        this.encoders = requireNonNull(encoders, "encoders is null");
         this.directExchangeClientSupplier = requireNonNull(directExchangeClientSupplier, "directExchangeClientSupplier is null");
         this.exchangeManagerRegistry = requireNonNull(exchangeManagerRegistry, "exchangeManagerRegistry is null");
         this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
@@ -156,7 +142,6 @@ public class ExecutingStatementResource
         queryPurger.shutdownNow();
     }
 
-    @ResourceSecurity(PUBLIC)
     @GET
     @Path("{queryId}/{slug}/{token}")
     @Produces(MediaType.APPLICATION_JSON)
@@ -164,13 +149,24 @@ public class ExecutingStatementResource
             @PathParam("queryId") QueryId queryId,
             @PathParam("slug") String slug,
             @PathParam("token") long token,
-            @QueryParam("maxWait") Duration maxWait,
-            @QueryParam("targetResultSize") DataSize targetResultSize,
             @BeanParam ExternalUriInfo externalUriInfo,
-            @Suspended @BeanParam DisconnectionAwareAsyncResponse asyncResponse)
+            @Suspended AsyncResponse asyncResponse)
     {
         Query query = getQuery(queryId, slug, token);
-        asyncQueryResults(query, token, maxWait, targetResultSize, externalUriInfo, asyncResponse);
+        asyncQueryResults(query, token, externalUriInfo, asyncResponse);
+    }
+
+    @HEAD
+    @Path("{queryId}/{slug}/{token}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response heartbeat(@PathParam("queryId") QueryId queryId, @PathParam("slug") String slug, @PathParam("token") long token)
+    {
+        Query query = queries.get(queryId);
+        if (query != null && query.isSlugValid(slug, token)) {
+            queryManager.recordHeartbeat(queryId);
+            return Response.ok().build();
+        }
+        throw new NotFoundException("Query not found");
     }
 
     protected Query getQuery(QueryId queryId, String slug, long token)
@@ -197,16 +193,10 @@ public class ExecutingStatementResource
             throw new NotFoundException("Query not found");
         }
 
-        Optional<QueryDataEncoder.Factory> encoderFactory = session.getQueryDataEncoding()
-                .map(encoders::get);
-
         query = queries.computeIfAbsent(queryId, _ -> Query.create(
                 session,
                 querySlug,
                 queryManager,
-                encoderFactory
-                        .map(SpooledQueryDataProducer::createSpooledQueryDataProducer)
-                        .orElseGet(RawQueryDataProducer::new),
                 queryInfoUrlFactory.getQueryInfoUrl(queryId),
                 directExchangeClientSupplier,
                 exchangeManagerRegistry,
@@ -219,23 +209,14 @@ public class ExecutingStatementResource
     private void asyncQueryResults(
             Query query,
             long token,
-            Duration maxWait,
-            DataSize targetResultSize,
             ExternalUriInfo externalUriInfo,
-            DisconnectionAwareAsyncResponse asyncResponse)
+            AsyncResponse asyncResponse)
     {
-        Duration wait = WAIT_ORDERING.min(MAX_WAIT_TIME, maxWait);
-        if (targetResultSize == null) {
-            targetResultSize = DEFAULT_TARGET_RESULT_SIZE;
-        }
-        else {
-            targetResultSize = Ordering.natural().min(targetResultSize, MAX_TARGET_RESULT_SIZE);
-        }
-        ListenableFuture<QueryResultsResponse> queryResultsFuture = query.waitForResults(token, externalUriInfo, wait, targetResultSize);
+        ListenableFuture<QueryResultsResponse> queryResultsFuture = query.waitForResults(token, externalUriInfo, MAX_WAIT_TIME);
 
         ListenableFuture<Response> response = Futures.transform(queryResultsFuture, this::toResponse, directExecutor());
 
-        bindDisconnectionAwareAsyncResponse(asyncResponse, response, responseExecutor);
+        bindAsyncResponse(asyncResponse, response, responseExecutor);
     }
 
     private Response toResponse(QueryResultsResponse resultsResponse)
@@ -250,6 +231,10 @@ public class ExecutingStatementResource
         if (resultsResponse.resetAuthorizationUser()) {
             response.header(protocolHeaders.responseResetAuthorizationUser(), true);
         }
+
+        // add set original roles
+        resultsResponse.setOriginalRoles()
+                .forEach(name -> response.header(protocolHeaders.responseOriginalRole(), name));
 
         // add set session properties
         resultsResponse.setSessionProperties()
@@ -288,10 +273,12 @@ public class ExecutingStatementResource
             response.encoding("identity");
         }
 
+        resultsResponse.queryDataEncoding()
+                .ifPresent(encoding -> response.header(TRINO_HEADERS.responseQueryDataEncoding(), encoding));
+
         return response.build();
     }
 
-    @ResourceSecurity(PUBLIC)
     @DELETE
     @Path("{queryId}/{slug}/{token}")
     @Produces(MediaType.APPLICATION_JSON)
@@ -322,7 +309,6 @@ public class ExecutingStatementResource
         }
     }
 
-    @ResourceSecurity(PUBLIC)
     @DELETE
     @Path("partialCancel/{queryId}/{stage}/{slug}/{token}")
     public void partialCancel(

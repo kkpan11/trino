@@ -81,7 +81,7 @@ final class DistinguishedNameParser
             }
         }
 
-        pos++; //skip '=' char
+        pos++; // skip '=' char
 
         for (; pos < length && chars[pos] == ' '; pos++) {
             // skip space chars between '=' and attribute value
@@ -139,7 +139,7 @@ final class DistinguishedNameParser
     private String hexAV()
     {
         if (pos + 4 >= length) {
-            // encoded byte array  must be not less then 4 c
+            // encoded byte array  must be not less than 4 c
             throw new IllegalStateException("Unexpected end of DN: " + dn);
         }
 
@@ -171,16 +171,10 @@ final class DistinguishedNameParser
         }
 
         // verify length of hex string
-        // encoded byte array  must be not less then 4 and must be even number
+        // encoded byte array  must be not less than 4 and must be even number
         int hexLen = end - beg; // skip first '#' char
         if (hexLen < 5 || (hexLen & 1) == 0) {
             throw new IllegalStateException("Unexpected end of DN: " + dn);
-        }
-
-        // get byte encoding from string representation
-        byte[] encoded = new byte[hexLen / 2];
-        for (int i = 0, p = beg + 1; i < encoded.length; p += 2, i++) {
-            encoded[i] = (byte) getByte(p);
         }
 
         return new String(chars, beg, hexLen);
@@ -253,7 +247,7 @@ final class DistinguishedNameParser
             case '*':
             case '%':
             case '_':
-                //FIXME: escaping is allowed only for leading or trailing space char
+                // FIXME: escaping is allowed only for leading or trailing space char
                 return chars[pos];
             default:
                 // RFC doesn't explicitly say that escaped hex pair is
@@ -267,7 +261,7 @@ final class DistinguishedNameParser
     private char getUTF8()
     {
         int res = getByte(pos);
-        pos++; //FIXME tmp
+        pos++; // FIXME tmp
 
         if (res < 128) { // one byte: 0-7F
             return (char) res;
@@ -291,14 +285,14 @@ final class DistinguishedNameParser
             for (int i = 0; i < count; i++) {
                 pos++;
                 if (pos == length || chars[pos] != '\\') {
-                    return 0x3F; //FIXME failed to decode UTF-8 char - return '?'
+                    return 0x3F; // FIXME failed to decode UTF-8 char - return '?'
                 }
                 pos++;
 
                 b = getByte(pos);
-                pos++; //FIXME tmp
+                pos++; // FIXME tmp
                 if ((b & 0xC0) != 0x80) {
-                    return 0x3F; //FIXME failed to decode UTF-8 char - return '?'
+                    return 0x3F; // FIXME failed to decode UTF-8 char - return '?'
                 }
 
                 res = (res << 6) + (b & 0x3F);
@@ -306,7 +300,7 @@ final class DistinguishedNameParser
             return (char) res;
         }
         else {
-            return 0x3F; //FIXME failed to decode UTF-8 char - return '?'
+            return 0x3F; // FIXME failed to decode UTF-8 char - return '?'
         }
     }
 
@@ -392,7 +386,7 @@ final class DistinguishedNameParser
                 case '+':
                 case ',':
                 case ';': // compatibility with RFC 1779: semicolon can separate RDNs
-                    //empty attribute value
+                    // empty attribute value
                     break;
                 default:
                     attValue = escapedAV();

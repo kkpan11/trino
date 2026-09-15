@@ -22,6 +22,7 @@ import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 
 import static io.trino.sql.planner.plan.AggregationNode.Step.INTERMEDIATE;
@@ -49,14 +50,15 @@ public class AggregationStatsRule
     @Override
     protected Optional<PlanNodeStatsEstimate> doCalculate(AggregationNode node, Context context)
     {
-        if (node.getGroupingSetCount() != 1 || node.getStep() == INTERMEDIATE) {
+        if (node.getGroupingSetCount() != 1) {
             return Optional.empty();
         }
 
         PlanNodeStatsEstimate estimate;
 
-        if (node.getStep() == PARTIAL) {
-            estimate = partialGroupBy(context.statsProvider().getStats(node.getSource()),
+        if (node.getStep() == PARTIAL || node.getStep() == INTERMEDIATE) {
+            estimate = partialGroupBy(
+                    context.statsProvider().getStats(node.getSource()),
                     node.getGroupingKeys(),
                     node.getAggregations());
         }
@@ -81,7 +83,7 @@ public class AggregationStatsRule
             double rowsCount = getRowsCount(sourceStats, groupBySymbols);
             result.setOutputRowCount(min(rowsCount, sourceStats.getOutputRowCount()));
         }
-        for (Map.Entry<Symbol, Aggregation> aggregationEntry : aggregations.entrySet()) {
+        for (Entry<Symbol, Aggregation> aggregationEntry : aggregations.entrySet()) {
             result.addSymbolStatistics(aggregationEntry.getKey(), estimateAggregationStats(aggregationEntry.getValue(), sourceStats));
         }
 
@@ -101,12 +103,13 @@ public class AggregationStatsRule
 
     private static PlanNodeStatsEstimate partialGroupBy(PlanNodeStatsEstimate sourceStats, Collection<Symbol> groupBySymbols, Map<Symbol, Aggregation> aggregations)
     {
-        // Pessimistic assumption of no reduction from PARTIAL aggregation, forwarding of the source statistics. This makes the CBO estimates in the EXPLAIN plan output easier to understand,
+        // Pessimistic assumption of no reduction from PARTIAL and INTERMEDIATE aggregation, forwarding of the source statistics.
+        // This makes the CBO estimates in the EXPLAIN plan output easier to understand,
         // even though partial aggregations are added after the CBO rules have been run.
         PlanNodeStatsEstimate.Builder result = PlanNodeStatsEstimate.builder();
         result.setOutputRowCount(sourceStats.getOutputRowCount());
         result.addSymbolStatistics(getGroupBySymbolsStatistics(sourceStats, groupBySymbols));
-        for (Map.Entry<Symbol, Aggregation> aggregationEntry : aggregations.entrySet()) {
+        for (Entry<Symbol, Aggregation> aggregationEntry : aggregations.entrySet()) {
             result.addSymbolStatistics(aggregationEntry.getKey(), estimateAggregationStats(aggregationEntry.getValue(), sourceStats));
         }
 

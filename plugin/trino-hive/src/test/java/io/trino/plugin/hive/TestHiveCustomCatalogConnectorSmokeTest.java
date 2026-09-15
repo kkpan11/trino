@@ -15,9 +15,9 @@ package io.trino.plugin.hive;
 
 import io.trino.metastore.Database;
 import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.HiveMetastoreFactory;
+import io.trino.plugin.hive.containers.Hive3FlociDataLake;
 import io.trino.plugin.hive.containers.HiveHadoop;
-import io.trino.plugin.hive.containers.HiveMinioDataLake;
-import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
 import io.trino.spi.security.PrincipalType;
 import io.trino.testing.BaseConnectorSmokeTest;
 import io.trino.testing.QueryRunner;
@@ -32,9 +32,9 @@ import static io.trino.plugin.hive.TestingHiveUtils.getConnectorService;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.testing.QueryAssertions.copyTpchTables;
 import static io.trino.testing.TestingNames.randomNameSuffix;
-import static io.trino.testing.containers.Minio.MINIO_ACCESS_KEY;
-import static io.trino.testing.containers.Minio.MINIO_REGION;
-import static io.trino.testing.containers.Minio.MINIO_SECRET_KEY;
+import static io.trino.testing.containers.Floci.FLOCI_ACCESS_KEY;
+import static io.trino.testing.containers.Floci.FLOCI_REGION;
+import static io.trino.testing.containers.Floci.FLOCI_SECRET_KEY;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -49,23 +49,22 @@ public class TestHiveCustomCatalogConnectorSmokeTest
             throws Exception
     {
         String bucketName = "test-hive-metastore-catalog-smoke-test-" + randomNameSuffix();
-        HiveMinioDataLake hiveMinioDataLake = closeAfterClass(new HiveMinioDataLake(bucketName, HiveHadoop.HIVE3_IMAGE));
-        hiveMinioDataLake.start();
+        Hive3FlociDataLake hiveFlociDataLake = closeAfterClass(new Hive3FlociDataLake(bucketName, HiveHadoop.HIVE3_IMAGE));
+        hiveFlociDataLake.start();
 
         // Inserting into metastore's database directly because the Hive does not expose a way to create a custom catalog
-        hiveMinioDataLake.getHiveHadoop().runOnMetastore("INSERT INTO CTLGS VALUES (2, '%s', 'Custom catalog', 's3://%s/custom')".formatted(HIVE_CUSTOM_CATALOG, bucketName));
+        hiveFlociDataLake.getHiveHadoop().runOnMetastore("INSERT INTO CTLGS VALUES (2, '%s', 'Custom catalog', 's3://%s/custom')".formatted(HIVE_CUSTOM_CATALOG, bucketName));
 
         QueryRunner queryRunner = HiveQueryRunner.builder()
                 .addHiveProperty("hive.metastore", "thrift")
-                .addHiveProperty("hive.metastore.uri", hiveMinioDataLake.getHiveHadoop().getHiveMetastoreEndpoint().toString())
+                .addHiveProperty("hive.metastore.uri", hiveFlociDataLake.getHiveMetastoreEndpoint().toString())
                 .addHiveProperty("hive.metastore.thrift.catalog-name", HIVE_CUSTOM_CATALOG)
-                .addHiveProperty("fs.hadoop.enabled", "false")
-                .addHiveProperty("fs.native-s3.enabled", "true")
+                .addHiveProperty("fs.s3.enabled", "true")
                 .addHiveProperty("s3.path-style-access", "true")
-                .addHiveProperty("s3.region", MINIO_REGION)
-                .addHiveProperty("s3.endpoint", hiveMinioDataLake.getMinio().getMinioAddress())
-                .addHiveProperty("s3.aws-access-key", MINIO_ACCESS_KEY)
-                .addHiveProperty("s3.aws-secret-key", MINIO_SECRET_KEY)
+                .addHiveProperty("s3.endpoint", hiveFlociDataLake.floci().endpoint().toString())
+                .addHiveProperty("s3.region", FLOCI_REGION)
+                .addHiveProperty("s3.aws-access-key", FLOCI_ACCESS_KEY)
+                .addHiveProperty("s3.aws-secret-key", FLOCI_SECRET_KEY)
                 .setCreateTpchSchemas(false) // Create the required tpch tables after the initialisation of the query runner
                 .build();
 
@@ -127,15 +126,17 @@ public class TestHiveCustomCatalogConnectorSmokeTest
     public void testShowCreateTable()
     {
         assertThat((String) computeScalar("SHOW CREATE TABLE region"))
-                .isEqualTo("""
+                .isEqualTo(
+                        """
                         CREATE TABLE hive.tpch.region (
                            regionkey bigint,
                            name varchar(25),
                            comment varchar(152)
                         )
                         WITH (
-                           format = 'ORC'
-                        )""");
+                           format = 'PARQUET'
+                        )\
+                        """);
     }
 
     @Test

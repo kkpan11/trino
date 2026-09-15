@@ -34,7 +34,7 @@ public class JsonValue
     private final Optional<Expression> errorDefault;
 
     public JsonValue(
-            Optional<NodeLocation> location,
+            NodeLocation location,
             JsonPathInvocation jsonPathInvocation,
             Optional<DataType> returnedType,
             EmptyOrErrorBehavior emptyBehavior,
@@ -66,7 +66,7 @@ public class JsonValue
     {
         NULL, // default
         ERROR,
-        DEFAULT
+        DEFAULT,
     }
 
     public JsonPathInvocation getJsonPathInvocation()

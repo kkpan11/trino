@@ -52,9 +52,7 @@ public class ReadOnlyAccessControl
         implements ConnectorAccessControl
 {
     @Override
-    public void checkCanShowSchemas(ConnectorSecurityContext context)
-    {
-    }
+    public void checkCanShowSchemas(ConnectorSecurityContext context) {}
 
     @Override
     public Set<String> filterSchemas(ConnectorSecurityContext context, Set<String> schemaNames)
@@ -75,14 +73,10 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanShowCreateSchema(ConnectorSecurityContext context, String schemaName)
-    {
-    }
+    public void checkCanShowCreateSchema(ConnectorSecurityContext context, String schemaName) {}
 
     @Override
-    public void checkCanShowCreateTable(ConnectorSecurityContext context, SchemaTableName tableName)
-    {
-    }
+    public void checkCanShowCreateTable(ConnectorSecurityContext context, SchemaTableName tableName) {}
 
     @Override
     public void checkCanCreateTable(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Object> properties)
@@ -121,9 +115,7 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanShowTables(ConnectorSecurityContext context, String schemaName)
-    {
-    }
+    public void checkCanShowTables(ConnectorSecurityContext context, String schemaName) {}
 
     @Override
     public void checkCanSetColumnComment(ConnectorSecurityContext context, SchemaTableName tableName)
@@ -156,27 +148,27 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
+    public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> columnNames)
     {
         // allow
     }
 
     @Override
-    public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
     {
-        denyInsertTable(tableName.toString());
+        denyInsertTable(tableName.toString(), branch);
     }
 
     @Override
-    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
     {
-        denyDeleteTable(tableName.toString());
+        denyDeleteTable(tableName.toString(), branch);
     }
 
     @Override
-    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> updatedColumns)
+    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> updatedColumns)
     {
-        denyUpdateTableColumns(tableName.toString(), updatedColumns);
+        denyUpdateTableColumns(tableName.toString(), branch, updatedColumns);
     }
 
     @Override
@@ -198,7 +190,7 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
+    public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> columnNames)
     {
         // allow
     }
@@ -279,5 +271,11 @@ public class ReadOnlyAccessControl
     public Set<SchemaFunctionName> filterFunctions(ConnectorSecurityContext context, Set<SchemaFunctionName> functionNames)
     {
         return functionNames;
+    }
+
+    @Override
+    public void checkCanShowBranches(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        // allow
     }
 }

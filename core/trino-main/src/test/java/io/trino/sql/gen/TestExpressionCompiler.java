@@ -72,13 +72,13 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.sql.tree.Extract.Field.TIMEZONE_HOUR;
 import static io.trino.sql.tree.Extract.Field.TIMEZONE_MINUTE;
 import static io.trino.testing.DateTimeTestingUtils.sqlTimestampOf;
-import static io.trino.type.DateTimes.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.type.JsonType.JSON;
 import static io.trino.type.UnknownType.UNKNOWN;
 import static io.trino.util.StructuralTestUtil.mapType;
@@ -102,18 +102,22 @@ public class TestExpressionCompiler
     private static final Integer[] intLefts = ObjectArrays.concat(smallInts, extremeInts, Integer.class);
     private static final Integer[] intRights = {3, -3, 101510823, null};
     private static final Integer[] intMiddle = {9, -3, 88, null};
-    private static final Double[] doubleLefts = {9.0, 10.0, 11.0, -9.0, -10.0, -11.0, 9.1, 10.1, 11.1, -9.1, -10.1, -11.1,
-            Double.MIN_VALUE, Double.MAX_VALUE, Double.MIN_NORMAL, null};
+    private static final Double[] doubleLefts = {
+            9.0, 10.0, 11.0, -9.0, -10.0, -11.0, 9.1, 10.1, 11.1, -9.1, -10.1, -11.1,
+            Double.MIN_VALUE, Double.MAX_VALUE, Double.MIN_NORMAL, null,
+    };
     private static final Double[] doubleRights = {3.0, -3.0, 3.1, -3.1, null};
     private static final Double[] doubleMiddle = {9.0, -3.1, 88.0, null};
     private static final String[] stringLefts = {"hello", "foo", "mellow", "fellow", "", null};
     private static final String[] stringRights = {"hello", "foo", "bar", "baz", "", null};
     private static final Long[] longLefts = {9L, 10L, 11L, -9L, -10L, -11L, null};
     private static final Long[] longRights = {3L, -3L, 10151082135029369L, null};
-    private static final BigDecimal[] decimalLefts = {new BigDecimal("9.0"), new BigDecimal("10.0"), new BigDecimal("11.0"), new BigDecimal("-9.0"),
+    private static final BigDecimal[] decimalLefts = {
+            new BigDecimal("9.0"), new BigDecimal("10.0"), new BigDecimal("11.0"), new BigDecimal("-9.0"),
             new BigDecimal("-10.0"), new BigDecimal("-11.0"), new BigDecimal("9.1"), new BigDecimal("10.1"),
             new BigDecimal("11.1"), new BigDecimal("-9.1"), new BigDecimal("-10.1"), new BigDecimal("-11.1"),
-            new BigDecimal("9223372036.5477"), new BigDecimal("-9223372036.5477"), null};
+            new BigDecimal("9223372036.5477"), new BigDecimal("-9223372036.5477"), null,
+    };
     private static final BigDecimal[] decimalRights = {new BigDecimal("3.0"), new BigDecimal("-3.0"), new BigDecimal("3.1"), new BigDecimal("-3.1"), null};
     private static final BigDecimal[] decimalMiddle = {new BigDecimal("9.0"), new BigDecimal("-3.1"), new BigDecimal("88.0"), null};
 
@@ -142,7 +146,7 @@ public class TestExpressionCompiler
         for (Boolean value : booleanValues) {
             assertThat(assertions.expression(toLiteral(value)))
                     .hasType(BOOLEAN)
-                    .isEqualTo(value == null ? null : value);
+                    .isEqualTo(value);
 
             assertThat(assertions.expression("a IS NULL")
                     .binding("a", toLiteral(value)))
@@ -158,7 +162,7 @@ public class TestExpressionCompiler
 
             assertThat(assertions.expression(toLiteral(value)))
                     .hasType(INTEGER)
-                    .isEqualTo(value == null ? null : value);
+                    .isEqualTo(value);
 
             assertThat(assertions.expression("- a")
                     .binding("a", toLiteral(value)))
@@ -185,7 +189,7 @@ public class TestExpressionCompiler
         for (Double value : doubleLefts) {
             assertThat(assertions.expression(toLiteral(value)))
                     .hasType(DOUBLE)
-                    .isEqualTo(value == null ? null : value);
+                    .isEqualTo(value);
 
             assertThat(assertions.expression("- a")
                     .binding("a", toLiteral(value)))
@@ -221,7 +225,7 @@ public class TestExpressionCompiler
         for (String value : stringLefts) {
             assertThat(assertions.expression(toLiteral(value)))
                     .hasType(varcharType(value))
-                    .isEqualTo(value == null ? null : value);
+                    .isEqualTo(value);
 
             assertThat(assertions.expression("a IS NULL")
                     .binding("a", toLiteral(value)))
@@ -1094,7 +1098,7 @@ public class TestExpressionCompiler
         if (values.stream().anyMatch(Objects::isNull)) {
             return VARCHAR;
         }
-        return createVarcharType(values.stream().mapToInt(String::length).max().getAsInt());
+        return createVarcharType(values.stream().mapToInt(String::length).max().orElseThrow());
     }
 
     private static Object nullIf(Object left, Object right)
@@ -1238,7 +1242,7 @@ public class TestExpressionCompiler
             assertThat(assertions.expression("CAST(a AS boolean)")
                     .binding("a", toLiteral(value)))
                     .hasType(BOOLEAN)
-                    .isEqualTo(value == null ? null : (value ? true : false));
+                    .isEqualTo(value == null ? null : value);
 
             assertThat(assertions.expression("CAST(a AS integer)")
                     .binding("a", toLiteral(value)))
@@ -1265,12 +1269,12 @@ public class TestExpressionCompiler
             assertThat(assertions.expression("CAST(a AS boolean)")
                     .binding("a", toLiteral(value)))
                     .hasType(BOOLEAN)
-                    .isEqualTo(value == null ? null : (value != 0L ? true : false));
+                    .isEqualTo(value == null ? null : value != 0L);
 
             assertThat(assertions.expression("CAST(a AS integer)")
                     .binding("a", toLiteral(value)))
                     .hasType(INTEGER)
-                    .isEqualTo(value == null ? null : value);
+                    .isEqualTo(value);
 
             assertThat(assertions.expression("CAST(a AS bigint)")
                     .binding("a", toLiteral(value)))
@@ -1293,7 +1297,7 @@ public class TestExpressionCompiler
             assertThat(assertions.expression("CAST(a AS boolean)")
                     .binding("a", toLiteral(value)))
                     .hasType(BOOLEAN)
-                    .isEqualTo(value == null ? null : (value != 0.0 ? true : false));
+                    .isEqualTo(value == null ? null : value != 0.0);
 
             if (value == null || (value >= Long.MIN_VALUE && value < Long.MAX_VALUE)) {
                 assertThat(assertions.expression("CAST(a AS bigint)")
@@ -1305,7 +1309,7 @@ public class TestExpressionCompiler
             assertThat(assertions.expression("CAST(a AS double)")
                     .binding("a", toLiteral(value)))
                     .hasType(DOUBLE)
-                    .isEqualTo(value == null ? null : value);
+                    .isEqualTo(value);
 
             assertThat(assertions.expression("CAST(a AS varchar)")
                     .binding("a", toLiteral(value)))
@@ -1373,7 +1377,7 @@ public class TestExpressionCompiler
                 assertThat(assertions.expression("CAST(a AS integer)")
                         .binding("a", toLiteral(String.valueOf(value))))
                         .hasType(INTEGER)
-                        .isEqualTo(value == null ? null : value);
+                        .isEqualTo(value);
 
                 assertThat(assertions.expression("CAST(a AS bigint)")
                         .binding("a", toLiteral(String.valueOf(value))))
@@ -1386,14 +1390,14 @@ public class TestExpressionCompiler
                 assertThat(assertions.expression("CAST(a AS double)")
                         .binding("a", toLiteral(String.valueOf(value))))
                         .hasType(DOUBLE)
-                        .isEqualTo(value == null ? null : value);
+                        .isEqualTo(value);
             }
         }
         for (String value : stringLefts) {
             assertThat(assertions.expression("CAST(a AS varchar)")
                     .binding("a", toLiteral(value)))
                     .hasType(VARCHAR)
-                    .isEqualTo(value == null ? null : value);
+                    .isEqualTo(value);
         }
     }
 
@@ -1928,19 +1932,19 @@ public class TestExpressionCompiler
         for (Boolean value : booleanValues) {
             assertThat(assertions.expression("a IN (true)")
                     .binding("a", toLiteral(value)))
-                    .isEqualTo(value == null ? null : value == Boolean.TRUE);
+                    .isEqualTo(value == null ? null : value);
             assertThat(assertions.expression("a IN (null, true)")
                     .binding("a", toLiteral(value)))
-                    .isEqualTo(value == null ? null : value == Boolean.TRUE ? true : null);
+                    .isEqualTo(value == null ? null : value ? true : null);
             assertThat(assertions.expression("a IN (true, null)")
                     .binding("a", toLiteral(value)))
-                    .isEqualTo(value == null ? null : value == Boolean.TRUE ? true : null);
+                    .isEqualTo(value == null ? null : value ? true : null);
             assertThat(assertions.expression("a IN (false)")
                     .binding("a", toLiteral(value)))
-                    .isEqualTo(value == null ? null : value == Boolean.FALSE);
+                    .isEqualTo(value == null ? null : !value);
             assertThat(assertions.expression("a IN (null, false)")
                     .binding("a", toLiteral(value)))
-                    .isEqualTo(value == null ? null : value == Boolean.FALSE ? true : null);
+                    .isEqualTo(value == null ? null : !value ? true : null);
             assertThat(assertions.expression("a IN (null)")
                     .binding("a", toLiteral(value)))
                     .isNull(BOOLEAN);
@@ -2481,7 +2485,7 @@ public class TestExpressionCompiler
                 "{\"fuu\": null}",
                 "{\"fuu\": 1}",
                 "{\"fuu\": 1, \"bar\": \"abc\"}",
-                null
+                null,
         };
 
         String[] jsonPatterns = {
@@ -2489,7 +2493,7 @@ public class TestExpressionCompiler
                 "$.fuu",
                 "$.fuu[0]",
                 "$.bar",
-                null
+                null,
         };
 
         for (String value : jsonValues) {
@@ -2555,7 +2559,7 @@ public class TestExpressionCompiler
                 new DateTime(2001, 1, 22, 3, 4, 5, 321, UTC),
                 new DateTime(1960, 1, 22, 3, 4, 5, 321, UTC),
                 new DateTime(1970, 1, 1, 0, 0, 0, 0, UTC),
-                null
+                null,
         };
 
         for (DateTime left : dateTimeValues) {

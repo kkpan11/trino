@@ -20,6 +20,7 @@ import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.ExpressionRewriter;
 import io.trino.sql.ir.ExpressionTreeRewriter;
 import io.trino.sql.ir.Lambda;
+import io.trino.sql.ir.Let;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.PartitioningScheme;
@@ -58,8 +59,9 @@ import io.trino.sql.planner.rowpattern.ScalarValuePointer;
 import io.trino.sql.planner.rowpattern.ValuePointer;
 import io.trino.sql.planner.rowpattern.ir.IrLabel;
 
-import java.util.HashMap;
+import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -69,6 +71,7 @@ import java.util.Set;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
@@ -139,7 +142,7 @@ public class SymbolMapper
                 .collect(toImmutableList());
     }
 
-    public List<Symbol> mapAndDistinct(List<Symbol> symbols)
+    public List<Symbol> mapAndDistinct(Collection<Symbol> symbols)
     {
         return symbols.stream()
                 .map(this::map)
@@ -166,8 +169,22 @@ public class SymbolMapper
                         .collect(toImmutableList());
 
                 Expression body = treeRewriter.rewrite(node.body(), context);
-                if (body != node.body()) {
+                if (!arguments.equals(node.arguments()) || body != node.body()) {
                     return new Lambda(arguments, body);
+                }
+
+                return node;
+            }
+
+            @Override
+            public Expression rewriteLet(Let node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+            {
+                // The bound name is a binder and must be mapped like the references to it in the body.
+                Symbol name = map(node.name());
+                Expression value = treeRewriter.rewrite(node.value(), context);
+                Expression body = treeRewriter.rewrite(node.body(), context);
+                if (!name.equals(node.name()) || value != node.value() || body != node.body()) {
+                    return new Let(name, value, body);
                 }
 
                 return node;
@@ -197,7 +214,6 @@ public class SymbolMapper
                         node.getGlobalGroupingSets()),
                 ImmutableList.of(),
                 node.getStep(),
-                node.getHashSymbol().map(this::map),
                 node.getGroupIdSymbol().map(this::map));
     }
 
@@ -216,7 +232,7 @@ public class SymbolMapper
 
     public GroupIdNode map(GroupIdNode node, PlanNode source)
     {
-        Map<Symbol, Symbol> newGroupingMappings = new HashMap<>();
+        Map<Symbol, Symbol> newGroupingMappings = new LinkedHashMap<>();
         ImmutableList.Builder<List<Symbol>> newGroupingSets = ImmutableList.builder();
 
         for (List<Symbol> groupingSet : node.getGroupingSets()) {
@@ -248,8 +264,9 @@ public class SymbolMapper
                     .map(this::map)
                     .collect(toImmutableList());
             WindowNode.Frame newFrame = map(function.getFrame());
+            Optional<OrderingScheme> newOrderingScheme = function.getOrderingScheme().map(this::map);
 
-            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, newFrame, function.isIgnoreNulls()));
+            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, newOrderingScheme, newFrame, function.isIgnoreNulls(), function.isDistinct()));
         });
 
         SpecificationWithPreSortedPrefix newSpecification = mapAndDistinct(node.getSpecification(), node.getPreSortedOrderPrefix());
@@ -259,7 +276,6 @@ public class SymbolMapper
                 source,
                 newSpecification.specification(),
                 newFunctions.buildOrThrow(),
-                node.getHashSymbol().map(this::map),
                 node.getPrePartitionedInputs().stream()
                         .map(this::map)
                         .collect(toImmutableSet()),
@@ -307,8 +323,9 @@ public class SymbolMapper
                     .map(this::map)
                     .collect(toImmutableList());
             WindowNode.Frame newFrame = map(function.getFrame());
+            verify(function.getOrderingScheme().isEmpty());
 
-            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, newFrame, function.isIgnoreNulls()));
+            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, Optional.empty(), newFrame, function.isIgnoreNulls(), function.isDistinct()));
         });
 
         ImmutableMap.Builder<Symbol, Measure> newMeasures = ImmutableMap.builder();
@@ -324,7 +341,6 @@ public class SymbolMapper
                 node.getId(),
                 source,
                 newSpecification.specification(),
-                node.getHashSymbol().map(this::map),
                 node.getPrePartitionedInputs().stream()
                         .map(this::map)
                         .collect(toImmutableSet()),
@@ -342,38 +358,25 @@ public class SymbolMapper
 
     private ExpressionAndValuePointers map(ExpressionAndValuePointers expressionAndValuePointers)
     {
-        // Map only the input symbols of ValuePointers. These are the symbols produced by the source node.
-        // Other symbols present in the ExpressionAndValuePointers structure are synthetic unique symbols
-        // with no outer usage or dependencies.
+        // Map the input symbols of ValuePointers, which are produced by the source node. Assignment
+        // symbols are synthetic and only referenced by the expression, so both are left alone.
+        // Aggregation arguments go through map(Expression), which also renames references to the
+        // classifier and match-number symbols, so those fields are mapped alongside to stay
+        // consistent with the arguments.
         ImmutableList.Builder<ExpressionAndValuePointers.Assignment> newAssignments = ImmutableList.builder();
         for (ExpressionAndValuePointers.Assignment assignment : expressionAndValuePointers.getAssignments()) {
             ValuePointer newPointer = switch (assignment.valuePointer()) {
                 case ClassifierValuePointer pointer -> pointer;
                 case MatchNumberValuePointer pointer -> pointer;
                 case ScalarValuePointer pointer -> new ScalarValuePointer(pointer.getLogicalIndexPointer(), map(pointer.getInputSymbol()));
-                case AggregationValuePointer pointer -> {
-                    List<Expression> newArguments = pointer.getArguments().stream()
-                            .map(expression -> ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<Void>()
-                            {
-                                @Override
-                                public Expression rewriteReference(Reference node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
-                                {
-                                    if (pointer.getClassifierSymbol().isPresent() && Symbol.from(node).equals(pointer.getClassifierSymbol().get()) ||
-                                            pointer.getMatchNumberSymbol().isPresent() && Symbol.from(node).equals(pointer.getMatchNumberSymbol().get())) {
-                                        return node;
-                                    }
-                                    return map(node);
-                                }
-                            }, expression))
-                            .collect(toImmutableList());
-
-                    yield new AggregationValuePointer(
-                            pointer.getFunction(),
-                            pointer.getSetDescriptor(),
-                            newArguments,
-                            pointer.getClassifierSymbol(),
-                            pointer.getMatchNumberSymbol());
-                }
+                case AggregationValuePointer pointer -> new AggregationValuePointer(
+                        pointer.getFunction(),
+                        pointer.getSetDescriptor(),
+                        pointer.getArguments().stream()
+                                .map(this::map)
+                                .collect(toImmutableList()),
+                        pointer.getClassifierSymbol().map(this::map),
+                        pointer.getMatchNumberSymbol().map(this::map));
             };
 
             newAssignments.add(new ExpressionAndValuePointers.Assignment(assignment.symbol(), newPointer));
@@ -436,7 +439,6 @@ public class SymbolMapper
                         .map(this::map)
                         .collect(toImmutableSet()),
                 newSpecification.map(SpecificationWithPreSortedPrefix::preSorted).orElse(node.getPreSorted()),
-                node.getHashSymbol().map(this::map),
                 node.getHandle());
     }
 
@@ -498,8 +500,7 @@ public class SymbolMapper
                 source,
                 node.getLimit(),
                 node.isPartial(),
-                mapAndDistinct(node.getDistinctSymbols()),
-                node.getHashSymbol().map(this::map));
+                mapAndDistinct(node.getDistinctSymbols()));
     }
 
     public StatisticsWriterNode map(StatisticsWriterNode node, PlanNode source)
@@ -601,9 +602,9 @@ public class SymbolMapper
         return new PartitioningScheme(
                 scheme.getPartitioning().translate(this::map),
                 mapAndDistinct(sourceLayout),
-                scheme.getHashColumn().map(this::map),
                 scheme.isReplicateNullsAndAny(),
                 scheme.getBucketToPartition(),
+                scheme.getBucketCount(),
                 scheme.getPartitionCount());
     }
 
@@ -613,7 +614,7 @@ public class SymbolMapper
                 node.getId(),
                 source,
                 node.getTarget(),
-                map(node.getRowCountSymbol()),
+                node.getOutputSymbols(),
                 node.getStatisticsAggregation().map(this::map),
                 node.getStatisticsAggregationDescriptor().map(descriptor -> descriptor.map(this::map)));
     }
@@ -633,8 +634,7 @@ public class SymbolMapper
                 mapAndDistinct(node.getPartitionBy()),
                 node.isOrderSensitive(),
                 map(node.getRowNumberSymbol()),
-                node.getMaxRowCountPerPartition(),
-                node.getHashSymbol().map(this::map));
+                node.getMaxRowCountPerPartition());
     }
 
     public TopNRankingNode map(TopNRankingNode node, PlanNode source)
@@ -646,8 +646,7 @@ public class SymbolMapper
                 node.getRankingType(),
                 map(node.getRankingSymbol()),
                 node.getMaxRankingPerPartition(),
-                node.isPartial(),
-                node.getHashSymbol().map(this::map));
+                node.isPartial());
     }
 
     public TopNNode map(TopNNode node, PlanNode source)

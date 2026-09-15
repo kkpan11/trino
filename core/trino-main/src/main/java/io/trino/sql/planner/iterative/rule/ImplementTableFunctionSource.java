@@ -23,7 +23,6 @@ import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.spi.type.Type;
 import io.trino.sql.ir.Coalesce;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Logical;
@@ -56,11 +55,13 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_LAST;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.sql.ir.Comparison.Operator.EQUAL;
-import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
-import static io.trino.sql.ir.Comparison.Operator.IDENTICAL;
+import static io.trino.sql.ir.ComparisonOperator.EQUAL;
+import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonOperator.IDENTICAL;
+import static io.trino.sql.ir.IrExpressions.comparison;
 import static io.trino.sql.ir.IrExpressions.ifExpression;
 import static io.trino.sql.ir.Logical.Operator.AND;
 import static io.trino.sql.ir.Logical.Operator.OR;
@@ -165,7 +166,6 @@ public class ImplementTableFunctionSource
                     Optional.empty(),
                     ImmutableSet.of(),
                     0,
-                    Optional.empty(),
                     node.getHandle()));
         }
 
@@ -187,20 +187,19 @@ public class ImplementTableFunctionSource
                     sourceProperties.specification(),
                     ImmutableSet.of(),
                     0,
-                    Optional.empty(),
                     node.getHandle()));
         }
         Map<String, SourceWithProperties> sources = mapSourcesByName(node.getSources(), node.getTableArgumentProperties());
         ImmutableList.Builder<NodeWithSymbols> intermediateResultsBuilder = ImmutableList.builder();
-        ResolvedFunction rowNumberFunction = metadata.resolveBuiltinFunction("row_number", ImmutableList.of());
-        ResolvedFunction countFunction = metadata.resolveBuiltinFunction("count", ImmutableList.of());
+        ResolvedFunction rowNumberFunction = metadata.resolveBuiltinFunction(getCharVarcharCoercion(context.getSession()), "row_number", ImmutableList.of());
+        ResolvedFunction countFunction = metadata.resolveBuiltinFunction(getCharVarcharCoercion(context.getSession()), "count", ImmutableList.of());
 
         // handle co-partitioned sources
         for (List<String> copartitioningList : node.getCopartitioningLists()) {
             List<SourceWithProperties> sourceList = copartitioningList.stream()
                     .map(sources::get)
                     .collect(toImmutableList());
-            intermediateResultsBuilder.add(copartition(sourceList, rowNumberFunction, countFunction, context));
+            intermediateResultsBuilder.add(copartition(metadata, sourceList, rowNumberFunction, countFunction, context));
         }
 
         // prepare non-co-partitioned sources
@@ -221,14 +220,14 @@ public class ImplementTableFunctionSource
         else {
             NodeWithSymbols first = intermediateResultSources.get(0);
             NodeWithSymbols second = intermediateResultSources.get(1);
-            JoinedNodes joined = join(first, second, context);
+            JoinedNodes joined = join(metadata, first, second, context);
 
             for (int i = 2; i < intermediateResultSources.size(); i++) {
-                NodeWithSymbols joinedWithSymbols = appendHelperSymbolsForJoinedNodes(joined, context);
-                joined = join(joinedWithSymbols, intermediateResultSources.get(i), context);
+                NodeWithSymbols joinedWithSymbols = appendHelperSymbolsForJoinedNodes(metadata, joined, context);
+                joined = join(metadata, joinedWithSymbols, intermediateResultSources.get(i), context);
             }
 
-            finalResultSource = appendHelperSymbolsForJoinedNodes(joined, context);
+            finalResultSource = appendHelperSymbolsForJoinedNodes(metadata, joined, context);
         }
 
         // For each source, all source's output symbols are mapped to the source's row number symbol.
@@ -243,12 +242,12 @@ public class ImplementTableFunctionSource
         // Combined partitioning lists from all sources.
         List<Symbol> finalPartitionBy = finalResultSource.partitionBy();
 
-        NodeWithMarkers marked = appendMarkerSymbols(finalResultSource.node(), ImmutableSet.copyOf(rowNumberSymbols.values()), finalRowNumberSymbol, context);
+        NodeWithMarkers marked = appendMarkerSymbols(metadata, finalResultSource.node(), ImmutableSet.copyOf(rowNumberSymbols.values()), finalRowNumberSymbol, context);
 
         // Remap the symbol mapping: replace the row number symbol with the corresponding marker symbol.
         // In the new map, every source symbol is associated with the corresponding marker symbol.
         // Null value of the marker indicates that the source value should be ignored by the table function.
-        ImmutableMap<Symbol, Symbol> markerSymbols = rowNumberSymbols.entrySet().stream()
+        Map<Symbol, Symbol> markerSymbols = rowNumberSymbols.entrySet().stream()
                 .collect(toImmutableMap(Map.Entry::getKey, entry -> marked.symbolToMarker().get(entry.getValue())));
 
         // Use the final row number symbol for ordering the combined sources.
@@ -282,7 +281,6 @@ public class ImplementTableFunctionSource
                 Optional.of(new DataOrganizationSpecification(finalPartitionBy, finalOrderBy)),
                 ImmutableSet.of(),
                 0,
-                Optional.empty(),
                 node.getHandle()));
     }
 
@@ -303,7 +301,7 @@ public class ImplementTableFunctionSource
 
         Symbol rowNumber = context.getSymbolAllocator().newSymbol(argumentName + "_row_number", BIGINT);
         Map<Symbol, Symbol> rowNumberSymbolMapping = source.getOutputSymbols().stream()
-                .collect(toImmutableMap(identity(), symbol -> rowNumber));
+                .collect(toImmutableMap(identity(), _ -> rowNumber));
 
         Symbol partitionSize = context.getSymbolAllocator().newSymbol(argumentName + "_partition_size", BIGINT);
 
@@ -317,9 +315,8 @@ public class ImplementTableFunctionSource
                 source,
                 specification,
                 ImmutableMap.of(
-                        rowNumber, new WindowNode.Function(rowNumberFunction, ImmutableList.of(), FULL_FRAME, false),
-                        partitionSize, new WindowNode.Function(countFunction, ImmutableList.of(), FULL_FRAME, false)),
-                Optional.empty(),
+                        rowNumber, new WindowNode.Function(rowNumberFunction, ImmutableList.of(), Optional.empty(), FULL_FRAME, false, false),
+                        partitionSize, new WindowNode.Function(countFunction, ImmutableList.of(), Optional.empty(), FULL_FRAME, false, false)),
                 ImmutableSet.of(),
                 0);
 
@@ -327,6 +324,7 @@ public class ImplementTableFunctionSource
     }
 
     private static NodeWithSymbols copartition(
+            Metadata metadata,
             List<SourceWithProperties> sourceList,
             ResolvedFunction rowNumberFunction,
             ResolvedFunction countFunction,
@@ -342,18 +340,18 @@ public class ImplementTableFunctionSource
 
         NodeWithSymbols first = planWindowFunctionsForSource(sourceList.get(0).source(), sourceList.get(0).properties(), rowNumberFunction, countFunction, context);
         NodeWithSymbols second = planWindowFunctionsForSource(sourceList.get(1).source(), sourceList.get(1).properties(), rowNumberFunction, countFunction, context);
-        JoinedNodes copartitioned = copartition(first, second, context);
+        JoinedNodes copartitioned = copartition(metadata, first, second, context);
 
         for (int i = 2; i < sourceList.size(); i++) {
-            NodeWithSymbols copartitionedWithSymbols = appendHelperSymbolsForCopartitionedNodes(copartitioned, context);
+            NodeWithSymbols copartitionedWithSymbols = appendHelperSymbolsForCopartitionedNodes(metadata, copartitioned, context);
             NodeWithSymbols next = planWindowFunctionsForSource(sourceList.get(i).source(), sourceList.get(i).properties(), rowNumberFunction, countFunction, context);
-            copartitioned = copartition(copartitionedWithSymbols, next, context);
+            copartitioned = copartition(metadata, copartitionedWithSymbols, next, context);
         }
 
-        return appendHelperSymbolsForCopartitionedNodes(copartitioned, context);
+        return appendHelperSymbolsForCopartitionedNodes(metadata, copartitioned, context);
     }
 
-    private static JoinedNodes copartition(NodeWithSymbols left, NodeWithSymbols right, Context context)
+    private static JoinedNodes copartition(Metadata metadata, NodeWithSymbols left, NodeWithSymbols right, Context context)
     {
         checkArgument(left.partitionBy().size() == right.partitionBy().size(), "co-partitioning lists do not match");
 
@@ -375,7 +373,7 @@ public class ImplementTableFunctionSource
         List<Expression> copartitionConjuncts = Streams.zip(
                         leftPartitionBy.stream(),
                         rightPartitionBy.stream(),
-                        (leftColumn, rightColumn) -> new Comparison(IDENTICAL, leftColumn, rightColumn))
+                        (leftColumn, rightColumn) -> comparison(metadata, getCharVarcharCoercion(context.getSession()), IDENTICAL, leftColumn, rightColumn))
                 .collect(toImmutableList());
 
         // Align matching partitions (co-partitions) from left and right source, according to row number.
@@ -396,13 +394,13 @@ public class ImplementTableFunctionSource
                 ImmutableList.<Expression>builder()
                         .addAll(copartitionConjuncts)
                         .add(new Logical(OR, ImmutableList.of(
-                                new Comparison(EQUAL, leftRowNumber, rightRowNumber),
+                                comparison(metadata, getCharVarcharCoercion(context.getSession()), EQUAL, leftRowNumber, rightRowNumber),
                                 new Logical(AND, ImmutableList.of(
-                                        new Comparison(GREATER_THAN, leftRowNumber, rightPartitionSize),
-                                        new Comparison(EQUAL, rightRowNumber, new Constant(BIGINT, 1L)))),
+                                        comparison(metadata, getCharVarcharCoercion(context.getSession()), GREATER_THAN, leftRowNumber, rightPartitionSize),
+                                        comparison(metadata, getCharVarcharCoercion(context.getSession()), EQUAL, rightRowNumber, new Constant(BIGINT, 1L)))),
                                 new Logical(AND, ImmutableList.of(
-                                        new Comparison(GREATER_THAN, rightRowNumber, leftPartitionSize),
-                                        new Comparison(EQUAL, leftRowNumber, new Constant(BIGINT, 1L)))))))
+                                        comparison(metadata, getCharVarcharCoercion(context.getSession()), GREATER_THAN, rightRowNumber, leftPartitionSize),
+                                        comparison(metadata, getCharVarcharCoercion(context.getSession()), EQUAL, leftRowNumber, new Constant(BIGINT, 1L)))))))
                         .build());
 
         // The join type depends on the prune when empty property of the sources.
@@ -467,8 +465,6 @@ public class ImplementTableFunctionSource
                         Optional.of(joinCondition),
                         Optional.empty(),
                         Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty(),
                         ImmutableMap.of(),
                         Optional.empty()),
                 left.rowNumber(),
@@ -484,6 +480,7 @@ public class ImplementTableFunctionSource
     }
 
     private static NodeWithSymbols appendHelperSymbolsForCopartitionedNodes(
+            Metadata metadata,
             JoinedNodes copartitionedNodes,
             Context context)
     {
@@ -497,7 +494,9 @@ public class ImplementTableFunctionSource
         // Derive row number for joined partitions: this is the bigger partition's row number. One of the combined values might be null as a result of outer join.
         Symbol joinedRowNumber = context.getSymbolAllocator().newSymbol("combined_row_number", BIGINT);
         Expression rowNumberExpression = ifExpression(
-                new Comparison(
+                comparison(
+                        metadata,
+                        getCharVarcharCoercion(context.getSession()),
                         GREATER_THAN,
                         new Coalesce(leftRowNumber, new Constant(BIGINT, -1L)),
                         new Coalesce(rightRowNumber, new Constant(BIGINT, -1L))),
@@ -507,7 +506,9 @@ public class ImplementTableFunctionSource
         // Derive partition size for joined partitions: this is the bigger partition's size. One of the combined values might be null as a result of outer join.
         Symbol joinedPartitionSize = context.getSymbolAllocator().newSymbol("combined_partition_size", BIGINT);
         Expression partitionSizeExpression = ifExpression(
-                new Comparison(
+                comparison(
+                        metadata,
+                        getCharVarcharCoercion(context.getSession()),
                         GREATER_THAN,
                         new Coalesce(leftPartitionSize, new Constant(BIGINT, -1L)),
                         new Coalesce(rightPartitionSize, new Constant(BIGINT, -1L))),
@@ -549,7 +550,7 @@ public class ImplementTableFunctionSource
         return new NodeWithSymbols(project, joinedRowNumber, joinedPartitionSize, joinedPartitionBy.build(), joinedPruneWhenEmpty, joinedRowNumberSymbolsMapping);
     }
 
-    private static JoinedNodes join(NodeWithSymbols left, NodeWithSymbols right, Context context)
+    private static JoinedNodes join(Metadata metadata, NodeWithSymbols left, NodeWithSymbols right, Context context)
     {
         Expression leftRowNumber = left.rowNumber().toSymbolReference();
         Expression leftPartitionSize = left.partitionSize().toSymbolReference();
@@ -567,13 +568,13 @@ public class ImplementTableFunctionSource
         // OR
         // (R2 > S1 AND R1 = 1)
         Expression joinCondition = new Logical(OR, ImmutableList.of(
-                new Comparison(EQUAL, leftRowNumber, rightRowNumber),
+                comparison(metadata, getCharVarcharCoercion(context.getSession()), EQUAL, leftRowNumber, rightRowNumber),
                 new Logical(AND, ImmutableList.of(
-                        new Comparison(GREATER_THAN, leftRowNumber, rightPartitionSize),
-                        new Comparison(EQUAL, rightRowNumber, new Constant(BIGINT, 1L)))),
+                        comparison(metadata, getCharVarcharCoercion(context.getSession()), GREATER_THAN, leftRowNumber, rightPartitionSize),
+                        comparison(metadata, getCharVarcharCoercion(context.getSession()), EQUAL, rightRowNumber, new Constant(BIGINT, 1L)))),
                 new Logical(AND, ImmutableList.of(
-                        new Comparison(GREATER_THAN, rightRowNumber, leftPartitionSize),
-                        new Comparison(EQUAL, leftRowNumber, new Constant(BIGINT, 1L))))));
+                        comparison(metadata, getCharVarcharCoercion(context.getSession()), GREATER_THAN, rightRowNumber, leftPartitionSize),
+                        comparison(metadata, getCharVarcharCoercion(context.getSession()), EQUAL, leftRowNumber, new Constant(BIGINT, 1L))))));
 
         JoinType joinType;
         if (left.pruneWhenEmpty() && right.pruneWhenEmpty()) {
@@ -602,8 +603,6 @@ public class ImplementTableFunctionSource
                         Optional.of(joinCondition),
                         Optional.empty(),
                         Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty(),
                         ImmutableMap.of(),
                         Optional.empty()),
                 left.rowNumber(),
@@ -618,7 +617,7 @@ public class ImplementTableFunctionSource
                 right.rowNumberSymbolsMapping());
     }
 
-    private static NodeWithSymbols appendHelperSymbolsForJoinedNodes(JoinedNodes joinedNodes, Context context)
+    private static NodeWithSymbols appendHelperSymbolsForJoinedNodes(Metadata metadata, JoinedNodes joinedNodes, Context context)
     {
         Expression leftRowNumber = joinedNodes.leftRowNumber().toSymbolReference();
         Expression leftPartitionSize = joinedNodes.leftPartitionSize().toSymbolReference();
@@ -628,7 +627,9 @@ public class ImplementTableFunctionSource
         // Derive row number for joined partitions: this is the bigger partition's row number. One of the combined values might be null as a result of outer join.
         Symbol joinedRowNumber = context.getSymbolAllocator().newSymbol("combined_row_number", BIGINT);
         Expression rowNumberExpression = ifExpression(
-                new Comparison(
+                comparison(
+                        metadata,
+                        getCharVarcharCoercion(context.getSession()),
                         GREATER_THAN,
                         new Coalesce(leftRowNumber, new Constant(BIGINT, -1L)),
                         new Coalesce(rightRowNumber, new Constant(BIGINT, -1L))),
@@ -638,7 +639,9 @@ public class ImplementTableFunctionSource
         // Derive partition size for joined partitions: this is the bigger partition's size. One of the combined values might be null as a result of outer join.
         Symbol joinedPartitionSize = context.getSymbolAllocator().newSymbol("combined_partition_size", BIGINT);
         Expression partitionSizeExpression = ifExpression(
-                new Comparison(
+                comparison(
+                        metadata,
+                        getCharVarcharCoercion(context.getSession()),
                         GREATER_THAN,
                         new Coalesce(leftPartitionSize, new Constant(BIGINT, -1L)),
                         new Coalesce(rightPartitionSize, new Constant(BIGINT, -1L))),
@@ -669,7 +672,7 @@ public class ImplementTableFunctionSource
         return new NodeWithSymbols(project, joinedRowNumber, joinedPartitionSize, joinedPartitionBy, joinedPruneWhenEmpty, joinedRowNumberSymbolsMapping);
     }
 
-    private static NodeWithMarkers appendMarkerSymbols(PlanNode node, Set<Symbol> symbols, Symbol referenceSymbol, Context context)
+    private static NodeWithMarkers appendMarkerSymbols(Metadata metadata, PlanNode node, Set<Symbol> symbols, Symbol referenceSymbol, Context context)
     {
         Assignments.Builder assignments = Assignments.builder();
         assignments.putIdentities(node.getOutputSymbols());
@@ -681,7 +684,7 @@ public class ImplementTableFunctionSource
             symbolsToMarkers.put(symbol, marker);
             Expression actual = symbol.toSymbolReference();
             Expression reference = referenceSymbol.toSymbolReference();
-            assignments.put(marker, ifExpression(new Comparison(EQUAL, actual, reference), actual, new Constant(BIGINT, null)));
+            assignments.put(marker, ifExpression(comparison(metadata, getCharVarcharCoercion(context.getSession()), EQUAL, actual, reference), actual, new Constant(BIGINT, null)));
         }
 
         PlanNode project = new ProjectNode(

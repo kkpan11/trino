@@ -22,6 +22,7 @@ import io.trino.metadata.ResolvedFunction;
 import io.trino.spi.type.Type;
 import io.trino.sql.InterpretedFunctionInvoker;
 
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.Objects.requireNonNull;
 
@@ -38,25 +39,29 @@ public final class ValuePrinter
         this.session = requireNonNull(session, "session is null");
     }
 
-    public String castToVarchar(Type type, Object value)
+    public Metadata getMetadata()
+    {
+        return metadata;
+    }
+
+    public Session getSession()
+    {
+        return session;
+    }
+
+    public String render(Type type, Object value)
     {
         try {
-            return castToVarcharOrFail(type, value);
+            if (value == null) {
+                return "NULL";
+            }
+
+            ResolvedFunction coercion = metadata.getCoercion(getCharVarcharCoercion(session), type, VARCHAR);
+            Slice coerced = (Slice) new InterpretedFunctionInvoker(functionManager).invoke(coercion, session.toConnectorSession(), value);
+            return coerced.toStringUtf8();
         }
         catch (OperatorNotFoundException e) {
             return "<UNREPRESENTABLE VALUE>";
         }
-    }
-
-    public String castToVarcharOrFail(Type type, Object value)
-            throws OperatorNotFoundException
-    {
-        if (value == null) {
-            return "NULL";
-        }
-
-        ResolvedFunction coercion = metadata.getCoercion(type, VARCHAR);
-        Slice coerced = (Slice) new InterpretedFunctionInvoker(functionManager).invoke(coercion, session.toConnectorSession(), value);
-        return coerced.toStringUtf8();
     }
 }

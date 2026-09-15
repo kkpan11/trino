@@ -14,17 +14,17 @@
 package io.trino.spi.type;
 
 import io.airlift.slice.XxHash64;
+import io.trino.spi.block.BitArrayBlock;
+import io.trino.spi.block.BitArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
-import io.trino.spi.block.ByteArrayBlock;
-import io.trino.spi.block.ByteArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.BlockIndex;
 import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
@@ -43,6 +43,7 @@ public final class BooleanType
         extends AbstractType
         implements FixedWidthType
 {
+    public static final String NAME = "boolean";
     private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION = extractOperatorDeclaration(BooleanType.class, lookup(), boolean.class);
 
     private static final long TRUE_XX_HASH = XxHash64.hash(1);
@@ -50,26 +51,14 @@ public final class BooleanType
 
     public static final BooleanType BOOLEAN = new BooleanType();
 
-    /**
-     * This method signifies a contract to callers that as an optimization, they can encode BooleanType blocks as a byte[] directly
-     * and potentially bypass the BlockBuilder / BooleanType abstraction in the name of efficiency. If in the future BooleanType
-     * encoding changes such that {@link ByteArrayBlock} is not always a valid or efficient representation, then this method must be
-     * removed and any usages changed
-     */
-    public static Block wrapByteArrayAsBooleanBlockWithoutNulls(byte[] booleansAsBytes)
-    {
-        return new ByteArrayBlock(booleansAsBytes.length, Optional.empty(), booleansAsBytes);
-    }
-
     public static Block createBlockForSingleNonNullValue(boolean value)
     {
-        byte byteValue = value ? (byte) 1 : 0;
-        return new ByteArrayBlock(1, Optional.empty(), new byte[] {byteValue});
+        return new BitArrayBlock(1, Optional.empty(), new long[] {value ? 1 : 0});
     }
 
     private BooleanType()
     {
-        super(new TypeSignature(StandardTypes.BOOLEAN), boolean.class, ByteArrayBlock.class);
+        super(new TypeDescriptor(NAME), boolean.class, BitArrayBlock.class);
     }
 
     @Override
@@ -79,7 +68,7 @@ public final class BooleanType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -88,21 +77,21 @@ public final class BooleanType
         else {
             maxBlockSizeInBytes = blockBuilderStatus.getMaxPageSizeInBytes();
         }
-        return new ByteArrayBlockBuilder(
+        return new BitArrayBlockBuilder(
                 blockBuilderStatus,
                 Math.min(expectedEntries, maxBlockSizeInBytes / Byte.BYTES));
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
+    public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, Byte.BYTES);
+        return new BitArrayBlockBuilder(null, positionCount);
     }
 
     @Override
-    public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
+    public String getDisplayName()
     {
-        return new ByteArrayBlockBuilder(null, positionCount);
+        return NAME;
     }
 
     @Override
@@ -124,7 +113,7 @@ public final class BooleanType
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public Object getObjectValue(Block block, int position)
     {
         if (block.isNull(position)) {
             return null;
@@ -134,26 +123,15 @@ public final class BooleanType
     }
 
     @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            ((ByteArrayBlockBuilder) blockBuilder).writeByte(getBoolean(block, position) ? (byte) 1 : 0);
-        }
-    }
-
-    @Override
     public boolean getBoolean(Block block, int position)
     {
-        return read((ByteArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
+        return read((BitArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
     }
 
     @Override
     public void writeBoolean(BlockBuilder blockBuilder, boolean value)
     {
-        ((ByteArrayBlockBuilder) blockBuilder).writeByte((byte) (value ? 1 : 0));
+        ((BitArrayBlockBuilder) blockBuilder).writeBoolean(value);
     }
 
     @Override
@@ -175,16 +153,17 @@ public final class BooleanType
     }
 
     @ScalarOperator(READ_VALUE)
-    private static boolean read(@BlockPosition ByteArrayBlock block, @BlockIndex int position)
+    private static boolean read(@BlockPosition BitArrayBlock block, @BlockIndex int position)
     {
-        return block.getByte(position) != 0;
+        return block.getBoolean(position);
     }
 
     @ScalarOperator(READ_VALUE)
     private static boolean readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return fixedSizeSlice[fixedSizeOffset] != 0;
     }
@@ -192,10 +171,10 @@ public final class BooleanType
     @ScalarOperator(READ_VALUE)
     private static void writeFlat(
             boolean value,
-            byte[] fixedSizeSlice,
-            int fixedSizeOffset,
-            byte[] unusedVariableSizeSlice,
-            int unusedVariableSizeOffset)
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         fixedSizeSlice[fixedSizeOffset] = (byte) (value ? 1 : 0);
     }

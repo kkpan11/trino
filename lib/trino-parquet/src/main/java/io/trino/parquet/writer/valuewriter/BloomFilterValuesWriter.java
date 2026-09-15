@@ -14,16 +14,14 @@
 package io.trino.parquet.writer.valuewriter;
 
 import com.google.common.annotations.VisibleForTesting;
+import io.airlift.slice.Slice;
 import org.apache.parquet.bytes.BytesInput;
 import org.apache.parquet.column.Encoding;
 import org.apache.parquet.column.page.DictionaryPage;
-import org.apache.parquet.column.values.ValuesWriter;
 import org.apache.parquet.column.values.bloomfilter.BloomFilter;
 import org.apache.parquet.io.api.Binary;
 
 import java.util.Optional;
-
-import static java.lang.Math.toIntExact;
 
 public class BloomFilterValuesWriter
         extends ValuesWriter
@@ -54,7 +52,15 @@ public class BloomFilterValuesWriter
     @Override
     public long getBufferedSize()
     {
-        return writer.getBufferedSize() + bloomFilter.getBitsetSize();
+        return writer.getBufferedSize();
+    }
+
+    public long getEstimatedBufferedSize()
+    {
+        return switch (writer) {
+            case DictionaryFallbackValuesWriter dictionaryFallbackValuesWriter -> dictionaryFallbackValuesWriter.getEstimatedBufferedSize();
+            default -> writer.getBufferedSize();
+        };
     }
 
     @Override
@@ -96,7 +102,7 @@ public class BloomFilterValuesWriter
     @Override
     public long getAllocatedSize()
     {
-        return writer.getAllocatedSize();
+        return writer.getAllocatedSize() + bloomFilter.getBitsetSize();
     }
 
     @Override
@@ -112,24 +118,31 @@ public class BloomFilterValuesWriter
     }
 
     @Override
-    public void writeBytes(Binary v)
+    public void writeBytes(Slice value)
     {
-        writer.writeBytes(v);
-        bloomFilter.insertHash(bloomFilter.hash(v));
+        writer.writeBytes(value);
+        bloomFilter.insertHash(bloomFilter.hash(Binary.fromReusedByteArray(value.byteArray(), value.byteArrayOffset(), value.length())));
+    }
+
+    @Override
+    public void writeBytes(Slice base, int offset, int length)
+    {
+        writer.writeBytes(base, offset, length);
+        bloomFilter.insertHash(bloomFilter.hash(Binary.fromReusedByteArray(base.byteArray(), base.byteArrayOffset() + offset, length)));
     }
 
     @Override
     public void writeInteger(int v)
     {
         writer.writeInteger(v);
-        bloomFilter.insertHash(bloomFilter.hash(toIntExact(((Number) v).longValue())));
+        bloomFilter.insertHash(bloomFilter.hash(v));
     }
 
     @Override
     public void writeLong(long v)
     {
         writer.writeLong(v);
-        bloomFilter.insertHash(bloomFilter.hash(((Number) v).longValue()));
+        bloomFilter.insertHash(bloomFilter.hash(v));
     }
 
     @Override

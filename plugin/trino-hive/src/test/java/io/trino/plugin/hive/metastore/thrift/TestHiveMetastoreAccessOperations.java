@@ -15,6 +15,7 @@ package io.trino.plugin.hive.metastore.thrift;
 
 import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.Multiset;
+import io.trino.Session;
 import io.trino.plugin.hive.HiveQueryRunner;
 import io.trino.plugin.hive.metastore.MetastoreMethod;
 import io.trino.testing.AbstractTestQueryFramework;
@@ -23,19 +24,24 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 
+import static io.trino.SystemSessionProperties.ENABLE_DYNAMIC_FILTERING;
 import static io.trino.plugin.hive.metastore.MetastoreInvocations.assertMetastoreInvocationsForQuery;
+import static io.trino.plugin.hive.metastore.MetastoreMethod.ALTER_PARTITION;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.CREATE_TABLE;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.GET_DATABASE;
+import static io.trino.plugin.hive.metastore.MetastoreMethod.GET_PARTITION;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.GET_PARTITIONS_BY_NAMES;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.GET_PARTITION_COLUMN_STATISTICS;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.GET_PARTITION_NAMES_BY_FILTER;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.GET_TABLE;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.GET_TABLE_COLUMN_STATISTICS;
+import static io.trino.plugin.hive.metastore.MetastoreMethod.REPLACE_TABLE;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.UPDATE_PARTITION_STATISTICS;
 import static io.trino.plugin.hive.metastore.MetastoreMethod.UPDATE_TABLE_STATISTICS;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Execution(SAME_THREAD)// metastore invocation counters shares mutable state so can't be run from many threads simultaneously
+@Execution(SAME_THREAD) // metastore invocation counters shares mutable state so can't be run from many threads simultaneously
 public class TestHiveMetastoreAccessOperations
         extends AbstractTestQueryFramework
 {
@@ -43,7 +49,10 @@ public class TestHiveMetastoreAccessOperations
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return HiveQueryRunner.create();
+        return HiveQueryRunner.builder()
+                .addHiveProperty("hive.dynamic-filtering.wait-timeout", "1h")
+                .addHiveProperty("hive.non-managed-table-writes-enabled", "true")
+                .build();
     }
 
     @Test
@@ -76,6 +85,62 @@ public class TestHiveMetastoreAccessOperations
                         .add(CREATE_TABLE)
                         .add(GET_TABLE)
                         .add(UPDATE_TABLE_STATISTICS)
+                        .build());
+    }
+
+    @Test
+    public void testInsertIntoExistingTable()
+    {
+        assertUpdate("CREATE TABLE test_insert_existing AS SELECT 1 AS data", 1);
+
+        assertMetastoreInvocations("INSERT INTO test_insert_existing SELECT 2 AS data",
+                ImmutableMultiset.<MetastoreMethod>builder()
+                        .add(GET_TABLE)
+                        .add(GET_TABLE_COLUMN_STATISTICS)
+                        .add(UPDATE_TABLE_STATISTICS)
+                        .build());
+    }
+
+    @Test
+    public void testInsertIntoExistingPartition()
+    {
+        assertUpdate("CREATE TABLE test_insert_existing_partition WITH (partitioned_by = ARRAY['part']) AS SELECT 1 AS data, 10 AS part", 1);
+
+        assertMetastoreInvocations("INSERT INTO test_insert_existing_partition SELECT 2 AS data, 10 AS part",
+                ImmutableMultiset.<MetastoreMethod>builder()
+                        .add(GET_TABLE)
+                        .add(GET_PARTITION)
+                        .add(GET_PARTITIONS_BY_NAMES)
+                        .add(GET_PARTITION_COLUMN_STATISTICS)
+                        .add(UPDATE_PARTITION_STATISTICS)
+                        .build());
+    }
+
+    @Test
+    public void testInsertOverwriteUnpartitionedTable()
+    {
+        assertUpdate("CREATE TABLE test_insert_overwrite WITH (external_location = 'local:///temp_" + randomNameSuffix() + "') AS SELECT 1 AS data", 1);
+
+        assertMetastoreInvocations(insertOverwriteSession(), "INSERT INTO test_insert_overwrite SELECT 2 AS data",
+                ImmutableMultiset.<MetastoreMethod>builder()
+                        .add(GET_TABLE)
+                        .add(GET_TABLE_COLUMN_STATISTICS)
+                        .add(REPLACE_TABLE)
+                        .add(UPDATE_TABLE_STATISTICS)
+                        .build());
+    }
+
+    @Test
+    public void testInsertOverwritePartition()
+    {
+        assertUpdate("CREATE TABLE test_insert_overwrite_partition WITH (partitioned_by = ARRAY['part']) AS SELECT 1 AS data, 10 AS part", 1);
+
+        assertMetastoreInvocations(insertOverwriteSession(), "INSERT INTO test_insert_overwrite_partition SELECT 2 AS data, 10 AS part",
+                ImmutableMultiset.<MetastoreMethod>builder()
+                        .add(GET_TABLE)
+                        .addCopies(GET_PARTITION, 2)
+                        .add(GET_PARTITION_COLUMN_STATISTICS)
+                        .add(ALTER_PARTITION)
                         .build());
     }
 
@@ -180,6 +245,46 @@ public class TestHiveMetastoreAccessOperations
     }
 
     @Test
+    public void testDynamicPartitionPruning()
+    {
+        assertUpdate(
+                "CREATE TABLE test_dynamic_partition_pruning_table WITH (partitioned_by=ARRAY['suppkey']) AS " +
+                        "SELECT orderkey, partkey, suppkey FROM tpch.tiny.lineitem",
+                60175);
+
+        Session session = Session.builder(getSession())
+                // Avoid caching all partitions metadata during planning through getTableStatistics
+                // and force partitions to be fetched during splits generation
+                .setCatalogSessionProperty("hive", "partition_statistics_sample_size", "10")
+                .build();
+        @Language("SQL") String sql = "SELECT * FROM test_dynamic_partition_pruning_table l JOIN tpch.tiny.supplier s ON l.suppkey = s.suppkey " +
+                "AND s.name = 'Supplier#000000001'";
+
+        assertMetastoreInvocations(
+                Session.builder(session)
+                        .setSystemProperty(ENABLE_DYNAMIC_FILTERING, "false")
+                        .build(),
+                sql,
+                ImmutableMultiset.<MetastoreMethod>builder()
+                        .add(GET_TABLE)
+                        .addCopies(GET_PARTITIONS_BY_NAMES, 5)
+                        .add(GET_PARTITION_COLUMN_STATISTICS)
+                        .addCopies(GET_PARTITION_NAMES_BY_FILTER, 2)
+                        .build());
+
+        assertQuerySucceeds("CALL system.flush_metadata_cache()");
+        assertMetastoreInvocations(
+                session,
+                sql,
+                ImmutableMultiset.<MetastoreMethod>builder()
+                        .add(GET_TABLE)
+                        .add(GET_PARTITIONS_BY_NAMES)
+                        .add(GET_PARTITION_COLUMN_STATISTICS)
+                        .addCopies(GET_PARTITION_NAMES_BY_FILTER, 2)
+                        .build());
+    }
+
+    @Test
     public void testExplainSelect()
     {
         assertUpdate("CREATE TABLE test_explain AS SELECT 2 AS age", 1);
@@ -249,7 +354,6 @@ public class TestHiveMetastoreAccessOperations
                         .addCopies(GET_TABLE, 1)
                         .add(GET_PARTITION_NAMES_BY_FILTER)
                         .add(GET_PARTITIONS_BY_NAMES)
-                        .add(GET_PARTITION_COLUMN_STATISTICS)
                         .add(UPDATE_PARTITION_STATISTICS)
                         .build());
 
@@ -260,7 +364,6 @@ public class TestHiveMetastoreAccessOperations
                         .add(GET_TABLE)
                         .add(GET_PARTITION_NAMES_BY_FILTER)
                         .add(GET_PARTITIONS_BY_NAMES)
-                        .add(GET_PARTITION_COLUMN_STATISTICS)
                         .add(UPDATE_PARTITION_STATISTICS)
                         .build());
     }
@@ -299,8 +402,20 @@ public class TestHiveMetastoreAccessOperations
                         .build());
     }
 
+    private Session insertOverwriteSession()
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty("hive", "insert_existing_partitions_behavior", "OVERWRITE")
+                .build();
+    }
+
     private void assertMetastoreInvocations(@Language("SQL") String query, Multiset<MetastoreMethod> expectedInvocations)
     {
-        assertMetastoreInvocationsForQuery(getDistributedQueryRunner(), getSession(), query, expectedInvocations);
+        assertMetastoreInvocations(getSession(), query, expectedInvocations);
+    }
+
+    private void assertMetastoreInvocations(Session session, @Language("SQL") String query, Multiset<MetastoreMethod> expectedInvocations)
+    {
+        assertMetastoreInvocationsForQuery(getDistributedQueryRunner(), session, query, expectedInvocations);
     }
 }

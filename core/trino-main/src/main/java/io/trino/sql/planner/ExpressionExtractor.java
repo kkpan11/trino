@@ -60,9 +60,7 @@ public final class ExpressionExtractor
         plan.accept(new Visitor(expressionConsumer, true, noLookup()), null);
     }
 
-    private ExpressionExtractor()
-    {
-    }
+    private ExpressionExtractor() {}
 
     private static class Visitor
             extends SimplePlanVisitor<Void>
@@ -112,7 +110,7 @@ public final class ExpressionExtractor
         @Override
         public Void visitProject(ProjectNode node, Void context)
         {
-            node.getAssignments().getExpressions().forEach(consumer);
+            node.getAssignments().expressions().forEach(consumer);
             return super.visitProject(node, context);
         }
 

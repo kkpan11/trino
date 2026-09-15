@@ -16,19 +16,17 @@ package io.trino.testing;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.errorprone.annotations.DoNotCall;
-import io.trino.client.JsonCodec;
+import io.airlift.json.JsonCodec;
+import io.airlift.slice.Slice;
 import io.trino.spi.Plugin;
-import io.trino.spi.QueryId;
-import io.trino.spi.protocol.SpooledLocation;
-import io.trino.spi.protocol.SpooledLocation.CoordinatorLocation;
-import io.trino.spi.protocol.SpooledLocation.DirectLocation;
-import io.trino.spi.protocol.SpooledSegmentHandle;
-import io.trino.spi.protocol.SpoolingContext;
-import io.trino.spi.protocol.SpoolingManager;
-import io.trino.spi.protocol.SpoolingManagerContext;
-import io.trino.spi.protocol.SpoolingManagerFactory;
+import io.trino.spi.spool.SpooledLocation;
+import io.trino.spi.spool.SpooledLocation.DirectLocation;
+import io.trino.spi.spool.SpooledSegmentHandle;
+import io.trino.spi.spool.SpoolingContext;
+import io.trino.spi.spool.SpoolingManager;
+import io.trino.spi.spool.SpoolingManagerContext;
+import io.trino.spi.spool.SpoolingManagerFactory;
 import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
@@ -37,7 +35,6 @@ import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -47,9 +44,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.io.MoreFiles.deleteRecursively;
+import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.airlift.slice.Slices.utf8Slice;
-import static io.trino.client.JsonCodec.jsonCodec;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
+import static java.time.temporal.ChronoUnit.MINUTES;
 import static java.util.Objects.requireNonNull;
 
 public class LocalSpoolingManager
@@ -72,10 +70,7 @@ public class LocalSpoolingManager
     @Override
     public SpooledSegmentHandle create(SpoolingContext context)
     {
-        return new LocalSpooledSegmentHandle(
-                context.encoding(),
-                context.queryId(),
-                rootPath.resolve(context.queryId().getId() + "-" + segmentId.incrementAndGet() + "-" + UUID.randomUUID() + "." + context.encoding()));
+        return new LocalSpooledSegmentHandle(context.encoding(), rootPath.resolve(segmentId.incrementAndGet() + "-" + UUID.randomUUID() + "." + context.encoding()));
     }
 
     @Override
@@ -98,17 +93,9 @@ public class LocalSpoolingManager
     }
 
     @Override
-    public SpooledSegmentHandle handle(SpooledLocation location)
+    public SpooledSegmentHandle handle(Slice identifier, Map<String, List<String>> headers)
     {
-        if (!(location instanceof CoordinatorLocation coordinatorLocation)) {
-            throw new IllegalArgumentException("Cannot convert direct location to handle");
-        }
-        try {
-            return HANDLE_CODEC.fromJson(coordinatorLocation.identifier().toStringUtf8());
-        }
-        catch (JsonProcessingException e) {
-            throw new UncheckedIOException(e);
-        }
+        return HANDLE_CODEC.fromJson(identifier.toStringUtf8());
     }
 
     @Override
@@ -134,6 +121,12 @@ public class LocalSpoolingManager
     public Optional<DirectLocation> directLocation(SpooledSegmentHandle handle)
     {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean isRecoverableException(IOException exception)
+    {
+        return false;
     }
 
     @PreDestroy
@@ -177,13 +170,11 @@ public class LocalSpoolingManager
             implements SpooledSegmentHandle
     {
         private final String encoding;
-        private final QueryId queryId;
         private final Path path;
 
-        public LocalSpooledSegmentHandle(String encoding, QueryId queryId, Path path)
+        public LocalSpooledSegmentHandle(String encoding, Path path)
         {
             this.encoding = requireNonNull(encoding, "encoding is null");
-            this.queryId = requireNonNull(queryId, "queryId is null");
             this.path = requireNonNull(path, "path is null");
         }
 
@@ -191,14 +182,7 @@ public class LocalSpoolingManager
         @Override
         public Instant expirationTime()
         {
-            return Instant.MAX;
-        }
-
-        @JsonProperty
-        @Override
-        public QueryId queryId()
-        {
-            return queryId;
+            return Instant.now().plus(5, MINUTES);
         }
 
         @JsonIgnore
@@ -232,7 +216,6 @@ public class LocalSpoolingManager
         {
             return toStringHelper(this)
                     .add("encoding", encoding)
-                    .add("queryId", queryId)
                     .add("path", path)
                     .toString();
         }
@@ -241,10 +224,9 @@ public class LocalSpoolingManager
         @JsonCreator
         public static LocalSpooledSegmentHandle create(
                 @JsonProperty("encoding") String encoding,
-                @JsonProperty("queryId") String queryId,
                 @JsonProperty("path") String path)
         {
-            return new LocalSpooledSegmentHandle(encoding, QueryId.valueOf(queryId), Paths.get(path));
+            return new LocalSpooledSegmentHandle(encoding, Path.of(path));
         }
     }
 }

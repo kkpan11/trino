@@ -52,7 +52,8 @@ public class TestFormatBasedRemoteQueryModifier
         String modifiedQuery = modifier.apply(connectorSession, "SELECT * from USERS");
 
         assertThat(modifiedQuery)
-                .isEqualTo("SELECT * from USERS /*%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s*/",
+                .isEqualTo(
+                        "SELECT * from USERS /*%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s*/",
                         connectorSession.getQueryId(),
                         connectorSession.getQueryId(),
                         connectorSession.getQueryId(),
@@ -87,10 +88,12 @@ public class TestFormatBasedRemoteQueryModifier
     {
         testForSQLInjectionsBySource("*/; DROP TABLE TABLE_A; /*");
         testForSQLInjectionsBySource("Prefix */; DROP TABLE TABLE_A; /*");
-        testForSQLInjectionsBySource("""
+        testForSQLInjectionsBySource(
+                """
 
 
-                                     Multiline */; DROP TABLE TABLE_A; /*""");
+                Multiline */; DROP TABLE TABLE_A; /*\
+                """);
     }
 
     @Test

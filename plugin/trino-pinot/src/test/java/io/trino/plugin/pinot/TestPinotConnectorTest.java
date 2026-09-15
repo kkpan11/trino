@@ -59,6 +59,8 @@ public class TestPinotConnectorTest
                  SUPPORTS_CREATE_VIEW,
                  SUPPORTS_DELETE,
                  SUPPORTS_INSERT,
+                 SUPPORTS_LIMIT_PUSHDOWN,
+                 SUPPORTS_MAP_TYPE,
                  SUPPORTS_MERGE,
                  SUPPORTS_RENAME_COLUMN,
                  SUPPORTS_RENAME_TABLE,
@@ -105,18 +107,18 @@ public class TestPinotConnectorTest
     protected @Language("SQL") String getOrdersTableWithColumns()
     {
         return """
-                VALUES
-                    ('orders', 'orderkey'),
-                    ('orders', 'custkey'),
-                    ('orders', 'orderstatus'),
-                    ('orders', 'totalprice'),
-                    ('orders', 'orderdate'),
-                    ('orders', 'updated_at_seconds'),
-                    ('orders', 'orderpriority'),
-                    ('orders', 'clerk'),
-                    ('orders', 'shippriority'),
-                    ('orders', 'comment')
-                """;
+               VALUES
+                   ('orders', 'orderkey'),
+                   ('orders', 'custkey'),
+                   ('orders', 'orderstatus'),
+                   ('orders', 'totalprice'),
+                   ('orders', 'orderdate'),
+                   ('orders', 'updated_at_seconds'),
+                   ('orders', 'orderpriority'),
+                   ('orders', 'clerk'),
+                   ('orders', 'shippriority'),
+                   ('orders', 'comment')
+               """;
     }
 
     @Test
@@ -124,7 +126,8 @@ public class TestPinotConnectorTest
     public void testShowCreateTable()
     {
         assertThat(computeActual("SHOW CREATE TABLE orders").getOnlyValue())
-                .isEqualTo("""
+                .isEqualTo(
+                        """
                         CREATE TABLE pinot.default.orders (
                            clerk varchar,
                            comment varchar,
@@ -145,6 +148,8 @@ public class TestPinotConnectorTest
     {
         assertExplain(
                 "EXPLAIN SELECT name FROM nation WHERE nationkey = 42",
-                "columnName=nationkey", "dataType=bigint", "\\s\\{\\[42\\]\\}");
+                "columnName=nationkey",
+                "dataType=bigint",
+                "\\s\\{\\[42\\]\\}");
     }
 }

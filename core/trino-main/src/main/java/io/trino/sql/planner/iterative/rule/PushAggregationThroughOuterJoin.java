@@ -43,10 +43,10 @@ import io.trino.sql.planner.plan.ValuesNode;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.SystemSessionProperties.isPushAggregationThroughOuterJoin;
@@ -121,10 +121,13 @@ public class PushAggregationThroughOuterJoin
     @Override
     public Result apply(AggregationNode aggregation, Captures captures, Context context)
     {
-        // This rule doesn't deal with AggregationNode's hash symbol. Hash symbols are not yet present at this stage of optimization.
-        checkArgument(aggregation.getHashSymbol().isEmpty(), "unexpected hash symbol");
-
         JoinNode join = captures.get(JOIN);
+
+        // Without grouping keys, aggregation over an empty inner source produces a row. For example,
+        // count(*) would return 0 instead of counting the null-extended row produced by the outer join.
+        if (join.getCriteria().isEmpty()) {
+            return Result.empty();
+        }
 
         if (join.getFilter().isPresent()
                 || !(join.getType() == JoinType.LEFT || join.getType() == JoinType.RIGHT)
@@ -156,8 +159,6 @@ public class PushAggregationThroughOuterJoin
                     // there are no duplicate rows possible since outer rows were guaranteed to be distinct
                     false,
                     join.getFilter(),
-                    join.getLeftHashSymbol(),
-                    join.getRightHashSymbol(),
                     join.getDistributionType(),
                     join.isSpillable(),
                     join.getDynamicFilters(),
@@ -175,8 +176,6 @@ public class PushAggregationThroughOuterJoin
                     // there are no duplicate rows possible since outer rows were guaranteed to be distinct
                     false,
                     join.getFilter(),
-                    join.getLeftHashSymbol(),
-                    join.getRightHashSymbol(),
                     join.getDistributionType(),
                     join.isSpillable(),
                     join.getDynamicFilters(),
@@ -251,8 +250,6 @@ public class PushAggregationThroughOuterJoin
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
                 ImmutableMap.of(),
                 Optional.empty());
 
@@ -295,10 +292,10 @@ public class PushAggregationThroughOuterJoin
         ImmutableMap.Builder<Symbol, Symbol> aggregationsSymbolMappingBuilder = ImmutableMap.builder();
         ImmutableMap.Builder<Symbol, AggregationNode.Aggregation> aggregationsOverNullBuilder = ImmutableMap.builder();
         SymbolMapper mapper = symbolMapper(sourcesSymbolMappingBuilder.buildOrThrow());
-        for (Map.Entry<Symbol, AggregationNode.Aggregation> entry : referenceAggregation.getAggregations().entrySet()) {
+        for (Entry<Symbol, AggregationNode.Aggregation> entry : referenceAggregation.getAggregations().entrySet()) {
             Symbol aggregationSymbol = entry.getKey();
             Aggregation overNullAggregation = mapper.map(entry.getValue());
-            Symbol overNullSymbol = symbolAllocator.newSymbol(overNullAggregation.getResolvedFunction().signature().getName().getFunctionName(), aggregationSymbol.type());
+            Symbol overNullSymbol = symbolAllocator.newSymbol(overNullAggregation.getResolvedFunction().signature().getName().functionName(), aggregationSymbol.type());
             aggregationsOverNullBuilder.put(overNullSymbol, overNullAggregation);
             aggregationsSymbolMappingBuilder.put(aggregationSymbol, overNullSymbol);
         }

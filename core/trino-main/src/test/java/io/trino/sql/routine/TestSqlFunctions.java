@@ -13,10 +13,12 @@
  */
 package io.trino.sql.routine;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.hash.Hashing;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
-import io.airlift.json.ObjectMapperProvider;
+import io.airlift.json.JsonMapperProvider;
 import io.airlift.slice.Slice;
 import io.trino.Session;
 import io.trino.block.BlockJsonSerde;
@@ -24,32 +26,34 @@ import io.trino.execution.warnings.WarningCollector;
 import io.trino.operator.scalar.SpecializedSqlScalarFunction;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.function.FunctionId;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.ScalarFunctionImplementation;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.parser.SqlParser;
+import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.SymbolKeyDeserializer;
 import io.trino.sql.routine.ir.IrRoutine;
 import io.trino.sql.tree.FunctionSpecification;
 import io.trino.transaction.TransactionManager;
+import io.trino.type.TypeDescriptorKeyDeserializer;
 import io.trino.type.TypeDeserializer;
-import io.trino.type.TypeSignatureKeyDeserializer;
 import org.assertj.core.api.ThrowingConsumer;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.lang.invoke.MethodHandle;
-import java.util.Map;
+import java.time.temporal.ChronoField;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.metadata.FunctionManager.createTestingFunctionManager;
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BOXED_NULLABLE;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
@@ -64,6 +68,8 @@ import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
 import static io.trino.transaction.InMemoryTransactionManager.createTestTransactionManager;
+import static io.trino.type.CharVarcharCoercion.SQL_STANDARD;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static io.trino.type.UnknownType.UNKNOWN;
 import static java.lang.Math.floor;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -79,21 +85,24 @@ class TestSqlFunctions
     private static final JsonCodec<IrRoutine> IR_ROUTINE_CODEC;
 
     static {
-        ObjectMapperProvider provider = new ObjectMapperProvider();
-        provider.setJsonSerializers(Map.of(
-                Block.class, new BlockJsonSerde.Serializer(PLANNER_CONTEXT.getBlockEncodingSerde())));
-        provider.setJsonDeserializers(Map.of(
-                Type.class, new TypeDeserializer(PLANNER_CONTEXT.getTypeManager()),
-                Block.class, new BlockJsonSerde.Deserializer(PLANNER_CONTEXT.getBlockEncodingSerde())));
-        provider.setKeyDeserializers(Map.of(
-                TypeSignature.class, new TypeSignatureKeyDeserializer()));
-        IR_ROUTINE_CODEC = new JsonCodecFactory(provider).jsonCodec(IrRoutine.class);
+        JsonMapper mapper = new JsonMapperProvider()
+                .withKeyDeserializers(ImmutableMap.of(
+                        TypeDescriptor.class, new TypeDescriptorKeyDeserializer(),
+                        Symbol.class, new SymbolKeyDeserializer(TESTING_TYPE_MANAGER)))
+                .withJsonDeserializers(ImmutableMap.of(
+                        Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER),
+                        Block.class, new BlockJsonSerde.Deserializer(TESTING_BLOCK_ENCODING_SERDE)))
+                .withJsonSerializers(ImmutableMap.of(
+                        Block.class, new BlockJsonSerde.Serializer(TESTING_BLOCK_ENCODING_SERDE)))
+                .get();
+        IR_ROUTINE_CODEC = new JsonCodecFactory(mapper).jsonCodec(IrRoutine.class);
     }
 
     @Test
     void testConstantReturn()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION answer()
                 RETURNS BIGINT
                 RETURN 42
@@ -104,7 +113,8 @@ class TestSqlFunctions
     @Test
     void testSimpleReturn()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION hello(s VARCHAR)
                 RETURNS VARCHAR
                 RETURN 'Hello, ' || s || '!'
@@ -120,7 +130,8 @@ class TestSqlFunctions
     @Test
     void testSimpleExpression()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test(a bigint)
                 RETURNS bigint
                 BEGIN
@@ -139,7 +150,8 @@ class TestSqlFunctions
     @Test
     void testSimpleCase()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION simple_case(a bigint)
                 RETURNS varchar
                 BEGIN
@@ -165,7 +177,8 @@ class TestSqlFunctions
     @Test
     void testSingleIf()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test_if(a bigint)
                   RETURNS varchar
                   BEGIN
@@ -174,7 +187,7 @@ class TestSqlFunctions
                     END IF;
                     RETURN 'other';
                   END
-                  """;
+                """;
         assertFunction(sql, handle -> {
             assertThat(handle.invoke(0L)).isEqualTo(utf8Slice("zero"));
             assertThat(handle.invoke(1L)).isEqualTo(utf8Slice("other"));
@@ -185,7 +198,8 @@ class TestSqlFunctions
     @Test
     void testSingleBranchIfElse()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION if_else(a bigint)
                   RETURNS varchar
                   BEGIN
@@ -196,7 +210,7 @@ class TestSqlFunctions
                     END IF;
                     RETURN NULL;
                   END
-                  """;
+                """;
         assertFunction(sql, handle -> {
             assertThat(handle.invoke(0L)).isEqualTo(utf8Slice("zero"));
             assertThat(handle.invoke(1L)).isEqualTo(utf8Slice("other"));
@@ -207,7 +221,8 @@ class TestSqlFunctions
     @Test
     void testMultiBranchIfElse()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION multi_if_else(a bigint)
                   RETURNS varchar
                   BEGIN
@@ -222,7 +237,7 @@ class TestSqlFunctions
                     END IF;
                     RETURN NULL;
                   END
-                  """;
+                """;
         assertFunction(sql, handle -> {
             assertThat(handle.invoke(0L)).isEqualTo(utf8Slice("zero"));
             assertThat(handle.invoke(1L)).isEqualTo(utf8Slice("one"));
@@ -234,7 +249,8 @@ class TestSqlFunctions
     @Test
     void testSearchCase()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION search_case(a bigint, b bigint)
                 RETURNS varchar
                 BEGIN
@@ -266,7 +282,8 @@ class TestSqlFunctions
     @Test
     void testFibonacciWhileLoop()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION fib(n bigint)
                 RETURNS bigint
                 BEGIN
@@ -299,7 +316,8 @@ class TestSqlFunctions
     @Test
     void testBreakContinue()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test()
                 RETURNS bigint
                 BEGIN
@@ -321,9 +339,39 @@ class TestSqlFunctions
     }
 
     @Test
+    void testWhileWithIfElseifSettingSameVariable()
+    {
+        // Exercise a routine variable with a Block-valued default (ARRAY[]) so that a JSON
+        // round-trip of the IR produces non-equal IrVariable records for the same field —
+        // SqlRoutineCompiler must dedupe by field number, not by record identity.
+        @Language("SQL") String sql =
+                """
+                FUNCTION test_generate_series(start_value bigint, end_value bigint, step bigint)
+                RETURNS bigint
+                BEGIN
+                  DECLARE result array(bigint) DEFAULT array[];
+                  DECLARE current bigint DEFAULT start_value;
+                  WHILE current <= end_value DO
+                    IF step > 0 THEN
+                      SET result = concat(result, array[current]);
+                      SET current = current + step;
+                    ELSEIF step < 0 THEN
+                      SET current = current - step;
+                    ELSE
+                      RETURN 0;
+                    END IF;
+                  END WHILE;
+                  RETURN cardinality(result);
+                END
+                """;
+        assertFunction(sql, handle -> assertThat(handle.invoke(1L, 3L, 1L)).isEqualTo(3L));
+    }
+
+    @Test
     void testRepeat()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test_repeat(a bigint)
                 RETURNS bigint
                 BEGIN
@@ -342,7 +390,8 @@ class TestSqlFunctions
     @Test
     void testRepeatContinue()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test_repeat_continue()
                 RETURNS bigint
                 BEGIN
@@ -364,7 +413,8 @@ class TestSqlFunctions
     @Test
     void testLoop()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test()
                 RETURNS bigint
                 BEGIN
@@ -388,7 +438,8 @@ class TestSqlFunctions
     @Test
     void testReuseLabels()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test()
                 RETURNS int
                 BEGIN
@@ -410,7 +461,8 @@ class TestSqlFunctions
     @Test
     void testSpecialForm()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test(a varchar)
                 RETURNS varchar
                 BEGIN
@@ -424,7 +476,8 @@ class TestSqlFunctions
     @Test
     void testReuseVariables()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test()
                 RETURNS bigint
                 BEGIN
@@ -446,7 +499,8 @@ class TestSqlFunctions
     @Test
     void testAssignParameter()
     {
-        @Language("SQL") String sql = """
+        @Language("SQL") String sql =
+                """
                 FUNCTION test(x int)
                 RETURNS int
                 BEGIN
@@ -518,7 +572,12 @@ class TestSqlFunctions
     @Test
     void testSession()
     {
-        testSingleExpression(UNKNOWN, null, DOUBLE, floor(SESSION.getStart().toEpochMilli() / 1000.0), "floor(to_unixtime(localtimestamp))");
+        // `localtimestamp` returns session start (local) time rounded to milliseconds while Instant.toEpochMilli truncates.
+        var sessionStartRoundedToMillis = SESSION.getStart().toEpochMilli();
+        if (SESSION.getStart().getLong(ChronoField.MICRO_OF_SECOND) % 1000 >= 500) {
+            sessionStartRoundedToMillis++;
+        }
+        testSingleExpression(UNKNOWN, null, DOUBLE, floor(sessionStartRoundedToMillis / 1000.0), "floor(to_unixtime(localtimestamp))");
         testSingleExpression(UNKNOWN, null, VARCHAR, SESSION.getUser(), "current_user");
     }
 
@@ -543,8 +602,8 @@ class TestSqlFunctions
     {
         @Language("SQL") String sql = "FUNCTION %s(p %s)\nRETURNS %s\n%s\nRETURN %s".formatted(
                 "test" + nextId.incrementAndGet(),
-                inputType.getTypeSignature(),
-                outputType.getTypeSignature(),
+                inputType.getTypeDescriptor(),
+                outputType.getTypeDescriptor(),
                 deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC",
                 expression);
 
@@ -603,7 +662,7 @@ class TestSqlFunctions
         SqlRoutineAnalysis analysis = analyzer.analyze(session, new AllowAllAccessControl(), function);
 
         SqlRoutinePlanner planner = new SqlRoutinePlanner(PLANNER_CONTEXT);
-        IrRoutine routine = planner.planSqlFunction(session, function, analysis);
+        IrRoutine routine = planner.planSqlFunction(session, analysis);
 
         if (serialize) {
             // Simulate worker communication
@@ -611,10 +670,10 @@ class TestSqlFunctions
         }
 
         // verify routine hash does not fail
-        SqlRoutineHash.hash(routine, Hashing.sha256().newHasher(), new TestingBlockEncodingSerde());
+        SqlRoutineHash.hash(routine, Hashing.sha256().newHasher(), TESTING_BLOCK_ENCODING_SERDE);
 
-        SqlRoutineCompiler compiler = new SqlRoutineCompiler(createTestingFunctionManager());
-        SpecializedSqlScalarFunction sqlScalarFunction = compiler.compile(routine);
+        SqlRoutineCompiler compiler = new SqlRoutineCompiler(createTestingFunctionManager(), PLANNER_CONTEXT.getMetadata(), PLANNER_CONTEXT.getTypeManager());
+        SpecializedSqlScalarFunction sqlScalarFunction = compiler.compile(SQL_STANDARD, routine);
 
         InvocationConvention invocationConvention = new InvocationConvention(
                 metadata.getFunctionNullability().getArgumentNullable().stream()

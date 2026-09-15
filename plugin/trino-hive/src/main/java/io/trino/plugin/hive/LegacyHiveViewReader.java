@@ -27,7 +27,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.metastore.Table.TABLE_COMMENT;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
 import static io.trino.plugin.hive.HiveToTrinoTranslator.translateHiveViewToTrino;
-import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeSignature;
+import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeDescriptor;
 
 public class LegacyHiveViewReader
         implements ViewReaderUtil.ViewReader
@@ -40,7 +40,7 @@ public class LegacyHiveViewReader
     }
 
     @Override
-    public ConnectorViewDefinition decodeViewData(String viewData, Table table, CatalogName catalogName)
+    public ConnectorViewDefinition decodeViewData(Optional<String> viewData, Table table, CatalogName catalogName)
     {
         String viewText = table.getViewExpandedText()
                 .orElseThrow(() -> new TrinoException(HIVE_INVALID_METADATA, "No view expanded text: " + table.getSchemaTableName()));
@@ -49,7 +49,7 @@ public class LegacyHiveViewReader
                 Optional.of(catalogName.toString()),
                 Optional.ofNullable(table.getDatabaseName()),
                 Stream.concat(table.getDataColumns().stream(), table.getPartitionColumns().stream())
-                        .map(column -> new ConnectorViewDefinition.ViewColumn(column.getName(), TypeId.of(getTypeSignature(column.getType()).toString()), column.getComment()))
+                        .map(column -> new ConnectorViewDefinition.ViewColumn(column.getName(), TypeId.of(getTypeDescriptor(column.getType()).toString()), column.getComment()))
                         .collect(toImmutableList()),
                 Optional.ofNullable(table.getParameters().get(TABLE_COMMENT)),
                 Optional.empty(), // will be filled in later by HiveMetadata

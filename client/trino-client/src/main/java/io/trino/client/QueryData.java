@@ -13,12 +13,31 @@
  */
 package io.trino.client;
 
-import jakarta.annotation.Nullable;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 
-import java.util.List;
-
+/**
+ * Used for representing both raw JSON values and spooled metadata.
+ */
 public interface QueryData
 {
-    @Nullable
-    Iterable<List<Object>> getData();
+    QueryData NULL = new QueryData()
+    {
+        @Override
+        public boolean isNull()
+        {
+            return true;
+        }
+
+        @Override
+        public long getRowsCount()
+        {
+            return 0;
+        }
+    };
+
+    @JsonIgnore
+    boolean isNull();
+
+    @JsonIgnore
+    long getRowsCount();
 }

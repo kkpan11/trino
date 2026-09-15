@@ -52,7 +52,7 @@ public class RemoveRedundantDistinctAggregation
         implements Rule<AggregationNode>
 {
     private static final Pattern<AggregationNode> PATTERN = aggregation()
-            .matching(RemoveRedundantDistinctAggregation::isDistinctOnlyAggregation);
+            .matching(AggregationNode::producesDistinctRows);
 
     @Override
     public Pattern<AggregationNode> getPattern()
@@ -72,26 +72,18 @@ public class RemoveRedundantDistinctAggregation
         }
     }
 
-    private static boolean isDistinctOnlyAggregation(AggregationNode node)
-    {
-        return node.producesDistinctRows() && node.getGroupingSetCount() == 1;
-    }
-
     private static boolean isDistinctOverGroupingKeys(PlanNode node, Lookup lookup, Set<Symbol> parentSymbols)
     {
         return switch (node) {
-            case AggregationNode aggregationNode ->
-                    aggregationNode.getGroupingSets().getGroupingSetCount() == 1 && parentSymbols.containsAll(aggregationNode.getGroupingSets().getGroupingKeys());
+            case AggregationNode aggregationNode -> aggregationNode.getGroupingSets().getGroupingSetCount() == 1 && parentSymbols.containsAll(aggregationNode.getGroupingSets().getGroupingKeys());
 
             // Project nodes introduce new symbols for computed expressions, and therefore end up preserving distinctness
             // between the distinct aggregation and the child aggregation nodes so long as all child aggregation keys
             // remain present (without transformation by the project) in the distinct aggregation grouping keys
-            case ProjectNode projectNode ->
-                    isDistinctOverGroupingKeys(lookup.resolve(projectNode.getSource()), lookup, translateProjectReferences(projectNode, parentSymbols));
+            case ProjectNode projectNode -> isDistinctOverGroupingKeys(lookup.resolve(projectNode.getSource()), lookup, translateProjectReferences(projectNode, parentSymbols));
 
             // Filter nodes end up preserving distinctness over the input source
-            case FilterNode filterNode ->
-                    isDistinctOverGroupingKeys(lookup.resolve(filterNode.getSource()), lookup, parentSymbols);
+            case FilterNode filterNode -> isDistinctOverGroupingKeys(lookup.resolve(filterNode.getSource()), lookup, parentSymbols);
             case null, default -> false;
         };
     }

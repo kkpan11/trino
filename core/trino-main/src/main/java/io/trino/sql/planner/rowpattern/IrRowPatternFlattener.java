@@ -103,7 +103,7 @@ public final class IrRowPatternFlattener
          * Note: The logic of removing redundant empty branches could be extended to remove other duplicate sub-patterns.
          *
          * @return the flattened IrAlternation containing at most one empty branch, or IrEmpty in case when
-         * the alternation is reduced to a single empty branch
+         *         the alternation is reduced to a single empty branch
          */
         @Override
         protected IrRowPattern visitIrAlternation(IrAlternation node, Boolean inExclusion)
@@ -115,8 +115,8 @@ public final class IrRowPatternFlattener
             // flatten alternation
             children = children.stream()
                     .flatMap(child -> {
-                        if (child instanceof IrAlternation) {
-                            return ((IrAlternation) child).getPatterns().stream();
+                        if (child instanceof IrAlternation irAlternation) {
+                            return irAlternation.getPatterns().stream();
                         }
                         return Stream.of(child);
                     })
@@ -156,8 +156,8 @@ public final class IrRowPatternFlattener
          * (() ()) () -> ()
          *
          * @return the flattened IrConcatenation containing no empty branches, or a sub-pattern in case when
-         * the concatenation is reduced to a single branch, or IrEmpty in case when all sub-patterns
-         * are empty
+         *         the concatenation is reduced to a single branch, or IrEmpty in case when all sub-patterns
+         *         are empty
          */
         @Override
         protected IrRowPattern visitIrConcatenation(IrConcatenation node, Boolean inExclusion)
@@ -169,8 +169,8 @@ public final class IrRowPatternFlattener
             // flatten concatenation and remove all empty children
             children = children.stream()
                     .flatMap(child -> {
-                        if (child instanceof IrConcatenation) {
-                            return ((IrConcatenation) child).getPatterns().stream();
+                        if (child instanceof IrConcatenation irConcatenation) {
+                            return irConcatenation.getPatterns().stream();
                         }
                         return Stream.of(child);
                     })
@@ -194,8 +194,8 @@ public final class IrRowPatternFlattener
          * PERMUTE((), ()) -> ()
          *
          * @return the IrPermutation containing no empty branches, or a sub-pattern in case when
-         * the permutation is reduced to a single branch, or IrEmpty in case when all sub-patterns
-         * are empty
+         *         the permutation is reduced to a single branch, or IrEmpty in case when all sub-patterns
+         *         are empty
          */
         @Override
         protected IrRowPattern visitIrPermutation(IrPermutation node, Boolean inExclusion)

@@ -13,12 +13,11 @@
  */
 package io.trino.spi.connector;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.trino.spi.HostAddress;
 import io.trino.spi.SplitWeight;
 
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 
 public interface ConnectorSplit
 {
@@ -42,10 +41,15 @@ public interface ConnectorSplit
         return List.of();
     }
 
-    @JsonIgnore // ConnectorSplit is json-serializable, but we don't want to repeat information in that field
-    default Map<String, String> getSplitInfo()
+    /**
+     * Returns an optional affinity key so splits reading related content are routed to the
+     * same worker(s) across queries. When empty, scheduling falls back to {@link #getAddresses()}.
+     * <p>
+     * Only remotely accessible splits may supply an affinity key (see {@link #isRemotelyAccessible()}).
+     */
+    default Optional<String> getAffinityKey()
     {
-        return Map.of();
+        return Optional.empty();
     }
 
     default SplitWeight getSplitWeight()

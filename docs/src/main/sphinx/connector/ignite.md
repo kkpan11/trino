@@ -15,18 +15,19 @@ database from Trino.
 
 ## Requirements
 
-To connect to a Ignite server, you need:
+To connect to an Ignite server, you need:
 
 - Ignite version 2.9.0 or latter
 - Network access from the Trino coordinator and workers to the Ignite
   server. Port 10800 is the default port.
-- Specify `--add-opens=java.base/java.nio=ALL-UNNAMED` in the `jvm.config` when starting the Trino server.
+- Specify `--add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED`
+  in the `jvm.config` when starting the Trino server.
 
 ## Configuration
 
 The Ignite connector expose `public` schema by default.
 
-The connector can query a Ignite instance. Create a catalog properties file
+The connector can query an Ignite instance. Create a catalog properties file
 that specifies the Ignite connector by setting the `connector.name` to
 `ignite`.
 
@@ -75,9 +76,6 @@ configured connector to create a catalog named `sales`.
 ```{include} jdbc-case-insensitive-matching.fragment
 ```
 
-```{include} non-transactional-insert.fragment
-```
-
 ## Table properties
 
 Table property usage example:
@@ -98,7 +96,7 @@ WITH (
 The following are supported Ignite table properties from [https://ignite.apache.org/docs/latest/sql-reference/ddl](https://ignite.apache.org/docs/latest/sql-reference/ddl)
 
 :::{list-table}
-:widths: 30, 10, 100
+:widths: 30, 10, 60
 :header-rows: 1
 
 * - Property name
@@ -106,7 +104,7 @@ The following are supported Ignite table properties from [https://ignite.apache.
   - Description
 * - `primary_key`
   - No
-  - The primary key of the table, can chose multi columns as the table primary
+  - The primary key of the table, can choose multi columns as the table primary
     key. Table at least contains one column not in primary key.
 :::
 
@@ -173,20 +171,33 @@ Ignite.  In addition to the {ref}`globally available
 <sql-globally-available>` and {ref}`read operation <sql-read-operations>`
 statements, the connector supports the following features:
 
-- {doc}`/sql/insert`
-- {doc}`/sql/update`
-- {doc}`/sql/delete`
-- {doc}`/sql/create-table`
-- {doc}`/sql/create-table-as`
-- {doc}`/sql/drop-table`
-- {doc}`/sql/alter-table`
+- [](/sql/insert), see also [](ignite-insert)
+- [](/sql/update), see also [](ignite-update)
+- [](/sql/delete)
+- [](/sql/merge), see also [](ignite-merge)
+- [](/sql/create-table)
+- [](/sql/create-table-as)
+- [](/sql/drop-table)
+- [](/sql/alter-table), see also [](ignite-alter-table)
+- [](ignite-procedures)
 
+(ignite-insert)=
+```{include} non-transactional-insert.fragment
+```
+
+(ignite-update)=
 ```{include} sql-update-limitation.fragment
 ```
 
+(ignite-merge)=
+```{include} non-transactional-merge.fragment
+```
+
+(ignite-alter-table)=
 ```{include} alter-table-limitation.fragment
 ```
 
+(ignite-procedures)=
 ### Procedures
 
 ```{include} jdbc-procedures-flush.fragment

@@ -20,8 +20,8 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.StandardTypes;
-import io.trino.spi.type.TypeSignature;
-import io.trino.spi.type.TypeSignatureParameter;
+import io.trino.spi.type.TypeDescriptor;
+import io.trino.spi.type.TypeParameter;
 import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -62,12 +62,6 @@ public class BenchmarkDictionaryBlock
     public long getSizeInBytes(BenchmarkData data)
     {
         return data.getDictionaryBlock().getSizeInBytes();
-    }
-
-    @Benchmark
-    public long getPositionsSizeInBytes(BenchmarkData data)
-    {
-        return data.getAllPositionsDictionaryBlock().getPositionsSizeInBytes(data.getSelectedPositionsMask(), data.getSelectedPositionCount());
     }
 
     @Benchmark
@@ -121,14 +115,9 @@ public class BenchmarkDictionaryBlock
             }
             Block mapBlock;
             switch (valueType) {
-                case "varchar":
-                    mapBlock = createVarcharMapBlock(POSITIONS);
-                    break;
-                case "integer":
-                    mapBlock = createIntMapBlock(POSITIONS);
-                    break;
-                default:
-                    throw new IllegalArgumentException("Unrecognized value type: " + valueType);
+                case "varchar" -> mapBlock = createVarcharMapBlock(POSITIONS);
+                case "integer" -> mapBlock = createIntMapBlock(POSITIONS);
+                default -> throw new IllegalArgumentException("Unrecognized value type: " + valueType);
             }
             dictionaryBlock = (DictionaryBlock) DictionaryBlock.create(positionsIds.length, mapBlock, positionsIds);
             int[] allPositions = IntStream.range(0, POSITIONS).toArray();
@@ -138,7 +127,7 @@ public class BenchmarkDictionaryBlock
 
         private static Block createVarcharMapBlock(int positionCount)
         {
-            MapType mapType = (MapType) TESTING_TYPE_MANAGER.getType(new TypeSignature(StandardTypes.MAP, TypeSignatureParameter.typeParameter(VARCHAR.getTypeSignature()), TypeSignatureParameter.typeParameter(VARCHAR.getTypeSignature())));
+            MapType mapType = (MapType) TESTING_TYPE_MANAGER.getType(new TypeDescriptor(StandardTypes.MAP, TypeParameter.typeParameter(VARCHAR.getTypeDescriptor()), TypeParameter.typeParameter(VARCHAR.getTypeDescriptor())));
             Block keyBlock = createVarcharDictionaryBlock(generateList("key", positionCount));
             Block valueBlock = createVarcharDictionaryBlock(generateList("value", positionCount));
             int[] offsets = new int[positionCount + 1];
@@ -161,7 +150,7 @@ public class BenchmarkDictionaryBlock
 
         private static Block createIntMapBlock(int positionCount)
         {
-            MapType mapType = (MapType) TESTING_TYPE_MANAGER.getType(new TypeSignature(StandardTypes.MAP, TypeSignatureParameter.typeParameter(INTEGER.getTypeSignature()), TypeSignatureParameter.typeParameter(INTEGER.getTypeSignature())));
+            MapType mapType = (MapType) TESTING_TYPE_MANAGER.getType(new TypeDescriptor(StandardTypes.MAP, TypeParameter.typeParameter(INTEGER.getTypeDescriptor()), TypeParameter.typeParameter(INTEGER.getTypeDescriptor())));
             Block keyBlock = createIntDictionaryBlock(positionCount);
             Block valueBlock = createIntDictionaryBlock(positionCount);
             int[] offsets = new int[positionCount + 1];
@@ -255,14 +244,6 @@ public class BenchmarkDictionaryBlock
     }
 
     @Test
-    public void testGetPositionsSizeInBytes()
-    {
-        BenchmarkData data = new BenchmarkData();
-        data.setup();
-        getPositionsSizeInBytes(data);
-    }
-
-    @Test
     public void testGetPositionsThenGetSizeInBytes()
     {
         BenchmarkData data = new BenchmarkData();
@@ -286,7 +267,7 @@ public class BenchmarkDictionaryBlock
         copyPositionsCompactDictionary(data);
     }
 
-    public static void main(String[] args)
+    static void main()
             throws Exception
     {
         // assure the benchmarks are valid before running

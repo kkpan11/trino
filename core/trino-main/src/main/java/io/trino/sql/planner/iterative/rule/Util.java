@@ -45,9 +45,7 @@ final class Util
     private static final CatalogSchemaFunctionName ROW_NUMBER_NAME = builtinFunctionName("row_number");
     private static final CatalogSchemaFunctionName RANK_NAME = builtinFunctionName("rank");
 
-    private Util()
-    {
-    }
+    private Util() {}
 
     /**
      * Prune the set of available inputs to those required by the given expressions.
@@ -98,7 +96,7 @@ final class Util
 
     /**
      * @return The original node, with identity projections possibly inserted between node and each child, limiting the columns to those permitted.
-     * Returns a present Optional iff at least one child was rewritten.
+     *         Returns a present Optional iff at least one child was rewritten.
      */
     @SafeVarargs
     public static Optional<PlanNode> restrictChildOutputs(PlanNodeIdAllocator idAllocator, PlanNode node, Set<Symbol>... permittedChildOutputsArgs)

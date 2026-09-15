@@ -14,7 +14,6 @@
 package io.trino.server;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.reflect.TypeToken;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Inject;
@@ -25,6 +24,7 @@ import io.airlift.stats.TimeStat;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
+import io.trino.connector.CatalogHandle;
 import io.trino.execution.FailureInjector;
 import io.trino.execution.FailureInjector.InjectedFailure;
 import io.trino.execution.SqlTaskManager;
@@ -36,8 +36,6 @@ import io.trino.execution.buffer.BufferResult;
 import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.metadata.SessionPropertyManager;
 import io.trino.server.security.ResourceSecurity;
-import io.trino.spi.connector.CatalogHandle;
-import jakarta.ws.rs.BeanParam;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.DefaultValue;
@@ -53,10 +51,10 @@ import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.container.AsyncResponse;
 import jakarta.ws.rs.container.Suspended;
 import jakarta.ws.rs.core.Context;
-import jakarta.ws.rs.core.GenericEntity;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.Response.Status;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
@@ -71,9 +69,10 @@ import java.util.concurrent.ThreadLocalRandom;
 import static com.google.common.collect.Iterables.transform;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.addTimeout;
+import static io.airlift.jaxrs.AsyncResponseHandler.bindAsyncResponse;
 import static io.trino.TrinoMediaTypes.TRINO_PAGES;
 import static io.trino.execution.buffer.BufferResult.emptyResults;
-import static io.trino.server.DisconnectionAwareAsyncResponse.bindDisconnectionAwareAsyncResponse;
+import static io.trino.server.AsyncResponseUtils.withFallbackAfterTimeout;
 import static io.trino.server.InternalHeaders.TRINO_BUFFER_COMPLETE;
 import static io.trino.server.InternalHeaders.TRINO_CURRENT_VERSION;
 import static io.trino.server.InternalHeaders.TRINO_MAX_SIZE;
@@ -83,6 +82,7 @@ import static io.trino.server.InternalHeaders.TRINO_PAGE_TOKEN;
 import static io.trino.server.InternalHeaders.TRINO_TASK_FAILED;
 import static io.trino.server.InternalHeaders.TRINO_TASK_INSTANCE_ID;
 import static io.trino.server.security.ResourceSecurity.AccessType.INTERNAL_ONLY;
+import static jakarta.ws.rs.core.Response.status;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -91,6 +91,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
  * Manages tasks on this worker node
  */
 @Path("/v1/task")
+@ResourceSecurity(INTERNAL_ONLY)
 public class TaskResource
 {
     private static final Logger log = Logger.get(TaskResource.class);
@@ -101,6 +102,7 @@ public class TaskResource
     private final StartupStatus startupStatus;
     private final SqlTaskManager taskManager;
     private final SessionPropertyManager sessionPropertyManager;
+    private final PagesInputStreamFactory pagesInputStreamFactory;
     private final Executor responseExecutor;
     private final ScheduledExecutorService timeoutExecutor;
     private final FailureInjector failureInjector;
@@ -112,6 +114,7 @@ public class TaskResource
             StartupStatus startupStatus,
             SqlTaskManager taskManager,
             SessionPropertyManager sessionPropertyManager,
+            PagesInputStreamFactory pagesInputStreamFactory,
             @ForAsyncHttp BoundedExecutor responseExecutor,
             @ForAsyncHttp ScheduledExecutorService timeoutExecutor,
             FailureInjector failureInjector)
@@ -119,12 +122,12 @@ public class TaskResource
         this.startupStatus = requireNonNull(startupStatus, "startupStatus is null");
         this.taskManager = requireNonNull(taskManager, "taskManager is null");
         this.sessionPropertyManager = requireNonNull(sessionPropertyManager, "sessionPropertyManager is null");
+        this.pagesInputStreamFactory = requireNonNull(pagesInputStreamFactory, "pagesInputStreamFactory is null");
         this.responseExecutor = requireNonNull(responseExecutor, "responseExecutor is null");
         this.timeoutExecutor = requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         this.failureInjector = requireNonNull(failureInjector, "failureInjector is null");
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @GET
     @Produces(MediaType.APPLICATION_JSON)
     public List<TaskInfo> getAllTaskInfo(@Context UriInfo uriInfo)
@@ -136,7 +139,6 @@ public class TaskResource
         return allTaskInfo;
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @POST
     @Path("{taskId}")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -145,7 +147,7 @@ public class TaskResource
             @PathParam("taskId") TaskId taskId,
             TaskUpdateRequest taskUpdateRequest,
             @Context UriInfo uriInfo,
-            @Suspended @BeanParam DisconnectionAwareAsyncResponse asyncResponse)
+            @Suspended AsyncResponse asyncResponse)
     {
         requireNonNull(taskUpdateRequest, "taskUpdateRequest is null");
         if (failRequestIfInvalid(asyncResponse)) {
@@ -163,6 +165,7 @@ public class TaskResource
                 taskId,
                 taskUpdateRequest.stageSpan(),
                 taskUpdateRequest.fragment(),
+                taskUpdateRequest.tableCredentials(),
                 taskUpdateRequest.splitAssignments(),
                 taskUpdateRequest.outputIds(),
                 taskUpdateRequest.dynamicFilterDomains(),
@@ -175,7 +178,6 @@ public class TaskResource
         asyncResponse.resume(Response.ok().entity(taskInfo).build());
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @GET
     @Path("{taskId}")
     @Produces(MediaType.APPLICATION_JSON)
@@ -184,7 +186,7 @@ public class TaskResource
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentVersion,
             @HeaderParam(TRINO_MAX_WAIT) Duration maxWait,
             @Context UriInfo uriInfo,
-            @Suspended @BeanParam DisconnectionAwareAsyncResponse asyncResponse)
+            @Suspended AsyncResponse asyncResponse)
     {
         requireNonNull(taskId, "taskId is null");
         if (failRequestIfInvalid(asyncResponse)) {
@@ -218,13 +220,12 @@ public class TaskResource
             futureTaskInfo = Futures.transform(futureTaskInfo, TaskInfo::summarize, directExecutor());
         }
 
+        ListenableFuture<Response> response = Futures.transform(futureTaskInfo, taskInfo -> Response.ok(taskInfo).build(), directExecutor());
         // For hard timeout, add an additional time to max wait for thread scheduling contention and GC
         Duration timeout = new Duration(waitTime.toMillis() + ADDITIONAL_WAIT_TIME.toMillis(), MILLISECONDS);
-        bindDisconnectionAwareAsyncResponse(asyncResponse, futureTaskInfo, responseExecutor)
-                .withTimeout(timeout);
+        bindAsyncResponse(asyncResponse, withFallbackAfterTimeout(response, timeout, () -> serviceUnavailable(timeout), timeoutExecutor), responseExecutor);
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @GET
     @Path("{taskId}/status")
     @Produces(MediaType.APPLICATION_JSON)
@@ -232,7 +233,7 @@ public class TaskResource
             @PathParam("taskId") TaskId taskId,
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentVersion,
             @HeaderParam(TRINO_MAX_WAIT) Duration maxWait,
-            @Suspended @BeanParam DisconnectionAwareAsyncResponse asyncResponse)
+            @Suspended AsyncResponse asyncResponse)
     {
         requireNonNull(taskId, "taskId is null");
         if (failRequestIfInvalid(asyncResponse)) {
@@ -264,18 +265,18 @@ public class TaskResource
 
         // For hard timeout, add an additional time to max wait for thread scheduling contention and GC
         Duration timeout = new Duration(waitTime.toMillis() + ADDITIONAL_WAIT_TIME.toMillis(), MILLISECONDS);
-        bindDisconnectionAwareAsyncResponse(asyncResponse, futureTaskStatus, responseExecutor)
-                .withTimeout(timeout);
+
+        ListenableFuture<Response> response = Futures.transform(futureTaskStatus, taskStatus -> Response.ok(taskStatus).build(), directExecutor());
+        bindAsyncResponse(asyncResponse, withFallbackAfterTimeout(response, timeout, () -> serviceUnavailable(timeout), timeoutExecutor), responseExecutor);
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @GET
     @Path("{taskId}/dynamicfilters")
     @Produces(MediaType.APPLICATION_JSON)
     public void acknowledgeAndGetNewDynamicFilterDomains(
             @PathParam("taskId") TaskId taskId,
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentDynamicFiltersVersion,
-            @Suspended @BeanParam DisconnectionAwareAsyncResponse asyncResponse)
+            @Suspended AsyncResponse asyncResponse)
     {
         requireNonNull(taskId, "taskId is null");
         requireNonNull(currentDynamicFiltersVersion, "currentDynamicFiltersVersion is null");
@@ -290,7 +291,6 @@ public class TaskResource
         asyncResponse.resume(taskManager.acknowledgeAndGetNewDynamicFilterDomains(taskId, currentDynamicFiltersVersion));
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @DELETE
     @Path("{taskId}")
     @Produces(MediaType.APPLICATION_JSON)
@@ -315,7 +315,6 @@ public class TaskResource
         return taskInfo;
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @POST
     @Path("{taskId}/fail")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -329,7 +328,6 @@ public class TaskResource
         return taskManager.failTask(taskId, failTaskRequest.getFailureInfo().toException());
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @GET
     @Path("{taskId}/results/{bufferId}/{token}")
     @Produces(TRINO_PAGES)
@@ -338,7 +336,7 @@ public class TaskResource
             @PathParam("bufferId") PipelinedOutputBuffers.OutputBufferId bufferId,
             @PathParam("token") long token,
             @HeaderParam(TRINO_MAX_SIZE) DataSize maxSize,
-            @Suspended @BeanParam DisconnectionAwareAsyncResponse asyncResponse)
+            @Suspended AsyncResponse asyncResponse)
     {
         requireNonNull(taskId, "taskId is null");
         requireNonNull(bufferId, "bufferId is null");
@@ -361,20 +359,20 @@ public class TaskResource
                     timeoutExecutor);
         }
 
-        ListenableFuture<Response> responseFuture = Futures.transform(bufferResultFuture, results -> createBufferResultResponse(taskWithResults, results), directExecutor());
+        ListenableFuture<Response> responseFuture = Futures.transform(bufferResultFuture, results -> createBufferResultResponse(pagesInputStreamFactory, taskWithResults, results), directExecutor());
 
         // For hard timeout, add an additional time to max wait for thread scheduling contention and GC
         Duration timeout = new Duration(waitTime.toMillis() + ADDITIONAL_WAIT_TIME.toMillis(), MILLISECONDS);
-        bindDisconnectionAwareAsyncResponse(asyncResponse, responseFuture, responseExecutor)
-                .withTimeout(timeout, () -> createBufferResultResponse(taskWithResults, emptyBufferResults));
-
+        bindAsyncResponse(
+                asyncResponse,
+                withFallbackAfterTimeout(responseFuture, timeout, () -> createBufferResultResponse(pagesInputStreamFactory, taskWithResults, emptyBufferResults), timeoutExecutor),
+                responseExecutor);
         responseFuture.addListener(() -> readFromOutputBufferTime.add(Duration.nanosSince(start)), directExecutor());
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @GET
     @Path("{taskId}/results/{bufferId}/{token}/acknowledge")
-    public void acknowledgeResults(
+    public Response acknowledgeResults(
             @PathParam("taskId") TaskId taskId,
             @PathParam("bufferId") PipelinedOutputBuffers.OutputBufferId bufferId,
             @PathParam("token") long token)
@@ -383,9 +381,9 @@ public class TaskResource
         requireNonNull(bufferId, "bufferId is null");
 
         taskManager.acknowledgeTaskResults(taskId, bufferId, token);
+        return Response.ok().build();
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @DELETE
     @Path("{taskId}/results/{bufferId}")
     public void destroyTaskResults(
@@ -404,7 +402,6 @@ public class TaskResource
         asyncResponse.resume(Response.noContent().build());
     }
 
-    @ResourceSecurity(INTERNAL_ONLY)
     @POST
     @Path("pruneCatalogs")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -438,9 +435,9 @@ public class TaskResource
 
         Optional<InjectedFailure> injectedFailure = failureInjector.getInjectedFailure(
                 traceToken.get(),
-                taskId.getStageId().getId(),
-                taskId.getPartitionId(),
-                taskId.getAttemptId());
+                taskId.stageId().id(),
+                taskId.partitionId(),
+                taskId.attemptId());
 
         if (injectedFailure.isEmpty()) {
             return false;
@@ -449,40 +446,39 @@ public class TaskResource
         InjectedFailure failure = injectedFailure.get();
         Duration timeout = failureInjector.getRequestTimeout();
         switch (failure.getInjectedFailureType()) {
-            case TASK_MANAGEMENT_REQUEST_FAILURE:
+            case TASK_MANAGEMENT_REQUEST_FAILURE -> {
                 if (requestType.isTaskManagement()) {
                     log.info("Failing %s request for task %s", requestType, taskId);
                     asyncResponse.resume(new InternalServerErrorException("Task %s failed".formatted(taskId)));
                     return true;
                 }
-                break;
-            case TASK_MANAGEMENT_REQUEST_TIMEOUT:
+            }
+            case TASK_MANAGEMENT_REQUEST_TIMEOUT -> {
                 if (requestType.isTaskManagement()) {
                     log.info("Timing out %s request for task %s", requestType, taskId);
                     asyncResponse.setTimeout(timeout.toMillis(), MILLISECONDS);
                     return true;
                 }
-                break;
-            case TASK_GET_RESULTS_REQUEST_FAILURE:
+            }
+            case TASK_GET_RESULTS_REQUEST_FAILURE -> {
                 if (!requestType.isTaskManagement()) {
                     log.info("Failing %s request for task %s", requestType, taskId);
                     asyncResponse.resume(new InternalServerErrorException("Task %s failed".formatted(taskId)));
                     return true;
                 }
-                break;
-            case TASK_GET_RESULTS_REQUEST_TIMEOUT:
+            }
+            case TASK_GET_RESULTS_REQUEST_TIMEOUT -> {
                 if (!requestType.isTaskManagement()) {
                     log.info("Timing out %s request for task %s", requestType, taskId);
                     asyncResponse.setTimeout(timeout.toMillis(), MILLISECONDS);
                     return true;
                 }
-                break;
-            case TASK_FAILURE:
+            }
+            case TASK_FAILURE -> {
                 log.info("Injecting failure for task %s at %s", taskId, requestType);
                 taskManager.failTask(taskId, injectedFailure.get().getTaskFailureException());
-                break;
-            default:
-                throw new IllegalArgumentException("unexpected failure type: " + failure.getInjectedFailureType());
+            }
+            default -> throw new IllegalArgumentException("unexpected failure type: " + failure.getInjectedFailureType());
         }
 
         return false;
@@ -536,31 +532,36 @@ public class TaskResource
         return new Duration(halfWaitMillis + ThreadLocalRandom.current().nextLong(halfWaitMillis), MILLISECONDS);
     }
 
-    private static Response createBufferResultResponse(SqlTaskWithResults taskWithResults, BufferResult result)
+    private static Response createBufferResultResponse(PagesInputStreamFactory pagesInputStreamFactory, SqlTaskWithResults taskWithResults, BufferResult result)
     {
         // This response may have been created as the result of a timeout, so refresh the task heartbeat
         taskWithResults.recordHeartbeat();
 
-        List<Slice> serializedPages = result.getSerializedPages();
+        List<Slice> serializedPages = result.serializedPages();
 
-        GenericEntity<?> entity = null;
-        Status status;
-        if (serializedPages.isEmpty()) {
-            status = Status.NO_CONTENT;
-        }
-        else {
-            entity = new GenericEntity<>(serializedPages, new TypeToken<List<Slice>>() {}.getType());
-            status = Status.OK;
-        }
-
-        return Response.status(status)
-                .entity(entity)
-                .header(TRINO_TASK_INSTANCE_ID, result.getTaskInstanceId())
-                .header(TRINO_PAGE_TOKEN, result.getToken())
-                .header(TRINO_PAGE_NEXT_TOKEN, result.getNextToken())
-                .header(TRINO_BUFFER_COMPLETE, result.isBufferComplete())
+        Response.ResponseBuilder response = Response.status(serializedPages.isEmpty() ? Status.NO_CONTENT : Status.OK)
+                .header(TRINO_TASK_INSTANCE_ID, result.taskInstanceId())
+                .header(TRINO_PAGE_TOKEN, result.token())
+                .header(TRINO_PAGE_NEXT_TOKEN, result.nextToken())
+                .header(TRINO_BUFFER_COMPLETE, result.bufferComplete())
                 // check for task failure after getting the result to ensure it's consistent with isBufferComplete()
-                .header(TRINO_TASK_FAILED, taskWithResults.isTaskFailedOrFailing())
+                .header(TRINO_TASK_FAILED, taskWithResults.isTaskFailedOrFailing());
+
+        if (serializedPages.isEmpty()) {
+            return response.build();
+        }
+
+        return response
+                .type(TRINO_PAGES)
+                .entity((StreamingOutput) output ->
+                        pagesInputStreamFactory.write(output, serializedPages))
+                .build();
+    }
+
+    private static Response serviceUnavailable(Duration timeout)
+    {
+        return status(Response.Status.SERVICE_UNAVAILABLE)
+                .entity("Timed out after waiting for " + timeout.convertToMostSuccinctTimeUnit())
                 .build();
     }
 }

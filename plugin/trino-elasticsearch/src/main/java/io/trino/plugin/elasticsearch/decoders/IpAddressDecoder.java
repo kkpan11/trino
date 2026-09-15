@@ -15,15 +15,16 @@ package io.trino.plugin.elasticsearch.decoders;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.net.InetAddresses;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.plugin.elasticsearch.DecoderDescriptor;
+import io.trino.plugin.elasticsearch.client.SearchDocument;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.Type;
-import org.elasticsearch.search.SearchHit;
 
+import java.net.InetAddress;
+import java.util.Objects;
 import java.util.function.Supplier;
 
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -47,7 +48,7 @@ public class IpAddressDecoder
     }
 
     @Override
-    public void decode(SearchHit hit, Supplier<Object> getter, BlockBuilder output)
+    public void decode(SearchDocument document, Supplier<Object> getter, BlockBuilder output)
     {
         Object value = getter.get();
         if (value == null) {
@@ -67,7 +68,7 @@ public class IpAddressDecoder
     {
         byte[] address;
         try {
-            address = InetAddresses.forString(slice.toStringUtf8()).getAddress();
+            address = InetAddress.ofLiteral(slice.toStringUtf8()).getAddress();
         }
         catch (IllegalArgumentException e) {
             throw new TrinoException(INVALID_CAST_ARGUMENT, "Cannot cast value to IPADDRESS: " + slice.toStringUtf8());
@@ -76,8 +77,8 @@ public class IpAddressDecoder
         byte[] bytes;
         if (address.length == 4) {
             bytes = new byte[16];
-            bytes[10] = (byte) 0xff;
-            bytes[11] = (byte) 0xff;
+            bytes[10] = (byte) 0xFF;
+            bytes[11] = (byte) 0xFF;
             arraycopy(address, 0, bytes, 12, 4);
         }
         else if (address.length == 16) {
@@ -119,6 +120,26 @@ public class IpAddressDecoder
         public Decoder createDecoder()
         {
             return new IpAddressDecoder(path, ipAddressType);
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            Descriptor that = (Descriptor) o;
+            return Objects.equals(this.path, that.path)
+                    && Objects.equals(this.ipAddressType, that.ipAddressType);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hash(path, ipAddressType);
         }
     }
 }

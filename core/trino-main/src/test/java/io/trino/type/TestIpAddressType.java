@@ -13,12 +13,13 @@
  */
 package io.trino.type;
 
-import com.google.common.net.InetAddresses;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.ValueBlock;
 import org.junit.jupiter.api.Test;
+
+import java.net.InetAddress;
 
 import static com.google.common.base.Preconditions.checkState;
 import static io.trino.type.IpAddressType.IPADDRESS;
@@ -34,7 +35,7 @@ public class TestIpAddressType
 
     public static ValueBlock createTestBlock()
     {
-        BlockBuilder blockBuilder = IPADDRESS.createBlockBuilder(null, 1);
+        BlockBuilder blockBuilder = IPADDRESS.createFixedSizeBlockBuilder(1);
         IPADDRESS.writeSlice(blockBuilder, getSliceForAddress("2001:db8::ff00:42:8320"));
         IPADDRESS.writeSlice(blockBuilder, getSliceForAddress("2001:db8::ff00:42:8321"));
         IPADDRESS.writeSlice(blockBuilder, getSliceForAddress("2001:db8::ff00:42:8322"));
@@ -59,7 +60,7 @@ public class TestIpAddressType
     @Override
     protected Object getNonNullValue()
     {
-        return Slices.wrappedBuffer(InetAddresses.forString("::").getAddress());
+        return Slices.wrappedBuffer(InetAddress.ofLiteral("::").getAddress());
     }
 
     @Test
@@ -70,7 +71,7 @@ public class TestIpAddressType
 
     private static Slice getSliceForAddress(String address)
     {
-        return Slices.wrappedBuffer(InetAddresses.forString(address).getAddress());
+        return Slices.wrappedBuffer(InetAddress.ofLiteral(address).getAddress());
     }
 
     @Test

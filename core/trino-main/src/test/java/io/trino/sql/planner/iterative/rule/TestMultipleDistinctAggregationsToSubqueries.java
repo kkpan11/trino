@@ -34,7 +34,6 @@ import io.trino.spi.function.OperatorType;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.ir.Call;
 import io.trino.sql.ir.Cast;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.IsNull;
 import io.trino.sql.ir.Reference;
@@ -48,6 +47,7 @@ import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.PlanTester;
 import io.trino.testing.TestingTransactionHandle;
+import io.trino.type.CharVarcharCoercion;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
@@ -57,13 +57,16 @@ import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.testing.Closeables.closeAllRuntimeException;
+import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.SystemSessionProperties.DISTINCT_AGGREGATIONS_STRATEGY;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.ir.Booleans.TRUE;
-import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
 import static io.trino.sql.ir.IrExpressions.not;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregation;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregationFunction;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
@@ -81,6 +84,7 @@ import static io.trino.testing.TestingSession.testSessionBuilder;
 public class TestMultipleDistinctAggregationsToSubqueries
         extends BaseRuleTest
 {
+    private static final CharVarcharCoercion CHAR_VARCHAR_COERCION = getCharVarcharCoercion(TEST_SESSION);
     private static final String MOCK_CATALOG = "mock_catalog";
     private static final String TEST_SCHEMA = "test_schema";
     private static final String TEST_TABLE = "test_table";
@@ -105,7 +109,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
 
     private static final List<ColumnMetadata> ALL_COLUMNS = Stream.of(COLUMN_1_HANDLE, COLUMN_2_HANDLE, COLUMN_3_HANDLE, COLUMN_4_HANDLE, GROUPING_KEY_COLUMN_HANDLE, GROUPING_KEY2_COLUMN_HANDLE)
             .map(columnHandle -> (MockConnectorColumnHandle) columnHandle)
-            .map(column -> new ColumnMetadata(column.getName(), column.getType()))
+            .map(column -> new ColumnMetadata(column.name(), column.type()))
             .collect(toImmutableList());
 
     private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
@@ -169,27 +173,6 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                             ImmutableList.of(input1Symbol),
                                             ImmutableMap.of(
                                                     input1Symbol, COLUMN_1_HANDLE))));
-                })
-                .doesNotFire();
-
-        // hash symbol
-        ruleTester.assertThat(newMultipleDistinctAggregationsToSubqueries(ruleTester))
-                .setSystemProperty(DISTINCT_AGGREGATIONS_STRATEGY, "split_to_subqueries")
-                .on(p -> {
-                    Symbol input1Symbol = p.symbol("input1Symbol", BIGINT);
-                    Symbol input2Symbol = p.symbol("input2Symbol", BIGINT);
-                    return p.aggregation(builder -> builder
-                            .globalGrouping()
-                            .addAggregation(p.symbol("output1", BIGINT), PlanBuilder.aggregation("count", true, ImmutableList.of(new Reference(BIGINT, "input1Symbol"))), ImmutableList.of(BIGINT))
-                            .addAggregation(p.symbol("output2", BIGINT), PlanBuilder.aggregation("sum", true, ImmutableList.of(new Reference(BIGINT, "input2Symbol"))), ImmutableList.of(BIGINT))
-                            .hashSymbol(p.symbol("hashSymbol", BIGINT))
-                            .source(
-                                    p.tableScan(
-                                            testTableHandle(ruleTester),
-                                            ImmutableList.of(input1Symbol, input2Symbol),
-                                            ImmutableMap.of(
-                                                    input1Symbol, COLUMN_1_HANDLE,
-                                                    input2Symbol, COLUMN_2_HANDLE))));
                 })
                 .doesNotFire();
 
@@ -583,7 +566,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                             .source(
                                     p.filter(
                                             new PlanNodeId(filterId),
-                                            not(ruleTester.getMetadata(), new IsNull(new Reference(VARCHAR, "filterInput"))),
+                                            not(ruleTester.getMetadata(), CHAR_VARCHAR_COERCION, new IsNull(new Reference(VARCHAR, "filterInput"))),
                                             p.tableScan(tableScan -> tableScan
                                                     .setNodeId(new PlanNodeId(aggregationSourceId))
                                                     .setTableHandle(testTableHandle(ruleTester))
@@ -619,7 +602,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                             .source(
                                     p.filter(
                                             new PlanNodeId(filterId),
-                                            not(ruleTester.getMetadata(), new IsNull(new Reference(VARCHAR, "filterInput"))),
+                                            not(ruleTester.getMetadata(), CHAR_VARCHAR_COERCION, new IsNull(new Reference(VARCHAR, "filterInput"))),
                                             p.tableScan(tableScan -> tableScan
                                                     .setNodeId(new PlanNodeId(aggregationSourceId))
                                                     .setTableHandle(testTableHandle(ruleTester))
@@ -645,7 +628,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                 Optional.empty(),
                                                 SINGLE,
                                                 filter(
-                                                        not(ruleTester.getMetadata(), new IsNull(new Reference(BIGINT, "left_filterInput"))),
+                                                        not(ruleTester.getMetadata(), CHAR_VARCHAR_COERCION, new IsNull(new Reference(BIGINT, "left_filterInput"))),
                                                         tableScan(
                                                                 TABLE_SCHEMA.getTableName(),
                                                                 ImmutableMap.of(
@@ -658,7 +641,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                 Optional.empty(),
                                                 SINGLE,
                                                 filter(
-                                                        not(ruleTester.getMetadata(), new IsNull(new Reference(BIGINT, "right_filterInput"))),
+                                                        not(ruleTester.getMetadata(), CHAR_VARCHAR_COERCION, new IsNull(new Reference(BIGINT, "right_filterInput"))),
                                                         tableScan(
                                                                 TABLE_SCHEMA.getTableName(),
                                                                 ImmutableMap.of(
@@ -710,7 +693,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                     .build(),
                                             ImmutableList.of(
                                                     p.filter(
-                                                            new Comparison(GREATER_THAN, new Reference(BIGINT, "input1_1Symbol"), new Constant(BIGINT, 0L)),
+                                                            comparison(GREATER_THAN, new Reference(BIGINT, "input1_1Symbol"), new Constant(BIGINT, 0L)),
                                                             p.tableScan(
                                                                     testTableHandle(ruleTester),
                                                                     ImmutableList.of(input11Symbol, input21Symbol, groupingKey1),
@@ -719,7 +702,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                                             input21Symbol, COLUMN_2_HANDLE,
                                                                             groupingKey1, GROUPING_KEY_COLUMN_HANDLE))),
                                                     p.filter(
-                                                            new Comparison(GREATER_THAN, new Reference(BIGINT, "input2_2Symbol"), new Constant(BIGINT, 2L)),
+                                                            comparison(GREATER_THAN, new Reference(BIGINT, "input2_2Symbol"), new Constant(BIGINT, 2L)),
                                                             p.tableScan(
                                                                     testTableHandle(ruleTester),
                                                                     ImmutableList.of(input12Symbol, input22Symbol, groupingKey2),
@@ -925,7 +908,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                             .source(
                                     p.tableScan(
                                             testTableHandle(ruleTester),
-                                            ImmutableList.of(input1Symbol, input2Symbol),
+                                            ImmutableList.of(input1Symbol, input2Symbol, groupingKey),
                                             ImmutableMap.of(
                                                     input1Symbol, COLUMN_1_HANDLE,
                                                     input2Symbol, COLUMN_2_HANDLE,
@@ -997,7 +980,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                     .build(),
                                             ImmutableList.of(
                                                     p.filter(
-                                                            new Comparison(GREATER_THAN, new Reference(BIGINT, "input1_1Symbol"), new Constant(BIGINT, 0L)),
+                                                            comparison(GREATER_THAN, new Reference(BIGINT, "input1_1Symbol"), new Constant(BIGINT, 0L)),
                                                             p.tableScan(
                                                                     testTableHandle(ruleTester),
                                                                     ImmutableList.of(input11Symbol, input21Symbol, groupingKey1),
@@ -1006,7 +989,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                                             input21Symbol, COLUMN_2_HANDLE,
                                                                             groupingKey1, GROUPING_KEY_COLUMN_HANDLE))),
                                                     p.filter(
-                                                            new Comparison(GREATER_THAN, new Reference(BIGINT, "input2_2Symbol"), new Constant(BIGINT, 2L)),
+                                                            comparison(GREATER_THAN, new Reference(BIGINT, "input2_2Symbol"), new Constant(BIGINT, 2L)),
                                                             p.tableScan(
                                                                     testTableHandle(ruleTester),
                                                                     ImmutableList.of(input12Symbol, input22Symbol, groupingKey2),
@@ -1031,7 +1014,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                 SINGLE,
                                                 union(
                                                         filter(
-                                                                new Comparison(GREATER_THAN, new Reference(BIGINT, "input1_1_1Symbol"), new Constant(BIGINT, 0L)),
+                                                                comparison(GREATER_THAN, new Reference(BIGINT, "input1_1_1Symbol"), new Constant(BIGINT, 0L)),
                                                                 tableScan(
                                                                         TABLE_SCHEMA.getTableName(),
                                                                         ImmutableMap.of(
@@ -1039,7 +1022,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                                                 "input2_1_1Symbol", COLUMN_2,
                                                                                 "left_groupingKey1", GROUPING_KEY_COLUMN))),
                                                         filter(
-                                                                new Comparison(GREATER_THAN, new Reference(BIGINT, "input2_2_1Symbol"), new Constant(BIGINT, 2L)),
+                                                                comparison(GREATER_THAN, new Reference(BIGINT, "input2_2_1Symbol"), new Constant(BIGINT, 2L)),
                                                                 tableScan(
                                                                         TABLE_SCHEMA.getTableName(),
                                                                         ImmutableMap.of(
@@ -1056,7 +1039,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                 SINGLE,
                                                 union(
                                                         filter(
-                                                                new Comparison(GREATER_THAN, new Reference(BIGINT, "input1_1_2Symbol"), new Constant(BIGINT, 0L)),
+                                                                comparison(GREATER_THAN, new Reference(BIGINT, "input1_1_2Symbol"), new Constant(BIGINT, 0L)),
                                                                 tableScan(
                                                                         TABLE_SCHEMA.getTableName(),
                                                                         ImmutableMap.of(
@@ -1064,7 +1047,7 @@ public class TestMultipleDistinctAggregationsToSubqueries
                                                                                 "input2_1_2Symbol", COLUMN_2,
                                                                                 "right_groupingKey1", GROUPING_KEY_COLUMN))),
                                                         filter(
-                                                                new Comparison(GREATER_THAN, new Reference(BIGINT, "input2_2_2Symbol"), new Constant(BIGINT, 2L)),
+                                                                comparison(GREATER_THAN, new Reference(BIGINT, "input2_2_2Symbol"), new Constant(BIGINT, 2L)),
                                                                 tableScan(
                                                                         TABLE_SCHEMA.getTableName(),
                                                                         ImmutableMap.of(

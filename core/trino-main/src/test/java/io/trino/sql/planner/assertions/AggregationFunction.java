@@ -23,8 +23,6 @@ import java.util.Optional;
 public record AggregationFunction(
         String name,
         Optional<Symbol> filter,
-        Optional<OrderingScheme> orderBy,
+        Optional<OrderingScheme> orderingScheme,
         boolean distinct,
-        List<Expression> arguments)
-{
-}
+        List<Expression> arguments) {}

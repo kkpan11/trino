@@ -20,9 +20,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 
@@ -30,7 +29,7 @@ public class Re2JRegexpType
         extends AbstractVariableWidthType
 {
     public static final String NAME = "Re2JRegExp";
-    public static final TypeSignature RE2J_REGEXP_SIGNATURE = new TypeSignature(NAME);
+    public static final TypeDescriptor RE2J_REGEXP_SIGNATURE = new TypeDescriptor(NAME);
 
     private final int dfaStatesLimit;
     private final int dfaRetries;
@@ -43,7 +42,13 @@ public class Re2JRegexpType
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public String getDisplayName()
+    {
+        return NAME;
+    }
+
+    @Override
+    public Object getObjectValue(Block block, int position)
     {
         if (block.isNull(position)) {
             return null;

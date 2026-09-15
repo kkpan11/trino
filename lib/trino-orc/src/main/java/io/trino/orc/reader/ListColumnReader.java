@@ -15,7 +15,6 @@ package io.trino.orc.reader;
 
 import com.google.common.io.Closer;
 import io.trino.memory.context.AggregatedMemoryContext;
-import io.trino.orc.OrcBlockFactory;
 import io.trino.orc.OrcColumn;
 import io.trino.orc.OrcCorruptionException;
 import io.trino.orc.OrcReader.FieldMapperFactory;
@@ -46,6 +45,7 @@ import static io.trino.orc.reader.ReaderUtils.convertLengthVectorToOffsetVector;
 import static io.trino.orc.reader.ReaderUtils.unpackLengthNulls;
 import static io.trino.orc.reader.ReaderUtils.verifyStreamType;
 import static io.trino.orc.stream.MissingInputStreamSource.missingStreamSource;
+import static io.trino.spi.block.Bitmap.wordsForBits;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -56,7 +56,6 @@ public class ListColumnReader
 
     private final Type elementType;
     private final OrcColumn column;
-    private final OrcBlockFactory blockFactory;
 
     private final ColumnReader elementColumnReader;
 
@@ -73,7 +72,7 @@ public class ListColumnReader
 
     private boolean rowGroupOpen;
 
-    public ListColumnReader(Type type, OrcColumn column, AggregatedMemoryContext memoryContext, OrcBlockFactory blockFactory, FieldMapperFactory fieldMapperFactory)
+    public ListColumnReader(Type type, OrcColumn column, AggregatedMemoryContext memoryContext, FieldMapperFactory fieldMapperFactory)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -81,13 +80,11 @@ public class ListColumnReader
         elementType = ((ArrayType) type).getElementType();
 
         this.column = requireNonNull(column, "column is null");
-        this.blockFactory = requireNonNull(blockFactory, "blockFactory is null");
         this.elementColumnReader = createColumnReader(
                 elementType,
                 column.getNestedColumns().get(0),
                 fullyProjectedLayout(),
                 memoryContext,
-                blockFactory,
                 fieldMapperFactory);
     }
 
@@ -124,7 +121,7 @@ public class ListColumnReader
         // We will use the offsetVector as the buffer to read the length values from lengthStream,
         // and the length values will be converted in-place to an offset vector.
         int[] offsetVector = new int[nextBatchSize + 1];
-        boolean[] nullVector = null;
+        long[] valueIsValid = null;
         if (presentStream == null) {
             if (lengthStream == null) {
                 throw new OrcCorruptionException(column.getOrcDataSourceId(), "Value is not null but data stream is not present");
@@ -132,14 +129,18 @@ public class ListColumnReader
             lengthStream.next(offsetVector, nextBatchSize);
         }
         else {
-            nullVector = new boolean[nextBatchSize];
-            int nullValues = presentStream.getUnsetBits(nextBatchSize, nullVector);
+            valueIsValid = new long[wordsForBits(nextBatchSize)];
+            int nonNullCount = presentStream.getSetBits(nextBatchSize, valueIsValid);
+            int nullValues = nextBatchSize - nonNullCount;
             if (nullValues != nextBatchSize) {
                 if (lengthStream == null) {
                     throw new OrcCorruptionException(column.getOrcDataSourceId(), "Value is not null but data stream is not present");
                 }
-                lengthStream.next(offsetVector, nextBatchSize - nullValues);
-                unpackLengthNulls(offsetVector, nullVector, nextBatchSize - nullValues);
+                lengthStream.next(offsetVector, nonNullCount);
+                unpackLengthNulls(offsetVector, valueIsValid, nextBatchSize, nonNullCount);
+            }
+            if (nullValues == 0) {
+                valueIsValid = null;
             }
         }
         convertLengthVectorToOffsetVector(offsetVector);
@@ -149,12 +150,12 @@ public class ListColumnReader
         Block elements;
         if (elementCount > 0) {
             elementColumnReader.prepareNextRead(elementCount);
-            elements = blockFactory.createBlock(elementCount, elementColumnReader::readBlock, true);
+            elements = elementColumnReader.readBlock();
         }
         else {
             elements = elementType.createBlockBuilder(null, 0).build();
         }
-        Block arrayBlock = ArrayBlock.fromElementBlock(nextBatchSize, Optional.ofNullable(nullVector), offsetVector, elements);
+        Block arrayBlock = ArrayBlock.fromElementBlock(nextBatchSize, Optional.ofNullable(valueIsValid), offsetVector, elements);
 
         readOffset = 0;
         nextBatchSize = 0;

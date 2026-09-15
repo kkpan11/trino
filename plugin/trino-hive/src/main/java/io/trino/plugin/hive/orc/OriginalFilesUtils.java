@@ -20,14 +20,14 @@ import io.trino.orc.OrcDataSource;
 import io.trino.orc.OrcDataSourceId;
 import io.trino.orc.OrcReader;
 import io.trino.orc.OrcReaderOptions;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
+import io.trino.plugin.hive.AcidInfo.OriginalFileInfo;
 import io.trino.spi.TrinoException;
 import io.trino.spi.security.ConnectorIdentity;
 
 import java.util.Collection;
 
 import static io.trino.orc.OrcReader.createOrcReader;
-import static io.trino.plugin.hive.AcidInfo.OriginalFileInfo;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_CANNOT_OPEN_SPLIT;
 
 public final class OriginalFilesUtils
@@ -53,10 +53,10 @@ public final class OriginalFilesUtils
     {
         long rowCount = 0;
         for (OriginalFileInfo originalFileInfo : originalFileInfos) {
-            if (originalFileInfo.getName().compareTo(splitPath.fileName()) < 0) {
-                Location path = splitPath.sibling(originalFileInfo.getName());
+            if (originalFileInfo.name().compareTo(splitPath.fileName()) < 0) {
+                Location path = splitPath.sibling(originalFileInfo.name());
                 TrinoInputFile inputFile = fileSystemFactory.create(identity)
-                        .newInputFile(path, originalFileInfo.getFileSize());
+                        .newInputFile(path, originalFileInfo.fileSize());
                 rowCount += getRowsInFile(inputFile, options, stats);
             }
         }

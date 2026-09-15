@@ -33,11 +33,12 @@ import io.trino.spi.type.ArrayType;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
+import java.util.Optional;
 
+import static io.trino.metastore.Partitions.makePartName;
 import static io.trino.plugin.base.util.Procedures.checkProcedureArgument;
 import static io.trino.plugin.hive.procedure.Procedures.checkIsPartitionedTable;
 import static io.trino.plugin.hive.procedure.Procedures.checkPartitionColumns;
-import static io.trino.plugin.hive.util.HiveUtil.makePartName;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.String.format;
@@ -104,7 +105,7 @@ public class UnregisterPartitionProcedure
             Table table = metastore.getTable(schemaName, tableName)
                     .orElseThrow(() -> new TableNotFoundException(schemaTableName));
 
-            accessControl.checkCanDeleteFromTable(null, schemaTableName);
+            accessControl.checkCanDeleteFromTable(null, schemaTableName, Optional.empty());
 
             checkIsPartitionedTable(table);
             checkPartitionColumns(table, partitionColumns);

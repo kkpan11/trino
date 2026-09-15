@@ -21,12 +21,12 @@ import io.trino.spi.type.LongTimeWithTimeZone;
 import io.trino.spi.type.StandardTypes;
 
 import static io.trino.spi.type.DateTimeEncoding.unpackTimeNanos;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_HOUR;
 import static io.trino.type.DateTimes.NANOSECONDS_PER_HOUR;
-import static io.trino.type.DateTimes.PICOSECONDS_PER_HOUR;
 
 @Description("Hour of the day of the given time")
 @ScalarFunction("hour")
-public class ExtractHour
+public final class ExtractHour
 {
     private ExtractHour() {}
 

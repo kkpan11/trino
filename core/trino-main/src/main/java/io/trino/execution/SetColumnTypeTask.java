@@ -27,6 +27,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
@@ -49,7 +50,7 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.TYPE_NOT_FOUND;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.toTypeSignature;
+import static io.trino.sql.analyzer.TypeDescriptorTranslator.toTypeDescriptor;
 import static io.trino.type.UnknownType.UNKNOWN;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
@@ -153,6 +154,15 @@ public class SetColumnTypeTask
             // return nameless Field to denote unwrapping of container
             return ImmutableList.of(RowType.field(arrayType.getElementType()));
         }
+        if (type instanceof MapType mapType) {
+            if (fieldName.equals("key")) {
+                return ImmutableList.of(RowType.field(mapType.getKeyType()));
+            }
+            if (fieldName.equals("value")) {
+                return ImmutableList.of(RowType.field(mapType.getValueType()));
+            }
+            throw new TrinoException(NOT_SUPPORTED, "MAP type should be denoted by 'key' or 'value' in the path; found '%s'".formatted(fieldName));
+        }
         if (!(type instanceof RowType rowType)) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported type: " + type);
         }
@@ -168,7 +178,7 @@ public class SetColumnTypeTask
     {
         Type type;
         try {
-            type = typeManager.getType(toTypeSignature(statement.getType()));
+            type = typeManager.getType(toTypeDescriptor(statement.getType()));
         }
         catch (TypeNotFoundException e) {
             throw semanticException(TYPE_NOT_FOUND, statement.getType(), "Unknown type '%s' for column '%s'", statement.getType(), statement.getColumnName());

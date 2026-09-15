@@ -14,19 +14,20 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.inject.Inject;
-import io.airlift.units.Duration;
-import io.trino.filesystem.cache.CachingHostAddressProvider;
+import io.trino.filesystem.cache.SplitAffinityProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitSource;
 import io.trino.plugin.iceberg.functions.tablechanges.TableChangesFunctionHandle;
 import io.trino.plugin.iceberg.functions.tablechanges.TableChangesSplitSource;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorExpressionEvaluator;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.type.TypeManager;
@@ -34,16 +35,22 @@ import org.apache.iceberg.CombinedScanTask;
 import org.apache.iceberg.DataOperations;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Scan;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.metrics.InMemoryMetricsReporter;
+import org.apache.iceberg.metrics.MetricsReporter;
+import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.util.SnapshotUtil;
 
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 
-import static io.trino.plugin.iceberg.IcebergSessionProperties.getDynamicFilteringWaitTimeout;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.getMinimumAssignedSplitWeight;
 import static io.trino.spi.connector.FixedSplitSource.emptySplitSource;
 import static java.util.Objects.requireNonNull;
+import static org.apache.iceberg.util.SnapshotUtil.schemaFor;
 
 public class IcebergSplitManager
         implements ConnectorSplitManager
@@ -53,22 +60,28 @@ public class IcebergSplitManager
     private final IcebergTransactionManager transactionManager;
     private final TypeManager typeManager;
     private final IcebergFileSystemFactory fileSystemFactory;
-    private final ExecutorService executor;
-    private final CachingHostAddressProvider cachingHostAddressProvider;
+    private final ListeningExecutorService splitSourceExecutor;
+    private final ExecutorService icebergPlanningExecutor;
+    private final SplitAffinityProvider splitAffinityProvider;
+    private final ConnectorExpressionEvaluator evaluator;
 
     @Inject
     public IcebergSplitManager(
             IcebergTransactionManager transactionManager,
             TypeManager typeManager,
             IcebergFileSystemFactory fileSystemFactory,
-            @ForIcebergSplitManager ExecutorService executor,
-            CachingHostAddressProvider cachingHostAddressProvider)
+            @ForIcebergSplitSource ListeningExecutorService splitSourceExecutor,
+            @ForIcebergSplitManager ExecutorService icebergPlanningExecutor,
+            SplitAffinityProvider splitAffinityProvider,
+            ConnectorExpressionEvaluator evaluator)
     {
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
-        this.executor = requireNonNull(executor, "executor is null");
-        this.cachingHostAddressProvider = requireNonNull(cachingHostAddressProvider, "cachingHostAddressProvider is null");
+        this.splitSourceExecutor = requireNonNull(splitSourceExecutor, "splitSourceExecutor is null");
+        this.icebergPlanningExecutor = requireNonNull(icebergPlanningExecutor, "icebergPlanningExecutor is null");
+        this.splitAffinityProvider = requireNonNull(splitAffinityProvider, "splitAffinityProvider is null");
+        this.evaluator = requireNonNull(evaluator, "evaluator is null");
     }
 
     @Override
@@ -76,7 +89,7 @@ public class IcebergSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle handle,
-            DynamicFilter dynamicFilter,
+            Set<ColumnHandle> dynamicFilterColumns,
             Constraint constraint)
     {
         IcebergTableHandle table = (IcebergTableHandle) handle;
@@ -90,50 +103,65 @@ public class IcebergSplitManager
 
         IcebergMetadata icebergMetadata = transactionManager.get(transaction, session.getIdentity());
         Table icebergTable = icebergMetadata.getIcebergTable(session, table.getSchemaTableName());
-        Duration dynamicFilteringWaitTimeout = getDynamicFilteringWaitTimeout(session);
-
-        Scan scan = getScan(icebergMetadata, icebergTable, table, executor);
+        InMemoryMetricsReporter metricsReporter = new InMemoryMetricsReporter();
+        Scan scan = getScan(icebergMetadata, icebergTable, table, metricsReporter, icebergPlanningExecutor);
 
         IcebergSplitSource splitSource = new IcebergSplitSource(
                 fileSystemFactory,
                 session,
                 table,
-                icebergTable.io().properties(),
+                icebergTable,
                 scan,
                 table.getMaxScannedFileSize(),
-                dynamicFilter,
-                dynamicFilteringWaitTimeout,
                 constraint,
                 typeManager,
                 table.isRecordScannedFiles(),
                 getMinimumAssignedSplitWeight(session),
-                cachingHostAddressProvider);
+                splitAffinityProvider,
+                metricsReporter,
+                splitSourceExecutor,
+                dynamicFilterColumns,
+                evaluator);
 
         return new ClassLoaderSafeConnectorSplitSource(splitSource, IcebergSplitManager.class.getClassLoader());
     }
 
-    private Scan<?, FileScanTask, CombinedScanTask> getScan(IcebergMetadata icebergMetadata, Table icebergTable, IcebergTableHandle table, ExecutorService executor)
+    private Scan<?, FileScanTask, CombinedScanTask> getScan(IcebergMetadata icebergMetadata, Table icebergTable, IcebergTableHandle table, MetricsReporter metricsReporter, ExecutorService executor)
     {
-        Long fromSnapshot = icebergMetadata.getIncrementalRefreshFromSnapshot().orElse(null);
-        if (fromSnapshot != null) {
+        if (icebergMetadata.getIncrementalRefreshFromSnapshot().isPresent()) {
+            long snapshotId = icebergMetadata.getIncrementalRefreshFromSnapshot().orElseThrow();
             // check if fromSnapshot is still part of the table's snapshot history
-            if (SnapshotUtil.isAncestorOf(icebergTable, fromSnapshot)) {
+            if (SnapshotUtil.isAncestorOf(icebergTable, snapshotId)) {
                 boolean containsModifiedRows = false;
-                for (Snapshot snapshot : SnapshotUtil.ancestorsBetween(icebergTable, icebergTable.currentSnapshot().snapshotId(), fromSnapshot)) {
+                for (Snapshot snapshot : SnapshotUtil.ancestorsBetween(icebergTable, icebergTable.currentSnapshot().snapshotId(), snapshotId)) {
                     if (snapshot.operation().equals(DataOperations.OVERWRITE) || snapshot.operation().equals(DataOperations.DELETE)) {
                         containsModifiedRows = true;
                         break;
                     }
                 }
                 if (!containsModifiedRows) {
-                    return icebergTable.newIncrementalAppendScan().fromSnapshotExclusive(fromSnapshot).planWith(executor);
+                    return icebergTable.newIncrementalAppendScan()
+                            .fromSnapshotExclusive(snapshotId)
+                            .planWith(executor)
+                            .metricsReporter(metricsReporter);
                 }
             }
             // fromSnapshot is missing (could be due to snapshot expiration or rollback), or snapshot range contains modifications
             // (deletes or overwrites), so we cannot perform incremental refresh. Falling back to full refresh.
             icebergMetadata.disableIncrementalRefresh();
         }
-        return icebergTable.newScan().useSnapshot(table.getSnapshotId().get()).planWith(executor);
+
+        Schema schema = schemaFor(icebergTable, table.getSnapshotId().orElseThrow());
+        Set<Integer> projectedIds = table.getProjectedColumns().stream()
+                .map(IcebergColumnHandle::getId)
+                .filter(id -> schema.findField(id) != null) // Newly added column may not be found in current snapshot schema until new files are added
+                .collect(toImmutableSet());
+
+        return icebergTable.newScan()
+                .useSnapshot(table.getSnapshotId().orElseThrow())
+                .project(TypeUtil.select(schema, projectedIds)) // Using Scan.project method because Scan.select throws an exception for nested variant
+                .planWith(executor)
+                .metricsReporter(metricsReporter);
     }
 
     @Override

@@ -14,7 +14,7 @@
 package io.trino.decoder.protobuf;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -35,12 +35,11 @@ import io.trino.decoder.RowDecoderSpec;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.SqlMap;
 import io.trino.spi.block.SqlRow;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.SqlTimestamp;
 import io.trino.spi.type.SqlVarbinary;
-import io.trino.testing.TestingSession;
 import io.trino.type.JsonType;
 import org.junit.jupiter.api.Test;
 
@@ -64,7 +63,6 @@ import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
-import static io.trino.spi.type.TypeSignature.mapType;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
@@ -154,7 +152,7 @@ public class TestProtobufDecoder
                 .decodeRow(messageBuilder.build().toByteArray())
                 .orElseThrow(AssertionError::new);
 
-        assertThat(decodedRow.size()).isEqualTo(9);
+        assertThat(decodedRow).hasSize(9);
 
         checkValue(decodedRow, stringColumn, stringData);
         checkValue(decodedRow, integerColumn, integerData);
@@ -301,13 +299,15 @@ public class TestProtobufDecoder
             DynamicMessage.Builder message = DynamicMessage.newBuilder(descriptor)
                     .setField(descriptor.findFieldByName("nestedRowColumn"), nestedMessage);
             assertOneof(message,
-                    Map.of("nestedRowColumn", ImmutableMap.of("nestedList", List.of(expectedRowMessageValue),
+                    Map.of("nestedRowColumn", ImmutableMap.of(
+                            "nestedList", List.of(expectedRowMessageValue),
                             "nestedMap", ImmutableMap.of("Key", expectedRowMessageValue),
                             "row", expectedRowMessageValue)));
         }
     }
 
-    private void assertOneof(DynamicMessage.Builder messageBuilder,
+    private void assertOneof(
+            DynamicMessage.Builder messageBuilder,
             Map<String, Object> setValue)
             throws Exception
     {
@@ -323,9 +323,9 @@ public class TestProtobufDecoder
                 .decodeRow(message.toByteArray())
                 .orElseThrow(AssertionError::new);
 
-        assertThat(decodedRow.size()).isEqualTo(2);
+        assertThat(decodedRow).hasSize(2);
 
-        final var obj = new ObjectMapper();
+        final var obj = new JsonMapper();
         final var expected = obj.writeValueAsString(setValue);
 
         assertThat(decodedRow.get(testColumnHandle).getSlice().toStringUtf8()).isEqualTo("value");
@@ -400,8 +400,8 @@ public class TestProtobufDecoder
                 .decodeRow(testAny.toByteArray())
                 .orElseThrow(AssertionError::new);
 
-        JsonNode actual = new ObjectMapper().readTree(decodedRow.get(testOneOfColumn).getSlice().toStringUtf8());
-        assertThat(actual.get("@type").textValue().contains("schema")).isTrue();
+        JsonNode actual = new JsonMapper().readTree(decodedRow.get(testOneOfColumn).getSlice().toStringUtf8());
+        assertThat(actual.get("@type").textValue()).contains("schema");
         assertThat(actual.get("stringColumn").textValue()).isEqualTo(stringData);
         assertThat(actual.get("integerColumn").intValue()).isEqualTo(integerData);
         assertThat(actual.get("longColumn").textValue()).isEqualTo(Long.toString(longData));
@@ -459,7 +459,7 @@ public class TestProtobufDecoder
             throws Exception
     {
         DecoderTestColumnHandle listColumn = new DecoderTestColumnHandle(0, "list", new ArrayType(createVarcharType(100)), "list", null, null, false, false, false);
-        DecoderTestColumnHandle mapColumn = new DecoderTestColumnHandle(1, "map", TESTING_TYPE_MANAGER.getType(mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature())), "map", null, null, false, false, false);
+        DecoderTestColumnHandle mapColumn = new DecoderTestColumnHandle(1, "map", new MapType(VARCHAR, VARCHAR, TESTING_TYPE_MANAGER.getTypeOperators()), "map", null, null, false, false, false);
         DecoderTestColumnHandle rowColumn = new DecoderTestColumnHandle(
                 2,
                 "row",
@@ -508,7 +508,7 @@ public class TestProtobufDecoder
                 .decodeRow(messageBuilder.build().toByteArray())
                 .orElseThrow(AssertionError::new);
 
-        assertThat(decodedRow.size()).isEqualTo(3);
+        assertThat(decodedRow).hasSize(3);
 
         Block listBlock = (Block) decodedRow.get(listColumn).getObject();
         assertThat(VARCHAR.getSlice(listBlock, 0).toStringUtf8()).isEqualTo("Presto");
@@ -519,16 +519,15 @@ public class TestProtobufDecoder
 
         SqlRow sqlRow = (SqlRow) decodedRow.get(rowColumn).getObject();
         int rawIndex = sqlRow.getRawIndex();
-        ConnectorSession session = TestingSession.testSessionBuilder().build().toConnectorSession();
-        assertThat(VARCHAR.getObjectValue(session, sqlRow.getRawFieldBlock(0), rawIndex)).isEqualTo(stringData);
-        assertThat(INTEGER.getObjectValue(session, sqlRow.getRawFieldBlock(1), rawIndex)).isEqualTo(integerData);
-        assertThat(BIGINT.getObjectValue(session, sqlRow.getRawFieldBlock(2), rawIndex)).isEqualTo(longData);
-        assertThat(DOUBLE.getObjectValue(session, sqlRow.getRawFieldBlock(3), rawIndex)).isEqualTo(doubleData);
-        assertThat(REAL.getObjectValue(session, sqlRow.getRawFieldBlock(4), rawIndex)).isEqualTo(floatData);
-        assertThat(BOOLEAN.getObjectValue(session, sqlRow.getRawFieldBlock(5), rawIndex)).isEqualTo(booleanData);
-        assertThat(VARCHAR.getObjectValue(session, sqlRow.getRawFieldBlock(6), rawIndex)).isEqualTo(enumData);
-        assertThat(TIMESTAMP_MICROS.getObjectValue(session, sqlRow.getRawFieldBlock(7), rawIndex)).isEqualTo(sqlTimestamp.roundTo(6));
-        assertThat(VARBINARY.getObjectValue(session, sqlRow.getRawFieldBlock(8), rawIndex)).isEqualTo(new SqlVarbinary(bytesData));
+        assertThat(VARCHAR.getObjectValue(sqlRow.getRawFieldBlock(0), rawIndex)).isEqualTo(stringData);
+        assertThat(INTEGER.getObjectValue(sqlRow.getRawFieldBlock(1), rawIndex)).isEqualTo(integerData);
+        assertThat(BIGINT.getObjectValue(sqlRow.getRawFieldBlock(2), rawIndex)).isEqualTo(longData);
+        assertThat(DOUBLE.getObjectValue(sqlRow.getRawFieldBlock(3), rawIndex)).isEqualTo(doubleData);
+        assertThat(REAL.getObjectValue(sqlRow.getRawFieldBlock(4), rawIndex)).isEqualTo(floatData);
+        assertThat(BOOLEAN.getObjectValue(sqlRow.getRawFieldBlock(5), rawIndex)).isEqualTo(booleanData);
+        assertThat(VARCHAR.getObjectValue(sqlRow.getRawFieldBlock(6), rawIndex)).isEqualTo(enumData);
+        assertThat(TIMESTAMP_MICROS.getObjectValue(sqlRow.getRawFieldBlock(7), rawIndex)).isEqualTo(sqlTimestamp.roundTo(6));
+        assertThat(VARBINARY.getObjectValue(sqlRow.getRawFieldBlock(8), rawIndex)).isEqualTo(new SqlVarbinary(bytesData));
     }
 
     @Test
@@ -637,7 +636,7 @@ public class TestProtobufDecoder
                 .decodeRow(messageBuilder.build().toByteArray())
                 .orElseThrow(AssertionError::new);
 
-        assertThat(decodedRow.size()).isEqualTo(9);
+        assertThat(decodedRow).hasSize(9);
 
         checkValue(decodedRow, stringColumn, stringData);
         checkValue(decodedRow, integerColumn, integerData);

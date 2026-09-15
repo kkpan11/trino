@@ -27,6 +27,7 @@ import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.StreamPreferredProperties;
+import io.trino.sql.planner.optimizations.StreamPropertyDerivations.StreamProperties;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ExchangeNode;
 import io.trino.sql.planner.plan.JoinNode;
@@ -48,7 +49,6 @@ import static io.trino.cost.PlanNodeStatsEstimateMath.getFirstKnownOutputSizeInB
 import static io.trino.operator.RetryPolicy.TASK;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static io.trino.sql.planner.optimizations.StreamPreferredProperties.partitionedOn;
-import static io.trino.sql.planner.optimizations.StreamPropertyDerivations.StreamProperties;
 import static io.trino.sql.planner.optimizations.StreamPropertyDerivations.deriveStreamPropertiesWithoutActualProperties;
 import static io.trino.sql.planner.plan.AggregationNode.Step.PARTIAL;
 import static io.trino.sql.planner.plan.ChildReplacer.replaceChildren;
@@ -89,11 +89,12 @@ public class AdaptiveReorderPartitionedJoin
 {
     private static final Capture<ExchangeNode> LOCAL_EXCHANGE_NODE = Capture.newCapture();
     private static final Pattern<JoinNode> PATTERN = join()
-            .matching(AdaptiveReorderPartitionedJoin::isPartitionedJoinWithNoHashSymbols)
+            .matching(AdaptiveReorderPartitionedJoin::isPartitionedJoin)
             .or(
                     // In case partial aggregation is missing
                     prev -> prev.with(right().matching(
-                            exchange().matching(exchangeNode -> exchangeNode.getScope().equals(LOCAL)
+                            exchange()
+                                    .matching(exchangeNode -> exchangeNode.getScope().equals(LOCAL)
                                             // Skip when exchange is gather
                                             && !exchangeNode.getType().equals(GATHER))
                                     .capturedAs(LOCAL_EXCHANGE_NODE))),
@@ -101,7 +102,8 @@ public class AdaptiveReorderPartitionedJoin
                     prev -> prev.with(right().matching(
                             aggregation().matching(node -> node.getStep() == PARTIAL)
                                     .with(source().matching(
-                                            exchange().matching(exchangeNode -> exchangeNode.getScope().equals(LOCAL)
+                                            exchange()
+                                                    .matching(exchangeNode -> exchangeNode.getScope().equals(LOCAL)
                                                             // Skip when exchange is gather
                                                             && !exchangeNode.getType().equals(GATHER))
                                                     .capturedAs(LOCAL_EXCHANGE_NODE))))));
@@ -113,14 +115,10 @@ public class AdaptiveReorderPartitionedJoin
         this.metadata = requireNonNull(metadata, "metadata is null");
     }
 
-    private static boolean isPartitionedJoinWithNoHashSymbols(JoinNode joinNode)
+    private static boolean isPartitionedJoin(JoinNode joinNode)
     {
         // Check if the join is partitioned and does not have hash symbols
-        return joinNode.getDistributionType().equals(Optional.of(PARTITIONED))
-                // TODO: Add support for hash symbols. For now, it's not important since hash optimization
-                //  is disabled by default
-                && joinNode.getRightHashSymbol().isEmpty()
-                && joinNode.getLeftHashSymbol().isEmpty();
+        return joinNode.getDistributionType().equals(Optional.of(PARTITIONED));
     }
 
     @Override
@@ -156,10 +154,7 @@ public class AdaptiveReorderPartitionedJoin
     private static boolean isBuildSideLocalExchangeNode(ExchangeNode exchangeNode, Set<Symbol> rightSymbols)
     {
         return exchangeNode.getScope() == LOCAL
-                && exchangeNode.getPartitioningScheme().getPartitioning().getColumns().equals(rightSymbols)
-                // TODO: Add support for local exchange with hash symbols. For now, it's not important since hash
-                //  optimization is disabled by default
-                && exchangeNode.getPartitioningScheme().getHashColumn().isEmpty();
+                && exchangeNode.getPartitioningScheme().getPartitioning().getColumns().equals(rightSymbols);
     }
 
     private static JoinNode flipJoinAndFixLocalExchanges(
@@ -206,8 +201,6 @@ public class AdaptiveReorderPartitionedJoin
                 flippedJoinNode.getRightOutputSymbols(),
                 flippedJoinNode.isMaySkipOutputDuplicates(),
                 flippedJoinNode.getFilter(),
-                flippedJoinNode.getLeftHashSymbol(),
-                flippedJoinNode.getRightHashSymbol(),
                 flippedJoinNode.getDistributionType(),
                 flippedJoinNode.isSpillable(),
                 flippedJoinNode.getDynamicFilters(),
@@ -270,9 +263,9 @@ public class AdaptiveReorderPartitionedJoin
         @Override
         public PlanNode visitExchange(ExchangeNode node, RewriteContext<Void> ctx)
         {
-            verify(
-                    node.getScope().equals(LOCAL) && node.getId().equals(localExchangeNodeId),
-                    "Unexpected exchange node: %s", node.getId());
+            verify(node.getScope().equals(LOCAL) && node.getId().equals(localExchangeNodeId),
+                    "Unexpected exchange node: %s",
+                    node.getId());
             // Remove local exchange if there is only one source since we are converting build side
             // to probe side
             if (node.getSources().size() == 1) {
@@ -309,8 +302,7 @@ public class AdaptiveReorderPartitionedJoin
                     context.getIdAllocator().getNextId(),
                     LOCAL,
                     node,
-                    buildSymbols,
-                    Optional.empty());
+                    buildSymbols);
         }
 
         @Override

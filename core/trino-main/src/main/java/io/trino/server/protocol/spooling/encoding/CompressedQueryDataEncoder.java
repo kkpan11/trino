@@ -42,7 +42,7 @@ public abstract class CompressedQueryDataEncoder
     public DataAttributes encodeTo(OutputStream output, List<Page> pages)
             throws IOException
     {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream(pagesSize(pages));
+        ExposedByteArrayOutputStream buffer = new ExposedByteArrayOutputStream(pagesSize(pages));
         DataAttributes attributes = delegate.encodeTo(buffer, pages);
         int uncompressedSize = attributes.get(SEGMENT_SIZE, Integer.class);
 
@@ -54,9 +54,16 @@ public abstract class CompressedQueryDataEncoder
 
         return attributes
                 .toBuilder()
-                .set(SEGMENT_SIZE, compress(buffer.toByteArray(), uncompressedSize, output)) // actual size of compressed data
+                // Compress directly from the backing array (only the first uncompressedSize bytes are read) to avoid copying the whole segment
+                .set(SEGMENT_SIZE, compress(buffer.buffer(), uncompressedSize, output)) // actual size of compressed data
                 .set(UNCOMPRESSED_SIZE, uncompressedSize) // expected by the decoder if the data is compressed
                 .build();
+    }
+
+    @Override
+    public void close()
+    {
+        delegate.close();
     }
 
     protected abstract int compress(byte[] buffer, int uncompressedSize, OutputStream output)
@@ -67,5 +74,21 @@ public abstract class CompressedQueryDataEncoder
         return saturatedCast(pages.stream()
                 .mapToLong(Page::getSizeInBytes)
                 .sum());
+    }
+
+    // Exposes the backing array to avoid the defensive copy made by ByteArrayOutputStream.toByteArray().
+    // Safe because the buffer is consumed on the same thread immediately after encoding completes.
+    private static final class ExposedByteArrayOutputStream
+            extends ByteArrayOutputStream
+    {
+        public ExposedByteArrayOutputStream(int size)
+        {
+            super(size);
+        }
+
+        public byte[] buffer()
+        {
+            return buf;
+        }
     }
 }

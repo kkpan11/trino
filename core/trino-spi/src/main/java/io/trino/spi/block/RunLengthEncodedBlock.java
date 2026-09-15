@@ -13,18 +13,15 @@
  */
 package io.trino.spi.block;
 
-import io.trino.spi.predicate.Utils;
 import io.trino.spi.type.Type;
-import jakarta.annotation.Nullable;
 
-import java.util.OptionalInt;
 import java.util.function.ObjLongConsumer;
 
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
-import static io.trino.spi.block.BlockUtil.checkReadablePosition;
 import static io.trino.spi.block.BlockUtil.checkValidPosition;
 import static io.trino.spi.block.BlockUtil.checkValidRegion;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -35,10 +32,7 @@ public final class RunLengthEncodedBlock
 
     public static Block create(Type type, Object value, int positionCount)
     {
-        Block block = Utils.nativeValueToBlock(type, value);
-        if (block instanceof RunLengthEncodedBlock) {
-            block = ((RunLengthEncodedBlock) block).getValue();
-        }
+        ValueBlock block = writeNativeValue(type, value);
         return create(block, positionCount);
     }
 
@@ -58,11 +52,6 @@ public final class RunLengthEncodedBlock
 
         if (value instanceof ValueBlock valueBlock) {
             return new RunLengthEncodedBlock(valueBlock, positionCount);
-        }
-
-        // if the value is lazy be careful to not materialize it
-        if (value instanceof LazyBlock lazyBlock) {
-            return new LazyBlock(positionCount, () -> create(lazyBlock.getBlock(), positionCount));
         }
 
         // unwrap the value
@@ -107,21 +96,9 @@ public final class RunLengthEncodedBlock
     }
 
     @Override
-    public OptionalInt fixedSizeInBytesPerPosition()
-    {
-        return OptionalInt.empty(); // size does not vary per position selected
-    }
-
-    @Override
     public long getSizeInBytes()
     {
-        return value.getSizeInBytes();
-    }
-
-    @Override
-    public long getLogicalSizeInBytes()
-    {
-        return positionCount * value.getLogicalSizeInBytes();
+        return value.getSizeInBytes() * positionCount;
     }
 
     @Override
@@ -141,12 +118,6 @@ public final class RunLengthEncodedBlock
     {
         consumer.accept(value, value.getRetainedSizeInBytes());
         consumer.accept(this, INSTANCE_SIZE);
-    }
-
-    @Override
-    public String getEncodingName()
-    {
-        return RunLengthBlockEncoding.NAME;
     }
 
     @Override
@@ -179,13 +150,7 @@ public final class RunLengthEncodedBlock
     @Override
     public long getRegionSizeInBytes(int position, int length)
     {
-        return value.getSizeInBytes();
-    }
-
-    @Override
-    public long getPositionsSizeInBytes(@Nullable boolean[] positions, int selectedPositionCount)
-    {
-        return value.getSizeInBytes();
+        return value.getSizeInBytes() * length;
     }
 
     @Override
@@ -198,20 +163,26 @@ public final class RunLengthEncodedBlock
     @Override
     public ValueBlock getSingleValueBlock(int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
         return value;
     }
 
     @Override
     public boolean mayHaveNull()
     {
-        return positionCount > 0 && value.isNull(0);
+        return hasNull();
+    }
+
+    @Override
+    public boolean hasNull()
+    {
+        return value.isNull(0);
     }
 
     @Override
     public boolean isNull(int position)
     {
-        checkReadablePosition(this, position);
+        checkValidPosition(position, positionCount);
         return value.isNull(0);
     }
 
@@ -236,23 +207,6 @@ public final class RunLengthEncodedBlock
         sb.append(", value=").append(value);
         sb.append('}');
         return sb.toString();
-    }
-
-    @Override
-    public boolean isLoaded()
-    {
-        return value.isLoaded();
-    }
-
-    @Override
-    public Block getLoadedBlock()
-    {
-        Block loadedValueBlock = value.getLoadedBlock();
-
-        if (loadedValueBlock == value) {
-            return this;
-        }
-        return create(loadedValueBlock, positionCount);
     }
 
     @Override

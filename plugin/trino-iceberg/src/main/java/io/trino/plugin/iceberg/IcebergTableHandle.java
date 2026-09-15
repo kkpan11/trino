@@ -20,7 +20,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.DoNotCall;
 import io.airlift.units.DataSize;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
@@ -29,23 +28,26 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
 public class IcebergTableHandle
         implements ConnectorTableHandle
 {
-    private final CatalogHandle catalog;
     private final String schemaName;
     private final String tableName;
     private final TableType tableType;
-    private final Optional<Long> snapshotId;
+    private final OptionalLong snapshotId;
     private final String tableSchemaJson;
     // Empty means the partitioning spec is not known (can be the case for certain time travel queries).
-    private final Optional<String> partitionSpecJson;
+    private final OptionalInt specId;
+    // Map of spec id to partition spec JSON for all specs in the table
+    private final Map<Integer, String> partitionSpecJsons;
     private final int formatVersion;
     private final String tableLocation;
     private final Map<String, String> storageProperties;
@@ -56,7 +58,7 @@ public class IcebergTableHandle
     // Filter guaranteed to be enforced by Iceberg connector
     private final TupleDomain<IcebergColumnHandle> enforcedPredicate;
 
-    // Columns that are present in {@link Constraint#predicate()} applied on the table scan
+    // Columns that are present in {@link Constraint#getExpression()} applied on the table scan
     private final Set<IcebergColumnHandle> constraintColumns;
 
     // semantically limit is applied after enforcedPredicate
@@ -64,6 +66,9 @@ public class IcebergTableHandle
 
     private final Set<IcebergColumnHandle> projectedColumns;
     private final Optional<String> nameMappingJson;
+
+    // Coordinator-only - table partitioning applied to the table splits if available and active
+    private final Optional<IcebergTablePartitioning> tablePartitioning;
 
     // OPTIMIZE only. Coordinator-only
     private final boolean recordScannedFiles;
@@ -75,13 +80,13 @@ public class IcebergTableHandle
     @JsonCreator
     @DoNotCall // For JSON deserialization only
     public static IcebergTableHandle fromJsonForDeserializationOnly(
-            @JsonProperty("catalog") CatalogHandle catalog,
             @JsonProperty("schemaName") String schemaName,
             @JsonProperty("tableName") String tableName,
             @JsonProperty("tableType") TableType tableType,
-            @JsonProperty("snapshotId") Optional<Long> snapshotId,
+            @JsonProperty("snapshotId") OptionalLong snapshotId,
             @JsonProperty("tableSchemaJson") String tableSchemaJson,
-            @JsonProperty("partitionSpecJson") Optional<String> partitionSpecJson,
+            @JsonProperty("specId") OptionalInt specId,
+            @JsonProperty("partitionSpecJsons") Map<Integer, String> partitionSpecJsons,
             @JsonProperty("formatVersion") int formatVersion,
             @JsonProperty("unenforcedPredicate") TupleDomain<IcebergColumnHandle> unenforcedPredicate,
             @JsonProperty("enforcedPredicate") TupleDomain<IcebergColumnHandle> enforcedPredicate,
@@ -92,13 +97,13 @@ public class IcebergTableHandle
             @JsonProperty("storageProperties") Map<String, String> storageProperties)
     {
         return new IcebergTableHandle(
-                catalog,
                 schemaName,
                 tableName,
                 tableType,
                 snapshotId,
                 tableSchemaJson,
-                partitionSpecJson,
+                specId,
+                partitionSpecJsons,
                 formatVersion,
                 unenforcedPredicate,
                 enforcedPredicate,
@@ -107,6 +112,7 @@ public class IcebergTableHandle
                 nameMappingJson,
                 tableLocation,
                 storageProperties,
+                Optional.empty(),
                 false,
                 Optional.empty(),
                 ImmutableSet.of(),
@@ -114,13 +120,13 @@ public class IcebergTableHandle
     }
 
     public IcebergTableHandle(
-            CatalogHandle catalog,
             String schemaName,
             String tableName,
             TableType tableType,
-            Optional<Long> snapshotId,
+            OptionalLong snapshotId,
             String tableSchemaJson,
-            Optional<String> partitionSpecJson,
+            OptionalInt specId,
+            Map<Integer, String> partitionSpecJsons,
             int formatVersion,
             TupleDomain<IcebergColumnHandle> unenforcedPredicate,
             TupleDomain<IcebergColumnHandle> enforcedPredicate,
@@ -129,18 +135,23 @@ public class IcebergTableHandle
             Optional<String> nameMappingJson,
             String tableLocation,
             Map<String, String> storageProperties,
+            Optional<IcebergTablePartitioning> tablePartitioning,
             boolean recordScannedFiles,
             Optional<DataSize> maxScannedFileSize,
             Set<IcebergColumnHandle> constraintColumns,
             Optional<Boolean> forAnalyze)
     {
-        this.catalog = requireNonNull(catalog, "catalog is null");
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         this.tableName = requireNonNull(tableName, "tableName is null");
         this.tableType = requireNonNull(tableType, "tableType is null");
         this.snapshotId = requireNonNull(snapshotId, "snapshotId is null");
         this.tableSchemaJson = requireNonNull(tableSchemaJson, "schemaJson is null");
-        this.partitionSpecJson = requireNonNull(partitionSpecJson, "partitionSpecJson is null");
+        this.specId = requireNonNull(specId, "specId is null");
+        this.partitionSpecJsons = ImmutableMap.copyOf(requireNonNull(partitionSpecJsons, "partitionSpecJsons is null"));
+        checkArgument(
+                specId.isEmpty() || partitionSpecJsons.containsKey(specId.orElseThrow()),
+                "specId %s is present but partitionSpecJsons does not contain this id",
+                specId);
         this.formatVersion = formatVersion;
         this.unenforcedPredicate = requireNonNull(unenforcedPredicate, "unenforcedPredicate is null");
         this.enforcedPredicate = requireNonNull(enforcedPredicate, "enforcedPredicate is null");
@@ -149,16 +160,11 @@ public class IcebergTableHandle
         this.nameMappingJson = requireNonNull(nameMappingJson, "nameMappingJson is null");
         this.tableLocation = requireNonNull(tableLocation, "tableLocation is null");
         this.storageProperties = ImmutableMap.copyOf(requireNonNull(storageProperties, "storageProperties is null"));
+        this.tablePartitioning = requireNonNull(tablePartitioning, "tablePartitioning is null");
         this.recordScannedFiles = recordScannedFiles;
         this.maxScannedFileSize = requireNonNull(maxScannedFileSize, "maxScannedFileSize is null");
         this.constraintColumns = ImmutableSet.copyOf(requireNonNull(constraintColumns, "constraintColumns is null"));
         this.forAnalyze = requireNonNull(forAnalyze, "forAnalyze is null");
-    }
-
-    @JsonProperty
-    public CatalogHandle getCatalog()
-    {
-        return catalog;
     }
 
     @JsonProperty
@@ -181,7 +187,7 @@ public class IcebergTableHandle
 
     // Empty only when reading from a table that has no snapshots yet.
     @JsonProperty
-    public Optional<Long> getSnapshotId()
+    public OptionalLong getSnapshotId()
     {
         return snapshotId;
     }
@@ -193,9 +199,15 @@ public class IcebergTableHandle
     }
 
     @JsonProperty
-    public Optional<String> getPartitionSpecJson()
+    public OptionalInt getSpecId()
     {
-        return partitionSpecJson;
+        return specId;
+    }
+
+    @JsonProperty
+    public Map<Integer, String> getPartitionSpecJsons()
+    {
+        return partitionSpecJsons;
     }
 
     @JsonProperty
@@ -246,6 +258,15 @@ public class IcebergTableHandle
         return storageProperties;
     }
 
+    /**
+     * Get the partitioning for the table splits.
+     */
+    @JsonIgnore
+    public Optional<IcebergTablePartitioning> getTablePartitioning()
+    {
+        return tablePartitioning;
+    }
+
     @JsonIgnore
     public boolean isRecordScannedFiles()
     {
@@ -283,13 +304,13 @@ public class IcebergTableHandle
     public IcebergTableHandle withProjectedColumns(Set<IcebergColumnHandle> projectedColumns)
     {
         return new IcebergTableHandle(
-                catalog,
                 schemaName,
                 tableName,
                 tableType,
                 snapshotId,
                 tableSchemaJson,
-                partitionSpecJson,
+                specId,
+                partitionSpecJsons,
                 formatVersion,
                 unenforcedPredicate,
                 enforcedPredicate,
@@ -298,6 +319,7 @@ public class IcebergTableHandle
                 nameMappingJson,
                 tableLocation,
                 storageProperties,
+                tablePartitioning,
                 recordScannedFiles,
                 maxScannedFileSize,
                 constraintColumns,
@@ -307,13 +329,13 @@ public class IcebergTableHandle
     public IcebergTableHandle forAnalyze()
     {
         return new IcebergTableHandle(
-                catalog,
                 schemaName,
                 tableName,
                 tableType,
                 snapshotId,
                 tableSchemaJson,
-                partitionSpecJson,
+                specId,
+                partitionSpecJsons,
                 formatVersion,
                 unenforcedPredicate,
                 enforcedPredicate,
@@ -322,6 +344,7 @@ public class IcebergTableHandle
                 nameMappingJson,
                 tableLocation,
                 storageProperties,
+                tablePartitioning,
                 recordScannedFiles,
                 maxScannedFileSize,
                 constraintColumns,
@@ -331,13 +354,13 @@ public class IcebergTableHandle
     public IcebergTableHandle forOptimize(boolean recordScannedFiles, DataSize maxScannedFileSize)
     {
         return new IcebergTableHandle(
-                catalog,
                 schemaName,
                 tableName,
                 tableType,
                 snapshotId,
                 tableSchemaJson,
-                partitionSpecJson,
+                specId,
+                partitionSpecJsons,
                 formatVersion,
                 unenforcedPredicate,
                 enforcedPredicate,
@@ -346,8 +369,34 @@ public class IcebergTableHandle
                 nameMappingJson,
                 tableLocation,
                 storageProperties,
+                tablePartitioning,
                 recordScannedFiles,
                 Optional.of(maxScannedFileSize),
+                constraintColumns,
+                forAnalyze);
+    }
+
+    public IcebergTableHandle withTablePartitioning(Optional<IcebergTablePartitioning> requiredTablePartitioning)
+    {
+        return new IcebergTableHandle(
+                schemaName,
+                tableName,
+                tableType,
+                snapshotId,
+                tableSchemaJson,
+                specId,
+                partitionSpecJsons,
+                formatVersion,
+                unenforcedPredicate,
+                enforcedPredicate,
+                limit,
+                projectedColumns,
+                nameMappingJson,
+                tableLocation,
+                storageProperties,
+                requiredTablePartitioning,
+                recordScannedFiles,
+                maxScannedFileSize,
                 constraintColumns,
                 forAnalyze);
     }
@@ -364,13 +413,13 @@ public class IcebergTableHandle
 
         IcebergTableHandle that = (IcebergTableHandle) o;
         return recordScannedFiles == that.recordScannedFiles &&
-                Objects.equals(catalog, that.catalog) &&
                 Objects.equals(schemaName, that.schemaName) &&
                 Objects.equals(tableName, that.tableName) &&
                 tableType == that.tableType &&
                 Objects.equals(snapshotId, that.snapshotId) &&
                 Objects.equals(tableSchemaJson, that.tableSchemaJson) &&
-                Objects.equals(partitionSpecJson, that.partitionSpecJson) &&
+                Objects.equals(specId, that.specId) &&
+                Objects.equals(partitionSpecJsons, that.partitionSpecJsons) &&
                 formatVersion == that.formatVersion &&
                 Objects.equals(unenforcedPredicate, that.unenforcedPredicate) &&
                 Objects.equals(enforcedPredicate, that.enforcedPredicate) &&
@@ -388,13 +437,13 @@ public class IcebergTableHandle
     public int hashCode()
     {
         return Objects.hash(
-                catalog,
                 schemaName,
                 tableName,
                 tableType,
                 snapshotId,
                 tableSchemaJson,
-                partitionSpecJson,
+                specId,
+                partitionSpecJsons,
                 formatVersion,
                 unenforcedPredicate,
                 enforcedPredicate,

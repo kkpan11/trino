@@ -16,7 +16,6 @@ package io.trino.plugin.base.ldap;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
-import io.airlift.units.Duration;
 import io.trino.plugin.base.ssl.SslUtils;
 import io.trino.spi.security.AccessDeniedException;
 
@@ -65,15 +64,9 @@ public class JdkLdapClient
                 .put(PROVIDER_URL, ldapUrl)
                 .put(REFERRAL, ldapConfig.isIgnoreReferrals() ? "ignore" : "follow");
 
-        ldapConfig.getLdapConnectionTimeout()
-                .map(Duration::toMillis)
-                .map(String::valueOf)
-                .ifPresent(timeout -> builder.put("com.sun.jndi.ldap.connect.timeout", timeout));
+        builder.put("com.sun.jndi.ldap.connect.timeout", String.valueOf(ldapConfig.getLdapConnectionTimeout().toMillis()));
 
-        ldapConfig.getLdapReadTimeout()
-                .map(Duration::toMillis)
-                .map(String::valueOf)
-                .ifPresent(timeout -> builder.put("com.sun.jndi.ldap.read.timeout", timeout));
+        builder.put("com.sun.jndi.ldap.read.timeout", String.valueOf(ldapConfig.getLdapReadTimeout().toMillis()));
 
         this.basicEnvironment = builder.buildOrThrow();
 
@@ -88,19 +81,35 @@ public class JdkLdapClient
     public <T> T processLdapContext(String userName, String password, LdapContextProcessor<T> contextProcessor)
             throws NamingException
     {
-        try (CloseableContext context = createUserDirContext(userName, password)) {
-            return contextProcessor.process(context.context);
-        }
+        return withSslContext(() -> {
+            try (CloseableContext context = createUserDirContext(userName, password)) {
+                return contextProcessor.process(context.context);
+            }
+        });
     }
 
     @Override
     public <T> T executeLdapQuery(String userName, String password, LdapQuery ldapQuery, LdapSearchResultProcessor<T> resultProcessor)
             throws NamingException
     {
-        try (CloseableContext context = createUserDirContext(userName, password);
-                CloseableSearchResults search = searchContext(ldapQuery, context)) {
-            return resultProcessor.process(search.searchResults);
+        return withSslContext(() -> {
+            try (CloseableContext context = createUserDirContext(userName, password);
+                    CloseableSearchResults search = searchContext(ldapQuery, context)) {
+                return resultProcessor.process(search.searchResults);
+            }
+        });
+    }
+
+    // The SSLContext is consumed by LdapSslSocketFactory.getDefault(), which JNDI invokes on this thread
+    // whenever it opens an LDAP connection (context creation, and referral chasing during a search). Keep
+    // it bound for the whole operation so every connection JNDI opens can see it.
+    private <T> T withSslContext(ScopedValue.CallableOp<T, NamingException> operation)
+            throws NamingException
+    {
+        if (sslContext.isPresent()) {
+            return LdapSslSocketFactory.callWithSslContext(sslContext.get(), operation);
         }
+        return operation.call();
     }
 
     private static CloseableSearchResults searchContext(LdapQuery ldapQuery, CloseableContext context)
@@ -109,7 +118,12 @@ public class JdkLdapClient
         SearchControls searchControls = new SearchControls();
         searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
         searchControls.setReturningAttributes(ldapQuery.getAttributes());
-        return new CloseableSearchResults(context.search(ldapQuery.getSearchBase(), ldapQuery.getSearchFilter(), searchControls));
+        return new CloseableSearchResults(
+                context.search(
+                        ldapQuery.getSearchBase(),
+                        ldapQuery.getSearchFilter(),
+                        ldapQuery.getFilterArguments(),
+                        searchControls));
     }
 
     private CloseableContext createUserDirContext(String userDistinguishedName, String password)
@@ -137,12 +151,11 @@ public class JdkLdapClient
                 .put(SECURITY_PRINCIPAL, userDistinguishedName)
                 .put(SECURITY_CREDENTIALS, password);
 
-        sslContext.ifPresent(context -> {
-            LdapSslSocketFactory.setSslContextForCurrentThread(context);
-
+        if (sslContext.isPresent()) {
             // see https://docs.oracle.com/javase/jndi/tutorial/ldap/security/ssl.html
+            // the SSLContext itself is bound for the current thread by withSslContext
             environment.put("java.naming.ldap.factory.socket", LdapSslSocketFactory.class.getName());
-        });
+        }
 
         return environment.buildOrThrow();
     }
@@ -175,10 +188,10 @@ public class JdkLdapClient
         }
 
         @SuppressWarnings("BanJNDI")
-        public NamingEnumeration<SearchResult> search(String name, String filter, SearchControls searchControls)
+        public NamingEnumeration<SearchResult> search(String name, String filter, Object[] filterArguments, SearchControls searchControls)
                 throws NamingException
         {
-            return context.search(name, filter, searchControls);
+            return context.search(name, filter, filterArguments, searchControls);
         }
 
         @Override

@@ -59,7 +59,6 @@ import java.util.stream.LongStream;
 import static com.google.common.base.Strings.padEnd;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
-import static io.airlift.testing.Assertions.assertContains;
 import static io.trino.plugin.jdbc.TestingJdbcTypeHandle.JDBC_BIGINT;
 import static io.trino.plugin.jdbc.TestingJdbcTypeHandle.JDBC_BOOLEAN;
 import static io.trino.plugin.jdbc.TestingJdbcTypeHandle.JDBC_CHAR;
@@ -81,11 +80,11 @@ import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeType.TIME_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.DateTimeTestingUtils.sqlTimeOf;
 import static io.trino.testing.DateTimeTestingUtils.sqlTimestampOf;
-import static io.trino.type.DateTimes.MICROSECONDS_PER_MILLISECOND;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.String.format;
 import static java.time.temporal.ChronoUnit.DAYS;
@@ -227,7 +226,8 @@ public class TestDefaultJdbcQueryBuilder
                                         Range.equal(INTEGER, 96L),
                                         Range.lessThan(INTEGER, 0L))),
                         false))
-                .put(columns.get(2), Domain.create(SortedRangeSet.copyOf(BOOLEAN,
+                .put(columns.get(2), Domain.create(SortedRangeSet.copyOf(
+                                BOOLEAN,
                                 ImmutableList.of(Range.equal(BOOLEAN, true))),
                         false))
                 .buildOrThrow());
@@ -366,9 +366,9 @@ public class TestDefaultJdbcQueryBuilder
             }
             assertThat(builder.build()).containsOnly("test_str_700", "test_str_701", "test_str_180", "test_str_196");
 
-            assertContains(preparedStatement.toString(), "\"col_3\" >= ?");
-            assertContains(preparedStatement.toString(), "\"col_3\" < ?");
-            assertContains(preparedStatement.toString(), "\"col_3\" IN (?,?)");
+            assertThat(preparedStatement.toString()).contains("\"col_3\" >= ?");
+            assertThat(preparedStatement.toString()).contains("\"col_3\" < ?");
+            assertThat(preparedStatement.toString()).contains("\"col_3\" IN (?,?)");
         }
     }
 
@@ -407,9 +407,9 @@ public class TestDefaultJdbcQueryBuilder
                     padEnd("test_str_701", 128, ' '),
                     padEnd("test_str_196", 128, ' '));
 
-            assertContains(preparedStatement.toString(), "\"col_11\" >= ?");
-            assertContains(preparedStatement.toString(), "\"col_11\" < ?");
-            assertContains(preparedStatement.toString(), "\"col_11\" IN (?,?)");
+            assertThat(preparedStatement.toString()).contains("\"col_11\" >= ?");
+            assertThat(preparedStatement.toString()).contains("\"col_11\" < ?");
+            assertThat(preparedStatement.toString()).contains("\"col_11\" IN (?,?)");
         }
     }
 
@@ -457,12 +457,12 @@ public class TestDefaultJdbcQueryBuilder
                     toTime(8, 23, 37),
                     toTime(20, 23, 37));
 
-            assertContains(preparedStatement.toString(), "\"col_4\" >= ?");
-            assertContains(preparedStatement.toString(), "\"col_4\" < ?");
-            assertContains(preparedStatement.toString(), "\"col_4\" IN (?,?)");
-            assertContains(preparedStatement.toString(), "\"col_5\" > ?");
-            assertContains(preparedStatement.toString(), "\"col_5\" <= ?");
-            assertContains(preparedStatement.toString(), "\"col_5\" IN (?,?)");
+            assertThat(preparedStatement.toString()).contains("\"col_4\" >= ?");
+            assertThat(preparedStatement.toString()).contains("\"col_4\" < ?");
+            assertThat(preparedStatement.toString()).contains("\"col_4\" IN (?,?)");
+            assertThat(preparedStatement.toString()).contains("\"col_5\" > ?");
+            assertThat(preparedStatement.toString()).contains("\"col_5\" <= ?");
+            assertThat(preparedStatement.toString()).contains("\"col_5\" IN (?,?)");
         }
     }
 
@@ -499,9 +499,9 @@ public class TestDefaultJdbcQueryBuilder
                     toTimestamp(2016, 6, 9, 12, 23, 37),
                     toTimestamp(2016, 10, 19, 16, 23, 37));
 
-            assertContains(preparedStatement.toString(), "\"col_6\" > ?");
-            assertContains(preparedStatement.toString(), "\"col_6\" <= ?");
-            assertContains(preparedStatement.toString(), "\"col_6\" IN (?,?)");
+            assertThat(preparedStatement.toString()).contains("\"col_6\" > ?");
+            assertThat(preparedStatement.toString()).contains("\"col_6\" <= ?");
+            assertThat(preparedStatement.toString()).contains("\"col_6\" IN (?,?)");
         }
     }
 
@@ -522,12 +522,14 @@ public class TestDefaultJdbcQueryBuilder
                 ImmutableMap.of(columns.get(3), "name2", columns.get(8), "rcol8"),
                 List.of(new ParameterizedExpression("\"lcol7\" = \"rcol8\"", List.of())));
         try (PreparedStatement preparedStatement = queryBuilder.prepareStatement(jdbcClient, SESSION, connection, preparedQuery, Optional.empty())) {
-            assertThat(preparedQuery.query()).isEqualTo("""
+            assertThat(preparedQuery.query()).isEqualTo(
+                    """
                     SELECT "name1", "lcol7", "name2", "rcol8" FROM \
                     (SELECT "col_2" AS "name1", "col_7" AS "lcol7" FROM (SELECT * FROM "test_table") l) l \
                     INNER JOIN \
                     (SELECT "col_3" AS "name2", "col_8" AS "rcol8" FROM (SELECT * FROM "test_table") r) r \
-                    ON ("lcol7" = "rcol8")""");
+                    ON ("lcol7" = "rcol8")\
+                    """);
             long count = 0;
             try (ResultSet resultSet = preparedStatement.executeQuery()) {
                 while (resultSet.next()) {
@@ -542,6 +544,13 @@ public class TestDefaultJdbcQueryBuilder
     public void testBuildJoinSqlLegacy()
             throws SQLException
     {
+        testBuildJoinSqlLegacy(JoinCondition.Operator.EQUAL, "=");
+        testBuildJoinSqlLegacy(JoinCondition.Operator.IDENTICAL, "IS NOT DISTINCT FROM");
+    }
+
+    private void testBuildJoinSqlLegacy(JoinCondition.Operator joinOperator, String sqlOperator)
+            throws SQLException
+    {
         Connection connection = database.getConnection();
 
         PreparedQuery preparedQuery = queryBuilder.legacyPrepareJoinQuery(
@@ -551,7 +560,7 @@ public class TestDefaultJdbcQueryBuilder
                 JoinType.INNER,
                 new PreparedQuery("SELECT * FROM \"test_table\"", List.of()),
                 new PreparedQuery("SELECT * FROM \"test_table\"", List.of()),
-                List.of(new JdbcJoinCondition(columns.get(7), JoinCondition.Operator.EQUAL, columns.get(8))),
+                List.of(new JdbcJoinCondition(columns.get(7), joinOperator, columns.get(8))),
                 Map.of(columns.get(2), "name1"),
                 Map.of(columns.get(3), "name2"));
         try (PreparedStatement preparedStatement = queryBuilder.prepareStatement(jdbcClient, SESSION, connection, preparedQuery, Optional.empty())) {
@@ -560,7 +569,7 @@ public class TestDefaultJdbcQueryBuilder
                     "(SELECT * FROM \"test_table\") l " +
                     "INNER JOIN " +
                     "(SELECT * FROM \"test_table\") r " +
-                    "ON l.\"col_7\" = r.\"col_8\"");
+                    "ON l.\"col_7\" " + sqlOperator + " r.\"col_8\"");
             long count = 0;
             try (ResultSet resultSet = preparedStatement.executeQuery()) {
                 while (resultSet.next()) {
@@ -730,7 +739,7 @@ public class TestDefaultJdbcQueryBuilder
 
     private static long toTimeRepresentation(int hour, int minute, int second)
     {
-        SqlTime time = sqlTimeOf(hour, minute, second, 0);
+        SqlTime time = sqlTimeOf(3, hour, minute, second, 0);
         return time.getPicos();
     }
 

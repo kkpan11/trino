@@ -24,7 +24,6 @@ import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
-import io.trino.spi.type.Type;
 
 import java.util.List;
 import java.util.Map;
@@ -239,6 +238,15 @@ public class ClassLoaderSafeConnectorAccessControl
     }
 
     @Override
+    public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> columnNames)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanSelectFromColumns(context, tableName, branch, columnNames);
+        }
+    }
+
+    @Deprecated
+    @Override
     public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
@@ -247,6 +255,15 @@ public class ClassLoaderSafeConnectorAccessControl
     }
 
     @Override
+    public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanInsertIntoTable(context, tableName, branch);
+        }
+    }
+
+    @Deprecated
+    @Override
     public void checkCanInsertIntoTable(ConnectorSecurityContext context, SchemaTableName tableName)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
@@ -254,6 +271,15 @@ public class ClassLoaderSafeConnectorAccessControl
         }
     }
 
+    @Override
+    public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanDeleteFromTable(context, tableName, branch);
+        }
+    }
+
+    @Deprecated
     @Override
     public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName)
     {
@@ -271,10 +297,19 @@ public class ClassLoaderSafeConnectorAccessControl
     }
 
     @Override
-    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> updatedColumnNames)
+    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> updatedColumnNames)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            delegate.checkCanUpdateTableColumns(context, tableName, updatedColumnNames);
+            delegate.checkCanUpdateTableColumns(context, tableName, branch, updatedColumnNames);
+        }
+    }
+
+    @Deprecated
+    @Override
+    public void checkCanUpdateTableColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> updatedColumns)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanUpdateTableColumns(context, tableName, updatedColumns);
         }
     }
 
@@ -295,6 +330,14 @@ public class ClassLoaderSafeConnectorAccessControl
     }
 
     @Override
+    public void checkCanRefreshView(ConnectorSecurityContext context, SchemaTableName viewName)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanRefreshView(context, viewName);
+        }
+    }
+
+    @Override
     public void checkCanSetViewAuthorization(ConnectorSecurityContext context, SchemaTableName viewName, TrinoPrincipal principal)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
@@ -310,6 +353,15 @@ public class ClassLoaderSafeConnectorAccessControl
         }
     }
 
+    @Override
+    public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Optional<String> branch, Set<String> columnNames)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanCreateViewWithSelectFromColumns(context, tableName, branch, columnNames);
+        }
+    }
+
+    @Deprecated
     @Override
     public void checkCanCreateViewWithSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
     {
@@ -347,6 +399,14 @@ public class ClassLoaderSafeConnectorAccessControl
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.checkCanRenameMaterializedView(context, viewName, newViewName);
+        }
+    }
+
+    @Override
+    public void checkCanSetMaterializedViewAuthorization(ConnectorSecurityContext context, SchemaTableName viewName, TrinoPrincipal principal)
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanSetMaterializedViewAuthorization(context, viewName, principal);
         }
     }
 
@@ -431,7 +491,8 @@ public class ClassLoaderSafeConnectorAccessControl
     }
 
     @Override
-    public void checkCanGrantRoles(ConnectorSecurityContext context,
+    public void checkCanGrantRoles(
+            ConnectorSecurityContext context,
             Set<String> roles,
             Set<TrinoPrincipal> grantees,
             boolean adminOption,
@@ -443,7 +504,8 @@ public class ClassLoaderSafeConnectorAccessControl
     }
 
     @Override
-    public void checkCanRevokeRoles(ConnectorSecurityContext context,
+    public void checkCanRevokeRoles(
+            ConnectorSecurityContext context,
             Set<String> roles,
             Set<TrinoPrincipal> grantees,
             boolean adminOption,
@@ -559,18 +621,66 @@ public class ClassLoaderSafeConnectorAccessControl
     }
 
     @Override
-    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanShowBranches(ConnectorSecurityContext context, SchemaTableName tableName)
     {
-        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getRowFilters(context, tableName);
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanShowBranches(context, tableName);
         }
     }
 
     @Override
-    public Optional<ViewExpression> getColumnMask(ConnectorSecurityContext context, SchemaTableName tableName, String columnName, Type type)
+    public void checkCanCreateBranch(ConnectorSecurityContext context, SchemaTableName tableName, String branchName)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanCreateBranch(context, tableName, branchName);
+        }
+    }
+
+    @Override
+    public void checkCanDropBranch(ConnectorSecurityContext context, SchemaTableName tableName, String branchName)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanDropBranch(context, tableName, branchName);
+        }
+    }
+
+    @Override
+    public void checkCanFastForwardBranch(ConnectorSecurityContext context, SchemaTableName tableName, String sourceBranchName, String targetBranchName)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanFastForwardBranch(context, tableName, sourceBranchName, targetBranchName);
+        }
+    }
+
+    @Override
+    public void checkCanGrantTableBranchPrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, String branchName, TrinoPrincipal grantee, boolean grantOption)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanGrantTableBranchPrivilege(context, privilege, tableName, branchName, grantee, grantOption);
+        }
+    }
+
+    @Override
+    public void checkCanDenyTableBranchPrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, String branchName, TrinoPrincipal grantee)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanDenyTableBranchPrivilege(context, privilege, tableName, branchName, grantee);
+        }
+    }
+
+    @Override
+    public void checkCanRevokeTableBranchPrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, String branchName, TrinoPrincipal revokee, boolean grantOption)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.checkCanRevokeTableBranchPrivilege(context, privilege, tableName, branchName, revokee, grantOption);
+        }
+    }
+
+    @Override
+    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getColumnMask(context, tableName, columnName, type);
+            return delegate.getRowFilters(context, tableName);
         }
     }
 

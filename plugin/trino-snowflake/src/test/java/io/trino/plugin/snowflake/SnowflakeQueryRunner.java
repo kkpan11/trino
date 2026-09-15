@@ -15,7 +15,9 @@ package io.trino.plugin.snowflake;
 
 import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import io.airlift.log.Level;
 import io.airlift.log.Logger;
+import io.airlift.log.Logging;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.tpch.TpchTable;
@@ -32,19 +34,25 @@ import static java.util.Objects.requireNonNull;
 
 public final class SnowflakeQueryRunner
 {
+    static {
+        Logging logging = Logging.initialize();
+        logging.setLevel("net.snowflake.client.internal.core", Level.WARN);
+    }
+
     private SnowflakeQueryRunner() {}
 
     public static final String TPCH_SCHEMA = "tpch";
 
     public static Builder builder()
     {
-        return new Builder()
+        Builder builder = new Builder()
                 .addConnectorProperty("connection-url", TestingSnowflakeServer.TEST_URL)
                 .addConnectorProperty("connection-user", TestingSnowflakeServer.TEST_USER)
                 .addConnectorProperty("connection-password", TestingSnowflakeServer.TEST_PASSWORD)
                 .addConnectorProperty("snowflake.database", TestingSnowflakeServer.TEST_DATABASE)
-                .addConnectorProperty("snowflake.role", TestingSnowflakeServer.TEST_ROLE)
                 .addConnectorProperty("snowflake.warehouse", TestingSnowflakeServer.TEST_WAREHOUSE);
+        TestingSnowflakeServer.TEST_ROLE.ifPresent(role -> builder.addConnectorProperty("snowflake.role", role));
+        return builder;
     }
 
     public static final class Builder
@@ -99,7 +107,7 @@ public final class SnowflakeQueryRunner
         }
     }
 
-    public static void main(String[] args)
+    static void main()
             throws Exception
     {
         DistributedQueryRunner queryRunner = builder()

@@ -16,8 +16,8 @@ package io.trino.metadata;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
+import io.trino.connector.CatalogHandle;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -34,10 +34,13 @@ import io.trino.sql.tree.QualifiedName;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.SystemSessionProperties.isLegacyCatalogRoles;
 import static io.trino.spi.StandardErrorCode.CATALOG_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
+import static io.trino.spi.StandardErrorCode.INVALID_ENTITY_KIND;
 import static io.trino.spi.StandardErrorCode.MISSING_CATALOG_NAME;
 import static io.trino.spi.StandardErrorCode.MISSING_SCHEMA_NAME;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -110,6 +113,53 @@ public final class MetadataUtil
                 .orElseThrow(() -> semanticException(CATALOG_NOT_FOUND, node, "Catalog '%s' not found", catalogName));
     }
 
+    /**
+     * If necessary, fill in missing catalog and schema names from the session catalog and schema
+     * in the supplied entity name, and throw an exception if they don't exist.
+     */
+    public static List<String> fillInNameParts(Session session, Node node, String entityKind, List<String> name)
+    {
+        switch (entityKind) {
+            case "SCHEMA" -> {
+                switch (name.size()) {
+                    case 1 -> {
+                        if (session.getCatalog().isPresent()) {
+                            return ImmutableList.of(session.getCatalog().get(), name.get(0));
+                        }
+                        throw semanticException(MISSING_CATALOG_NAME, node, "Catalog must be specified when session catalog is not set");
+                    }
+                    case 2 -> {}
+                    default -> throw new TrinoException(GENERIC_USER_ERROR, "Invalid entity %s for entity kind %s".formatted(joinName(name), entityKind));
+                }
+            }
+            case "TABLE", "VIEW", "MATERIALIZED VIEW" -> {
+                switch (name.size()) {
+                    case 1 -> {
+                        if (session.getCatalog().isPresent() && session.getSchema().isPresent()) {
+                            return ImmutableList.of(session.getCatalog().get(), session.getSchema().get(), name.get(0));
+                        }
+                        throw semanticException(MISSING_CATALOG_NAME, node, "Catalog and schema name must be specified when session catalog and schema are not set");
+                    }
+                    case 2 -> {
+                        if (session.getCatalog().isPresent()) {
+                            return ImmutableList.of(session.getCatalog().get(), name.get(0), name.get(1));
+                        }
+                        throw semanticException(MISSING_CATALOG_NAME, node, "Catalog must be specified when session catalog is not set");
+                    }
+                    case 3 -> {}
+                    default -> throw semanticException(INVALID_ENTITY_KIND, node, "Invalid entity %s for entity kind %s", joinName(name), entityKind);
+                }
+            }
+            default -> {}
+        }
+        return name;
+    }
+
+    private static String joinName(List<String> name)
+    {
+        return name.stream().collect(Collectors.joining("."));
+    }
+
     public static CatalogSchemaName createCatalogSchemaName(Session session, Node node, Optional<QualifiedName> schema)
     {
         String catalogName = session.getCatalog().orElse(null);
@@ -154,6 +204,21 @@ public final class MetadataUtil
         return new QualifiedObjectName(catalogName, schemaName, objectName);
     }
 
+    public static QualifiedObjectName createTargetQualifiedObjectName(QualifiedObjectName source, QualifiedName target)
+    {
+        requireNonNull(target, "target is null");
+        if (target.getParts().size() > 3) {
+            throw new TrinoException(SYNTAX_ERROR, format("Too many dots in name: %s", target));
+        }
+
+        List<String> parts = target.getParts().reversed();
+        String objectName = parts.get(0);
+        String schemaName = (parts.size() > 1) ? parts.get(1) : source.schemaName();
+        String catalogName = (parts.size() > 2) ? parts.get(2) : source.catalogName();
+
+        return new QualifiedObjectName(catalogName, schemaName, objectName);
+    }
+
     public static EntityKindAndName createEntityKindAndName(String entityKind, QualifiedName name)
     {
         return new EntityKindAndName(entityKind, name.getParts());
@@ -183,8 +248,8 @@ public final class MetadataUtil
     {
         PrincipalType type = principal.getType();
         return switch (type) {
-            case USER -> new PrincipalSpecification(PrincipalSpecification.Type.USER, new Identifier(principal.getName()));
-            case ROLE -> new PrincipalSpecification(PrincipalSpecification.Type.ROLE, new Identifier(principal.getName()));
+            case USER -> new PrincipalSpecification(PrincipalSpecification.Type.USER, new Identifier(principal.getPrincipalName()));
+            case ROLE -> new PrincipalSpecification(PrincipalSpecification.Type.ROLE, new Identifier(principal.getPrincipalName()));
         };
     }
 
@@ -200,7 +265,7 @@ public final class MetadataUtil
     public static void checkRoleExists(Session session, Node node, Metadata metadata, TrinoPrincipal principal, Optional<String> catalog)
     {
         if (principal.getType() == ROLE) {
-            checkRoleExists(session, node, metadata, principal.getName(), catalog);
+            checkRoleExists(session, node, metadata, principal.getPrincipalName(), catalog);
         }
     }
 

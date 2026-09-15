@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.iceberg.catalog;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.metastore.TableInfo;
 import io.trino.plugin.iceberg.ColumnIdentity;
 import io.trino.plugin.iceberg.UnknownTableTypeException;
@@ -24,7 +25,9 @@ import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RelationCommentMetadata;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.security.TrinoPrincipal;
+import jakarta.annotation.Nullable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -66,6 +69,11 @@ public interface TrinoCatalog
 
     void dropNamespace(ConnectorSession session, String namespace);
 
+    default Optional<String> getNamespaceSeparator()
+    {
+        return Optional.empty();
+    }
+
     Map<String, Object> loadNamespaceMetadata(ConnectorSession session, String namespace);
 
     Optional<TrinoPrincipal> getNamespacePrincipal(ConnectorSession session, String namespace);
@@ -77,6 +85,8 @@ public interface TrinoCatalog
     void renameNamespace(ConnectorSession session, String source, String target);
 
     List<TableInfo> listTables(ConnectorSession session, Optional<String> namespace);
+
+    List<SchemaTableName> listIcebergTables(ConnectorSession session, List<String> filter);
 
     default List<SchemaTableName> listViews(ConnectorSession session, Optional<String> namespace)
     {
@@ -109,7 +119,7 @@ public interface TrinoCatalog
             Schema schema,
             PartitionSpec partitionSpec,
             SortOrder sortOrder,
-            String location,
+            Optional<String> location,
             Map<String, String> properties);
 
     Transaction newCreateOrReplaceTableTransaction(
@@ -139,7 +149,7 @@ public interface TrinoCatalog
      * @return Iceberg table loaded
      * @throws UnknownTableTypeException if table is not of Iceberg type in the metastore
      */
-    Table loadTable(ConnectorSession session, SchemaTableName schemaTableName);
+    BaseTable loadTable(ConnectorSession session, SchemaTableName schemaTableName);
 
     /**
      * Bulk load column metadata. The returned map may contain fewer entries then asked for.
@@ -152,11 +162,17 @@ public interface TrinoCatalog
 
     void updateViewColumnComment(ConnectorSession session, SchemaTableName schemaViewName, String columnName, Optional<String> comment);
 
+    @Nullable
     String defaultTableLocation(ConnectorSession session, SchemaTableName schemaTableName);
 
     void setTablePrincipal(ConnectorSession session, SchemaTableName schemaTableName, TrinoPrincipal principal);
 
-    void createView(ConnectorSession session, SchemaTableName schemaViewName, ConnectorViewDefinition definition, boolean replace);
+    void createView(
+            ConnectorSession session,
+            SchemaTableName schemaViewName,
+            ConnectorViewDefinition definition,
+            Map<String, Object> viewProperties,
+            boolean replace);
 
     void renameView(ConnectorSession session, SchemaTableName source, SchemaTableName target);
 
@@ -167,6 +183,11 @@ public interface TrinoCatalog
     Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, Optional<String> namespace);
 
     Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName);
+
+    default Map<String, Object> getViewProperties(ConnectorSession session, SchemaTableName viewName)
+    {
+        return ImmutableMap.of();
+    }
 
     void createMaterializedView(
             ConnectorSession session,
@@ -191,4 +212,9 @@ public interface TrinoCatalog
     void updateColumnComment(ConnectorSession session, SchemaTableName schemaTableName, ColumnIdentity columnIdentity, Optional<String> comment);
 
     Optional<CatalogSchemaTableName> redirectTable(ConnectorSession session, SchemaTableName tableName, String hiveCatalogName);
+
+    default Metrics getMetrics()
+    {
+        return Metrics.EMPTY;
+    }
 }

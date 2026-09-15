@@ -22,16 +22,16 @@ import com.google.common.collect.Iterables;
 import com.google.errorprone.annotations.Immutable;
 import io.trino.Session;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.ResolvedAggregationFunctionMetadata;
 import io.trino.metadata.ResolvedFunction;
-import io.trino.spi.function.AggregationFunctionMetadata;
+import io.trino.spi.type.FunctionType;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Lambda;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
-import io.trino.type.FunctionType;
 
-import java.util.HashSet;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -51,9 +51,13 @@ public class AggregationNode
     private final GroupingSetDescriptor groupingSets;
     private final List<Symbol> preGroupedSymbols;
     private final Step step;
-    private final Optional<Symbol> hashSymbol;
     private final Optional<Symbol> groupIdSymbol;
     private final List<Symbol> outputs;
+    /**
+     * Indicates whether it is beneficial (e.g. reduces remote exchange input) to retain this aggregation
+     * as an auxiliary step when making a decision to push down partial aggregation more aggressively.
+     */
+    private final Optional<Boolean> isInputReducingAggregation;
 
     public static AggregationNode singleAggregation(
             PlanNodeId id,
@@ -61,7 +65,19 @@ public class AggregationNode
             Map<Symbol, Aggregation> aggregations,
             GroupingSetDescriptor groupingSets)
     {
-        return new AggregationNode(id, source, aggregations, groupingSets, ImmutableList.of(), SINGLE, Optional.empty(), Optional.empty());
+        return new AggregationNode(id, source, aggregations, groupingSets, ImmutableList.of(), SINGLE, Optional.empty());
+    }
+
+    public AggregationNode(
+            PlanNodeId id,
+            PlanNode source,
+            Map<Symbol, Aggregation> aggregations,
+            GroupingSetDescriptor groupingSets,
+            List<Symbol> preGroupedSymbols,
+            Step step,
+            Optional<Symbol> groupIdSymbol)
+    {
+        this(id, source, aggregations, groupingSets, preGroupedSymbols, step, groupIdSymbol, Optional.empty());
     }
 
     @JsonCreator
@@ -72,8 +88,8 @@ public class AggregationNode
             @JsonProperty("groupingSets") GroupingSetDescriptor groupingSets,
             @JsonProperty("preGroupedSymbols") List<Symbol> preGroupedSymbols,
             @JsonProperty("step") Step step,
-            @JsonProperty("hashSymbol") Optional<Symbol> hashSymbol,
-            @JsonProperty("groupIdSymbol") Optional<Symbol> groupIdSymbol)
+            @JsonProperty("groupIdSymbol") Optional<Symbol> groupIdSymbol,
+            @JsonProperty("isInputReducingAggregation") Optional<Boolean> isInputReducingAggregation)
     {
         super(id);
 
@@ -93,7 +109,6 @@ public class AggregationNode
         checkArgument(noOrderBy || step == SINGLE, "ORDER BY does not support distributed aggregation");
 
         this.step = step;
-        this.hashSymbol = hashSymbol;
 
         requireNonNull(preGroupedSymbols, "preGroupedSymbols is null");
         checkArgument(preGroupedSymbols.isEmpty() || groupingSets.getGroupingKeys().containsAll(preGroupedSymbols), "Pre-grouped symbols must be a subset of the grouping keys");
@@ -101,10 +116,10 @@ public class AggregationNode
 
         ImmutableList.Builder<Symbol> outputs = ImmutableList.builder();
         outputs.addAll(groupingSets.getGroupingKeys());
-        hashSymbol.ifPresent(outputs::add);
         outputs.addAll(aggregations.keySet());
 
         this.outputs = outputs.build();
+        this.isInputReducingAggregation = requireNonNull(isInputReducingAggregation, "exchangeInputAggregation is null");
     }
 
     public List<Symbol> getGroupingKeys()
@@ -120,7 +135,7 @@ public class AggregationNode
 
     /**
      * @return true if the aggregation collapses all rows into a single global group (e.g., as a result of a GROUP BY () query).
-     * Otherwise, false.
+     *         Otherwise, false.
      */
     public boolean hasSingleGlobalAggregation()
     {
@@ -129,11 +144,11 @@ public class AggregationNode
 
     /**
      * @return whether this node should produce default output in case of no input pages.
-     * For example for query:
-     * <pre>{@code
+     *         For example for query:
+     *         <pre>{@code
      * SELECT count(*) FROM nation WHERE nationkey < 0
      * }</pre>
-     * A default output of "0" is expected to be produced by FINAL aggregation operator.
+     *         A default output of "0" is expected to be produced by FINAL aggregation operator.
      */
     public boolean hasDefaultOutput()
     {
@@ -196,16 +211,16 @@ public class AggregationNode
         return step;
     }
 
-    @JsonProperty("hashSymbol")
-    public Optional<Symbol> getHashSymbol()
-    {
-        return hashSymbol;
-    }
-
     @JsonProperty("groupIdSymbol")
     public Optional<Symbol> getGroupIdSymbol()
     {
         return groupIdSymbol;
+    }
+
+    @JsonProperty("isInputReducingAggregation")
+    public boolean isInputReducingAggregation()
+    {
+        return isInputReducingAggregation.orElse(false);
     }
 
     public boolean hasOrderings()
@@ -233,8 +248,8 @@ public class AggregationNode
     {
         return aggregations.isEmpty() &&
                 !groupingSets.getGroupingKeys().isEmpty() &&
-                outputs.size() == groupingSets.getGroupingKeys().size() &&
-                new HashSet<>(outputs).containsAll(groupingSets.getGroupingKeys());
+                groupingSets.getGroupingSetCount() == 1 &&
+                outputs.size() == groupingSets.getGroupingKeys().size(); // grouping keys are always added to the outputs list, so a size match guarantees the two contain the same elements
     }
 
     public boolean isDecomposable(Session session, Metadata metadata)
@@ -249,7 +264,7 @@ public class AggregationNode
         boolean decomposableFunctions = getAggregations().values().stream()
                 .map(Aggregation::getResolvedFunction)
                 .map(resolvedFunction -> metadata.getAggregationFunctionMetadata(session, resolvedFunction))
-                .allMatch(AggregationFunctionMetadata::isDecomposable);
+                .allMatch(ResolvedAggregationFunctionMetadata::isDecomposable);
 
         return !hasOrderBy && !hasDistinct && decomposableFunctions;
     }
@@ -278,10 +293,10 @@ public class AggregationNode
 
     public static GroupingSetDescriptor globalAggregation()
     {
-        return singleGroupingSet(ImmutableList.of());
+        return singleGroupingSet(ImmutableSet.of());
     }
 
-    public static GroupingSetDescriptor singleGroupingSet(List<Symbol> groupingKeys)
+    public static GroupingSetDescriptor singleGroupingSet(Collection<Symbol> groupingKeys)
     {
         Set<Integer> globalGroupingSets;
         if (groupingKeys.isEmpty()) {
@@ -294,7 +309,7 @@ public class AggregationNode
         return new GroupingSetDescriptor(groupingKeys, 1, globalGroupingSets);
     }
 
-    public static GroupingSetDescriptor groupingSets(List<Symbol> groupingKeys, int groupingSetCount, Set<Integer> globalGroupingSets)
+    public static GroupingSetDescriptor groupingSets(Collection<Symbol> groupingKeys, int groupingSetCount, Set<Integer> globalGroupingSets)
     {
         return new GroupingSetDescriptor(groupingKeys, groupingSetCount, globalGroupingSets);
     }
@@ -307,7 +322,7 @@ public class AggregationNode
 
         @JsonCreator
         public GroupingSetDescriptor(
-                @JsonProperty("groupingKeys") List<Symbol> groupingKeys,
+                @JsonProperty("groupingKeys") Collection<Symbol> groupingKeys,
                 @JsonProperty("groupingSetCount") int groupingSetCount,
                 @JsonProperty("globalGroupingSets") Set<Integer> globalGroupingSets)
         {
@@ -408,7 +423,8 @@ public class AggregationNode
             this.arguments = ImmutableList.copyOf(requireNonNull(arguments, "arguments is null"));
             for (Expression argument : arguments) {
                 checkArgument(argument instanceof Reference || argument instanceof Lambda,
-                        "argument must be symbol or lambda expression: %s", argument.getClass().getSimpleName());
+                        "argument must be symbol or lambda expression: %s",
+                        argument.getClass().getSimpleName());
             }
             this.distinct = distinct;
             this.filter = requireNonNull(filter, "filter is null");
@@ -512,8 +528,8 @@ public class AggregationNode
         private GroupingSetDescriptor groupingSets;
         private List<Symbol> preGroupedSymbols;
         private Step step;
-        private Optional<Symbol> hashSymbol;
         private Optional<Symbol> groupIdSymbol;
+        private Optional<Boolean> isInputReducingAggregation;
 
         public Builder(AggregationNode node)
         {
@@ -524,8 +540,8 @@ public class AggregationNode
             this.groupingSets = node.getGroupingSets();
             this.preGroupedSymbols = node.getPreGroupedSymbols();
             this.step = node.getStep();
-            this.hashSymbol = node.getHashSymbol();
             this.groupIdSymbol = node.getGroupIdSymbol();
+            this.isInputReducingAggregation = node.isInputReducingAggregation;
         }
 
         public Builder setId(PlanNodeId id)
@@ -564,15 +580,15 @@ public class AggregationNode
             return this;
         }
 
-        public Builder setHashSymbol(Optional<Symbol> hashSymbol)
-        {
-            this.hashSymbol = requireNonNull(hashSymbol, "hashSymbol is null");
-            return this;
-        }
-
         public Builder setGroupIdSymbol(Optional<Symbol> groupIdSymbol)
         {
             this.groupIdSymbol = requireNonNull(groupIdSymbol, "groupIdSymbol is null");
+            return this;
+        }
+
+        public Builder setIsInputReducingAggregation(boolean isInputReducingAggregation)
+        {
+            this.isInputReducingAggregation = Optional.of(isInputReducingAggregation);
             return this;
         }
 
@@ -585,8 +601,8 @@ public class AggregationNode
                     groupingSets,
                     preGroupedSymbols,
                     step,
-                    hashSymbol,
-                    groupIdSymbol);
+                    groupIdSymbol,
+                    isInputReducingAggregation);
         }
     }
 }

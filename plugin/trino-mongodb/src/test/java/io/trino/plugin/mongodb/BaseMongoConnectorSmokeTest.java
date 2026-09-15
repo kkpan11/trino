@@ -42,8 +42,7 @@ public abstract class BaseMongoConnectorSmokeTest
     @Test
     public void testProjectionPushdown()
     {
-        try (TestTable testTable = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable testTable = newTrinoTable(
                 "test_projection_pushdown_multiple_rows_",
                 "(id INT, nested1 ROW(child1 INT, child2 VARCHAR))",
                 ImmutableList.of(
@@ -60,8 +59,7 @@ public abstract class BaseMongoConnectorSmokeTest
     @Test
     public void testReadDottedField()
     {
-        try (TestTable testTable = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable testTable = newTrinoTable(
                 "test_read_dotted_field_",
                 "(root ROW(\"dotted.field\" VARCHAR, field VARCHAR))",
                 ImmutableList.of("ROW(ROW('foo', 'bar'))"))) {
@@ -76,8 +74,7 @@ public abstract class BaseMongoConnectorSmokeTest
     @Test
     public void testReadDollarPrefixedField()
     {
-        try (TestTable testTable = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable testTable = newTrinoTable(
                 "test_read_dotted_field_",
                 "(root ROW(\"$field1\" VARCHAR, field2 VARCHAR))",
                 ImmutableList.of("ROW(ROW('foo', 'bar'))"))) {
@@ -92,11 +89,11 @@ public abstract class BaseMongoConnectorSmokeTest
     @Test
     public void testProjectionPushdownWithHighlyNestedData()
     {
-        try (TestTable testTable = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable testTable = newTrinoTable(
                 "test_projection_pushdown_highly_nested_data_",
                 "(id INT, row1_t ROW(f1 INT, f2 INT, row2_t ROW (f1 INT, f2 INT, row3_t ROW(f1 INT, f2 INT))))",
-                ImmutableList.of("(1, ROW(2, 3, ROW(4, 5, ROW(6, 7))))",
+                ImmutableList.of(
+                        "(1, ROW(2, 3, ROW(4, 5, ROW(6, 7))))",
                         "(11, ROW(12, 13, ROW(14, 15, ROW(16, 17))))",
                         "(21, ROW(22, 23, ROW(24, 25, ROW(26, 27))))"))) {
             // Test select projected columns, with and without their parent column

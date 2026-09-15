@@ -14,7 +14,6 @@
 package io.trino.plugin.iceberg.catalog.snowflake;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.filesystem.Location;
 import io.trino.plugin.iceberg.BaseIcebergConnectorSmokeTest;
 import io.trino.plugin.iceberg.IcebergQueryRunner;
 import io.trino.plugin.iceberg.SchemaInitializer;
@@ -26,8 +25,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.SQLException;
+import java.util.Map;
 
-import static io.trino.plugin.iceberg.IcebergTestUtils.checkParquetFileSorting;
 import static io.trino.plugin.iceberg.catalog.snowflake.TestingSnowflakeServer.SNOWFLAKE_JDBC_URI;
 import static io.trino.plugin.iceberg.catalog.snowflake.TestingSnowflakeServer.SNOWFLAKE_PASSWORD;
 import static io.trino.plugin.iceberg.catalog.snowflake.TestingSnowflakeServer.SNOWFLAKE_ROLE;
@@ -67,37 +66,39 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
         server = new TestingSnowflakeServer();
         server.execute(SNOWFLAKE_TEST_SCHEMA, "CREATE SCHEMA IF NOT EXISTS %s".formatted(SNOWFLAKE_TEST_SCHEMA));
         if (!server.checkIfTableExists(ICEBERG, SNOWFLAKE_TEST_SCHEMA, TpchTable.NATION.getTableName())) {
-            executeOnSnowflake("""
+            executeOnSnowflake(
+                    """
                     CREATE OR REPLACE ICEBERG TABLE %s (
-                    	NATIONKEY NUMBER(38,0),
-                    	NAME STRING,
-                    	REGIONKEY NUMBER(38,0),
-                    	COMMENT STRING
+                        NATIONKEY NUMBER(38,0),
+                        NAME STRING,
+                        REGIONKEY NUMBER(38,0),
+                        COMMENT STRING
                     )
-                     EXTERNAL_VOLUME = '%s'
-                     CATALOG = 'SNOWFLAKE'
-                     BASE_LOCATION = '%s/'""".formatted(TpchTable.NATION.getTableName(), SNOWFLAKE_S3_EXTERNAL_VOLUME, TpchTable.NATION.getTableName()));
+                    EXTERNAL_VOLUME = '%s'
+                    CATALOG = 'SNOWFLAKE'
+                    BASE_LOCATION = '%s/'""".formatted(TpchTable.NATION.getTableName(), SNOWFLAKE_S3_EXTERNAL_VOLUME, TpchTable.NATION.getTableName()));
 
             executeOnSnowflake("INSERT INTO %s(NATIONKEY, NAME, REGIONKEY, COMMENT) SELECT N_NATIONKEY, N_NAME, N_REGIONKEY, N_COMMENT FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.%s"
                     .formatted(TpchTable.NATION.getTableName(), TpchTable.NATION.getTableName()));
         }
         if (!server.checkIfTableExists(ICEBERG, SNOWFLAKE_TEST_SCHEMA, TpchTable.REGION.getTableName())) {
-            executeOnSnowflake("""
+            executeOnSnowflake(
+                    """
                     CREATE OR REPLACE ICEBERG TABLE %s (
-                    	REGIONKEY NUMBER(38,0),
-                    	NAME STRING,
-                    	COMMENT STRING
+                        REGIONKEY NUMBER(38,0),
+                        NAME STRING,
+                        COMMENT STRING
                     )
-                     EXTERNAL_VOLUME = '%s'
-                     CATALOG = 'SNOWFLAKE'
-                     BASE_LOCATION = '%s/'""".formatted(TpchTable.REGION.getTableName(), SNOWFLAKE_S3_EXTERNAL_VOLUME, TpchTable.REGION.getTableName()));
+                    EXTERNAL_VOLUME = '%s'
+                    CATALOG = 'SNOWFLAKE'
+                    BASE_LOCATION = '%s/'""".formatted(TpchTable.REGION.getTableName(), SNOWFLAKE_S3_EXTERNAL_VOLUME, TpchTable.REGION.getTableName()));
 
             executeOnSnowflake("INSERT INTO %s(REGIONKEY, NAME, COMMENT) SELECT R_REGIONKEY, R_NAME, R_COMMENT FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.%s"
                     .formatted(TpchTable.REGION.getTableName(), TpchTable.REGION.getTableName()));
         }
 
-        ImmutableMap<String, String> properties = ImmutableMap.<String, String>builder()
-                .put("fs.native-s3.enabled", "true")
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("fs.s3.enabled", "true")
                 .put("s3.aws-access-key", S3_ACCESS_KEY)
                 .put("s3.aws-secret-key", S3_SECRET_KEY)
                 .put("s3.region", S3_REGION)
@@ -120,26 +121,54 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     }
 
     @Override
+    protected void createSchema(String schemaName)
+            throws SQLException
+    {
+        server.execute(schemaName, "CREATE SCHEMA " + schemaName);
+    }
+
+    @Override
+    protected void dropSchema(String schema)
+            throws SQLException
+    {
+        server.execute(schema, "DROP SCHEMA " + schema);
+    }
+
+    @Override
+    protected AutoCloseable createTable(String schema, String tableName, String tableDefinition)
+            throws SQLException
+    {
+        server.execute(schema,
+                """
+                CREATE OR REPLACE ICEBERG TABLE %s %s
+                 EXTERNAL_VOLUME = '%s'
+                 CATALOG = 'SNOWFLAKE'
+                 BASE_LOCATION = '%s/'
+                """.formatted(tableName, tableDefinition, SNOWFLAKE_S3_EXTERNAL_VOLUME, tableName));
+        return () -> server.execute(schema, "DROP TABLE %s".formatted(tableName));
+    }
+
+    @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_TABLE,
-                    SUPPORTS_DELETE,
-                    SUPPORTS_INSERT,
-                    SUPPORTS_CREATE_VIEW,
-                    SUPPORTS_CREATE_MATERIALIZED_VIEW,
-                    SUPPORTS_RENAME_SCHEMA,
-                    SUPPORTS_CREATE_SCHEMA,
-                    SUPPORTS_MERGE,
-                    SUPPORTS_UPDATE,
-                    SUPPORTS_RENAME_TABLE,
-                    SUPPORTS_ROW_LEVEL_UPDATE,
-                    SUPPORTS_ROW_LEVEL_DELETE,
-                    SUPPORTS_CREATE_OR_REPLACE_TABLE,
-                    SUPPORTS_CREATE_TABLE_WITH_DATA,
-                    SUPPORTS_COMMENT_ON_TABLE,
-                    SUPPORTS_COMMENT_ON_COLUMN,
-                    SUPPORTS_COMMENT_ON_VIEW -> false;
+                 SUPPORTS_DELETE,
+                 SUPPORTS_INSERT,
+                 SUPPORTS_CREATE_VIEW,
+                 SUPPORTS_CREATE_MATERIALIZED_VIEW,
+                 SUPPORTS_RENAME_SCHEMA,
+                 SUPPORTS_CREATE_SCHEMA,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_UPDATE,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_ROW_LEVEL_UPDATE,
+                 SUPPORTS_ROW_LEVEL_DELETE,
+                 SUPPORTS_CREATE_OR_REPLACE_TABLE,
+                 SUPPORTS_CREATE_TABLE_WITH_DATA,
+                 SUPPORTS_COMMENT_ON_TABLE,
+                 SUPPORTS_COMMENT_ON_COLUMN,
+                 SUPPORTS_COMMENT_ON_VIEW -> false;
             default -> super.hasBehavior(connectorBehavior);
         };
     }
@@ -221,14 +250,6 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
 
     @Test
     @Override
-    public void testHiddenPathColumn()
-    {
-        assertThatThrownBy(super::testHiddenPathColumn)
-                .hasMessageContaining("Snowflake managed Iceberg tables do not support modifications");
-    }
-
-    @Test
-    @Override
     public void testDeleteRowsConcurrently()
     {
         assertThatThrownBy(super::testDeleteRowsConcurrently)
@@ -248,6 +269,14 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     public void testCreateOrReplaceTableChangeColumnNamesAndTypes()
     {
         assertThatThrownBy(super::testCreateOrReplaceTableChangeColumnNamesAndTypes)
+                .hasMessageContaining("Snowflake managed Iceberg tables do not support modifications");
+    }
+
+    @Test
+    @Override
+    public void testRecreateTableWithSameName()
+    {
+        assertThatThrownBy(super::testRecreateTableWithSameName)
                 .hasMessageContaining("Snowflake managed Iceberg tables do not support modifications");
     }
 
@@ -397,22 +426,6 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
 
     @Test
     @Override
-    public void testSortedNationTable()
-    {
-        assertThatThrownBy(super::testSortedNationTable)
-                .hasMessageMatching("Snowflake managed Iceberg tables do not support modifications");
-    }
-
-    @Test
-    @Override
-    public void testFileSortingWithLargerTable()
-    {
-        assertThatThrownBy(super::testFileSortingWithLargerTable)
-                .hasMessageMatching("Snowflake managed Iceberg tables do not support modifications");
-    }
-
-    @Test
-    @Override
     public void testDropTableWithMissingMetadataFile()
     {
         assertThatThrownBy(super::testDropTableWithMissingMetadataFile)
@@ -492,6 +505,14 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     }
 
     @Test
+    @Override
+    public void testAnalyze()
+    {
+        assertThatThrownBy(super::testAnalyze)
+                .hasMessageMatching("Snowflake managed Iceberg tables do not support modifications");
+    }
+
+    @Test
     public void testNation()
     {
         assertQuery("SELECT count(*) FROM " + TpchTable.NATION.getTableName(), "VALUES 25");
@@ -518,7 +539,7 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     public void testSetTableComment()
     {
         assertThatThrownBy(() -> assertUpdate("COMMENT ON TABLE " + TpchTable.REGION.getTableName() + " is 'my-table-comment'"))
-                .hasMessage("Snowflake managed Iceberg tables do not support modifications");
+                .hasMessage("Failed to set table comment: Snowflake managed Iceberg tables do not support modifications");
     }
 
     @Test
@@ -569,6 +590,7 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
         assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + TpchTable.REGION.getTableName() + " RENAME COLUMN name TO new_name"))
                 .hasMessageMatching("Failed to rename column: Snowflake managed Iceberg tables do not support modifications");
     }
+
     @Test
     public void testBeginStatisticsCollection()
     {
@@ -607,7 +629,7 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     public void testExecuteDelete()
     {
         assertThatThrownBy(() -> assertUpdate("DELETE FROM " + TpchTable.REGION.getTableName()))
-                .hasMessageMatching("Failed to close manifest writer");
+                .hasMessageContaining("Failed to close manifest writer");
     }
 
     @Test
@@ -623,13 +645,14 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     {
         assertQuery(
                 "SHOW STATS FOR " + TpchTable.NATION.getTableName(),
-                          """
-                          VALUES
-                          ('nationkey', null, null, 0, null, 0.0, '24.0'),
-                          ('name', null, null, 0, null, null, null),
-                          ('regionkey', null, null, 0, null, 0.0, '4.0'),
-                          ('comment', null, null, 0, null, null, null),
-                          (null, null, null, null, 25, null, null)""");
+                """
+                VALUES
+                ('nationkey', null, null, 0, null, 0.0, '24.0'),
+                ('name', null, null, 0, null, null, null),
+                ('regionkey', null, null, 0, null, 0.0, '4.0'),
+                ('comment', null, null, 0, null, null, null),
+                (null, null, null, null, 25, null, null)
+                """);
     }
 
     @Test
@@ -663,7 +686,7 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     public void testSetColumnComment()
     {
         assertThatThrownBy(() -> assertUpdate("COMMENT ON COLUMN " + TpchTable.REGION.getTableName() + ".name IS 'region name_col_comment'"))
-                .hasMessageMatching("Snowflake managed Iceberg tables do not support modifications");
+                .hasMessageMatching("Failed to set column comment: Snowflake managed Iceberg tables do not support modifications");
     }
 
     @Test
@@ -681,22 +704,13 @@ public class TestIcebergSnowflakeCatalogConnectorSmokeTest
     }
 
     @Override
-    protected boolean isFileSorted(Location path, String sortColumnName)
-    {
-        if (format == PARQUET) {
-            return checkParquetFileSorting(fileSystem.newInputFile(path), sortColumnName);
-        }
-        throw new UnsupportedOperationException("Only PARQUET file format is supported for Iceberg Snowflake catalogs");
-    }
-
-    @Override
     protected void deleteDirectory(String location)
     {
         throw new UnsupportedOperationException("deleteDirectory is not supported for Iceberg snowflake catalog");
     }
 
     @Override
-    protected void dropTableFromMetastore(String tableName)
+    protected void dropTableFromCatalog(String tableName)
     {
         // used for register table, which is not supported for Iceberg Snowflake catalogs
         throw new UnsupportedOperationException("dropTableFromMetastore is not supported for Iceberg snowflake catalog");

@@ -13,12 +13,11 @@
  */
 package io.trino.spooling.filesystem;
 
-import io.airlift.slice.Slice;
+import com.google.common.annotations.VisibleForTesting;
 import io.azam.ulidj.ULID;
-import io.trino.filesystem.Location;
-import io.trino.spi.QueryId;
-import io.trino.spi.protocol.SpooledSegmentHandle;
-import io.trino.spi.protocol.SpoolingContext;
+import io.trino.filesystem.encryption.EncryptionKey;
+import io.trino.spi.spool.SpooledSegmentHandle;
+import io.trino.spi.spool.SpoolingContext;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -28,30 +27,18 @@ import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verify;
 import static java.util.Objects.requireNonNull;
 
-public record FileSystemSpooledSegmentHandle(@Override String encoding, @Override QueryId queryId, byte[] uuid, Optional<Slice> encryptionKey)
+public record FileSystemSpooledSegmentHandle(
+        @Override String encoding,
+        byte[] uuid,
+        String nodeIdentifier,
+        Optional<EncryptionKey> encryptionKey)
         implements SpooledSegmentHandle
 {
-    private static final String OBJECT_NAME_SEPARATOR = "::";
-
     public FileSystemSpooledSegmentHandle
     {
-        requireNonNull(queryId, "queryId is null");
         requireNonNull(encryptionKey, "encryptionKey is null");
+        requireNonNull(nodeIdentifier, "nodeIdentifier is null");
         verify(uuid.length == 16, "uuid must be 128 bits");
-    }
-
-    public static FileSystemSpooledSegmentHandle random(Random random, SpoolingContext context, Instant expireAt)
-    {
-        return random(random, context, expireAt, Optional.empty());
-    }
-
-    public static FileSystemSpooledSegmentHandle random(Random random, SpoolingContext context, Instant expireAt, Optional<Slice> encryptionKey)
-    {
-        return new FileSystemSpooledSegmentHandle(
-                context.encoding(),
-                context.queryId(),
-                ULID.generateBinary(expireAt.toEpochMilli(), entropy(random)),
-                encryptionKey);
     }
 
     @Override
@@ -61,44 +48,39 @@ public record FileSystemSpooledSegmentHandle(@Override String encoding, @Overrid
     }
 
     /**
-     * Storage object name starts with the ULID which is ordered lexicographically
-     * by the time of the expiration, which makes it possible to find the expired
+     * Storage identifiers are ULIDs which are ordered lexicographically
+     * by the time of the expiration. This makes it possible to find the expired
      * segments by listing the storage objects. This is crucial for the storage
      * cleanup process to be able to efficiently delete the expired segments.
      *
      * @return String lexicographically sortable storage object name
      * @see <a href="https://github.com/ulid/spec">ULID specification</a>
      */
-    public String storageObjectName()
-    {
-        return ULID.fromBinary(uuid) + OBJECT_NAME_SEPARATOR + queryId;
-    }
-
     @Override
     public String identifier()
     {
-        return ULID.fromBinary(uuid) + OBJECT_NAME_SEPARATOR + queryId + "." + encoding;
+        return ULID.fromBinary(uuid);
     }
 
-    public static Optional<Instant> getExpirationFromLocation(Location location)
+    @VisibleForTesting
+    static FileSystemSpooledSegmentHandle random(Random random, String nodeIdentifier, SpoolingContext context, Instant expireAt)
     {
-        String filename = location.fileName();
-        int index = filename.indexOf(OBJECT_NAME_SEPARATOR);
-        if (index == -1) {
-            return Optional.empty();
-        }
+        return random(random, nodeIdentifier, context, expireAt, Optional.empty());
+    }
 
-        String uuid = filename.substring(0, index);
-        if (!ULID.isValid(uuid)) {
-            return Optional.empty();
-        }
-
-        return Optional.of(Instant.ofEpochMilli(ULID.getTimestamp(uuid)));
+    @VisibleForTesting
+    static FileSystemSpooledSegmentHandle random(Random random, String nodeIdentifier, SpoolingContext context, Instant expireAt, Optional<EncryptionKey> encryptionKey)
+    {
+        return new FileSystemSpooledSegmentHandle(
+                context.encoding(),
+                ULID.generateBinary(expireAt.toEpochMilli(), entropy(random)),
+                nodeIdentifier,
+                encryptionKey);
     }
 
     private static byte[] entropy(Random random)
     {
-        byte[] entropy = new byte[16];
+        byte[] entropy = new byte[10];
         random.nextBytes(entropy);
         return entropy;
     }
@@ -107,7 +89,6 @@ public record FileSystemSpooledSegmentHandle(@Override String encoding, @Overrid
     public String toString()
     {
         return toStringHelper(this)
-                .add("queryId", queryId)
                 .add("encoding", encoding)
                 .add("expires", Instant.ofEpochMilli(ULID.getTimestampBinary(uuid)))
                 .add("identifier", identifier())

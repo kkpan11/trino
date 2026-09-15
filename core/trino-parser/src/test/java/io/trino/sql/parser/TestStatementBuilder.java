@@ -31,14 +31,6 @@ public class TestStatementBuilder
     private static final SqlParser SQL_PARSER = new SqlParser();
 
     @Test
-    public void testPreparedGrantWithQuotes()
-    {
-        printStatement("prepare p from grant select on table hive.test.\"case\" to role test");
-        printStatement("prepare p from grant select on hive.test.\"case\" to role test");
-        printStatement("prepare p from grant select on table hive.test.\"case\" to role \"case\"");
-    }
-
-    @Test
     public void testStatementBuilder()
     {
         printStatement("select * from foo");
@@ -207,6 +199,9 @@ public class TestStatementBuilder
         printStatement("alter table a.b.c set properties a=true, b=123, c='x'");
         printStatement("alter table a.b.c set properties a=DEFAULT, b=123");
 
+        printStatement("alter table a.b.c add column x bigint first");
+        printStatement("alter table a.b.c add column x bigint after y");
+        printStatement("alter table a.b.c add column x bigint last");
         printStatement("alter table a.b.c add column x bigint");
 
         printStatement("alter table a.b.c add column x bigint comment 'large x'");
@@ -321,6 +316,10 @@ public class TestStatementBuilder
 
         printStatement("prepare p from select * from (select * from T) \"A B\"");
 
+        printStatement("prepare p from grant select on table hive.test.\"case\" to role test");
+        printStatement("prepare p from grant select on hive.test.\"case\" to role test");
+        printStatement("prepare p from grant select on table hive.test.\"case\" to role \"case\"");
+
         printStatement("SELECT * FROM table1 WHERE a >= ALL (VALUES 2, 3, 4)");
         printStatement("SELECT * FROM table1 WHERE a <> ANY (SELECT 2, 3, 4)");
         printStatement("SELECT * FROM table1 WHERE a = SOME (SELECT id FROM table2)");
@@ -342,7 +341,8 @@ public class TestStatementBuilder
     @Test
     public void testStringFormatter()
     {
-        assertSqlFormatter("U&'hello\\6d4B\\8Bd5\\+10FFFFworld\\7F16\\7801'",
+        assertSqlFormatter(
+                "U&'hello\\6d4B\\8Bd5\\+10FFFFworld\\7F16\\7801'",
                 "'hello测试\uDBFF\uDFFFworld编码'");
         assertSqlFormatter("'hello world'", "'hello world'");
         assertSqlFormatter("U&'!+10FFFF!6d4B!8Bd5ABC!6d4B!8Bd5' UESCAPE '!'", "'\uDBFF\uDFFF测试ABC测试'");
@@ -374,7 +374,8 @@ public class TestStatementBuilder
         printTpchQuery(19, "part brand 1", "part brand 2", "part brand 3", 11, 22, 33);
         printTpchQuery(20, "part name like", "2013-03-05", "nation name");
         printTpchQuery(21, "nation name");
-        printTpchQuery(22,
+        printTpchQuery(
+                22,
                 "phone 1",
                 "phone 2",
                 "phone 3",

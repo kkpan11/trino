@@ -16,6 +16,7 @@ package io.trino.parquet;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.math.LongMath;
+import io.airlift.log.Logging;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.parquet.predicate.DictionaryDescriptor;
@@ -45,6 +46,7 @@ import org.apache.parquet.internal.column.columnindex.ColumnIndexBuilder;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit;
 import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
 
@@ -61,10 +63,12 @@ import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.log.Level.ERROR;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.parquet.ParquetEncoding.PLAIN_DICTIONARY;
 import static io.trino.parquet.ParquetTimestampUtils.JULIAN_EPOCH_OFFSET_DAYS;
+import static io.trino.parquet.ParquetTypeUtils.paddingBigInteger;
 import static io.trino.parquet.predicate.TupleDomainParquetPredicate.getDomain;
 import static io.trino.spi.predicate.Domain.all;
 import static io.trino.spi.predicate.Domain.create;
@@ -100,7 +104,7 @@ import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.decimalType;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
@@ -115,6 +119,12 @@ import static org.joda.time.DateTimeZone.UTC;
 
 public class TestTupleDomainParquetPredicate
 {
+    static {
+        Logging logging = Logging.initialize();
+        // Tests intentionally store small precision decimals as INT64, which Parquet warns about on every write
+        logging.setLevel("org.apache.parquet.schema", ERROR);
+    }
+
     private static final ParquetDataSourceId ID = new ParquetDataSourceId("testFile");
 
     @Test
@@ -238,6 +248,25 @@ public class TestTupleDomainParquetPredicate
     }
 
     @Test
+    public void testShortDecimalWithInt64()
+            throws Exception
+    {
+        ColumnDescriptor columnDescriptor = createColumnDescriptor(INT64, "ShortDecimalColumn");
+        Type type = createDecimalType(5, 2);
+        assertThat(getDomain(columnDescriptor, type, 0, null, ID, UTC)).isEqualTo(all(type));
+
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(10012L, 10012L), ID, UTC)).isEqualTo(singleValue(type, 10012L));
+        // Test that statistics overflowing the size of the type are not used
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(100012L, 100012L), ID, UTC)).isEqualTo(notNull(type));
+
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(0L, 100L), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, 0L, true, 100L, true)), false));
+        // fail on corrupted statistics
+        assertThatExceptionOfType(ParquetCorruptionException.class)
+                .isThrownBy(() -> getDomain(columnDescriptor, type, 10, longColumnStats(100L, 10L), ID, UTC))
+                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required int64 ShortDecimalColumn\": [min: 100, max: 10, num_nulls: 0] [testFile]");
+    }
+
+    @Test
     public void testShortDecimalWithNoScale()
             throws Exception
     {
@@ -254,6 +283,43 @@ public class TestTupleDomainParquetPredicate
         assertThatExceptionOfType(ParquetCorruptionException.class)
                 .isThrownBy(() -> getDomain(columnDescriptor, type, 10, longColumnStats(100L, 10L), ID, UTC))
                 .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required int32 ShortDecimalColumnWithNoScale\": [min: 100, max: 10, num_nulls: 0] [testFile]");
+    }
+
+    @Test
+    public void testShortDecimalWithLongDecimalAnnotation()
+            throws Exception
+    {
+        ColumnDescriptor columnDescriptor = createColumnDescriptor(FIXED_LEN_BYTE_ARRAY, decimalType(2, 38), "ShortDecimalColumnWithDecimalAnnotation");
+        BigInteger maximum = new BigInteger("12345");
+
+        Type type = createDecimalType(5, 2);
+        assertThat(getDomain(columnDescriptor, type, 0, null, ID, UTC)).isEqualTo(all(type));
+        assertThat(getDomain(columnDescriptor, type, 10, binaryColumnStats(maximum, maximum), ID, UTC)).isEqualTo(singleValue(type, 12345L));
+
+        assertThat(getDomain(columnDescriptor, type, 10, binaryColumnStats(0L, 100L), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, 0L, true, 100L, true)), false));
+        assertThat(getDomain(columnDescriptor, type, 10, intColumnStats(0, 100), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, 0L, true, 100L, true)), false));
+
+        type = createDecimalType(15, 2);
+        assertThat(getDomain(columnDescriptor, type, 0, null, ID, UTC)).isEqualTo(all(type));
+        assertThat(getDomain(columnDescriptor, type, 10, binaryColumnStats(maximum, maximum), ID, UTC)).isEqualTo(singleValue(type, 12345L));
+
+        assertThat(getDomain(columnDescriptor, type, 10, binaryColumnStats(0L, 100L), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, 0L, true, 100L, true)), false));
+        assertThat(getDomain(columnDescriptor, type, 10, intColumnStats(0, 100), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, 0L, true, 100L, true)), false));
+
+        Type typeWithDifferentScale = createDecimalType(5, 1);
+        assertThat(getDomain(columnDescriptor, typeWithDifferentScale, 0, null, ID, UTC)).isEqualTo(all(typeWithDifferentScale));
+
+        assertThat(getDomain(columnDescriptor, typeWithDifferentScale, 10, longColumnStats(10012L, 10012L), ID, UTC)).isEqualTo(singleValue(typeWithDifferentScale, 1001L));
+
+        // Test that statistics overflowing the size of the type are not used
+        assertThat(getDomain(columnDescriptor, typeWithDifferentScale, 10, longColumnStats(100012L, 100012L), ID, UTC)).isEqualTo(singleValue(typeWithDifferentScale, 10001L));
+
+        assertThat(getDomain(columnDescriptor, typeWithDifferentScale, 10, longColumnStats(0L, 100L), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(typeWithDifferentScale, 0L, true, 10L, true)), false));
+
+        // fail on higher precision values
+        assertThatExceptionOfType(ParquetCorruptionException.class)
+                .isThrownBy(() -> getDomain(columnDescriptor, createDecimalType(4, 2), 10, binaryColumnStats(maximum, maximum), ID, UTC))
+                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required fixed_len_byte_array(0) ShortDecimalColumnWithDecimalAnnotation (DECIMAL(38,2))\": [min: 0x00000000000000000000000000003039, max: 0x00000000000000000000000000003039, num_nulls: 0] [testFile]");
     }
 
     @Test
@@ -277,7 +343,7 @@ public class TestTupleDomainParquetPredicate
         // fail on corrupted statistics
         assertThatExceptionOfType(ParquetCorruptionException.class)
                 .isThrownBy(() -> getDomain(columnDescriptor, type, 10, binaryColumnStats(100L, 10L), ID, UTC))
-                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required fixed_len_byte_array(0) LongDecimalColumn\": [min: 0x64, max: 0x0A, num_nulls: 0] [testFile]");
+                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required fixed_len_byte_array(0) LongDecimalColumn\": [min: 0x00000000000000000000000000000064, max: 0x0000000000000000000000000000000A, num_nulls: 0] [testFile]");
     }
 
     @Test
@@ -296,7 +362,50 @@ public class TestTupleDomainParquetPredicate
         // fail on corrupted statistics
         assertThatExceptionOfType(ParquetCorruptionException.class)
                 .isThrownBy(() -> getDomain(columnDescriptor, type, 10, binaryColumnStats(100L, 10L), ID, UTC))
-                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required fixed_len_byte_array(0) LongDecimalColumnWithNoScale\": [min: 0x64, max: 0x0A, num_nulls: 0] [testFile]");
+                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required fixed_len_byte_array(0) LongDecimalColumnWithNoScale\": [min: 0x00000000000000000000000000000064, max: 0x0000000000000000000000000000000A, num_nulls: 0] [testFile]");
+    }
+
+    @Test
+    public void testLongDecimalWithShortDecimalAnnotation()
+            throws Exception
+    {
+        ColumnDescriptor columnDescriptor = createColumnDescriptor(INT32, decimalType(2, 5), "ShortDecimalColumn");
+        DecimalType type = createDecimalType(20, 2);
+
+        assertThat(getDomain(columnDescriptor, type, 0, null, ID, UTC)).isEqualTo(all(type));
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(10012L, 10012L), ID, UTC)).isEqualTo(singleValue(type, Int128.valueOf(10012L)));
+
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(0L, 10012L), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, Int128.valueOf(0L), true, Int128.valueOf(10012L), true)), false));
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(0, 100L), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, Int128.valueOf(0L), true, Int128.valueOf(100L), true)), false));
+
+        // fail on corrupted statistics
+        assertThatExceptionOfType(ParquetCorruptionException.class)
+                .isThrownBy(() -> getDomain(columnDescriptor, type, 10, longColumnStats(100L, 10L), ID, UTC))
+                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required int32 ShortDecimalColumn (DECIMAL(5,2))\": [min: 100, max: 10, num_nulls: 0] [testFile]");
+    }
+
+    @Test
+    public void testLongDecimalWithInt64DecimalAnnotation()
+            throws Exception
+    {
+        ColumnDescriptor columnDescriptor = createColumnDescriptor(INT64, decimalType(2, 5), "ShortDecimalColumn");
+        DecimalType type = createDecimalType(20, 2);
+        BigInteger maximum = new BigInteger("12345");
+
+        Int128 zero = Int128.ZERO;
+        Int128 hundred = Int128.valueOf(100L);
+        Int128 max = Int128.valueOf(maximum);
+
+        assertThat(getDomain(columnDescriptor, type, 0, null, ID, UTC)).isEqualTo(all(type));
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(maximum.longValue(), maximum.longValue()), ID, UTC)).isEqualTo(singleValue(type, max));
+
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(0L, 100L), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, zero, true, hundred, true)), false));
+        assertThat(getDomain(columnDescriptor, type, 10, longColumnStats(0, 100), ID, UTC)).isEqualTo(create(ValueSet.ofRanges(range(type, zero, true, hundred, true)), false));
+
+        // fail on corrupted statistics
+        assertThatExceptionOfType(ParquetCorruptionException.class)
+                .isThrownBy(() -> getDomain(columnDescriptor, type, 10, longColumnStats(100L, 10L), ID, UTC))
+                .withMessage("Malformed Parquet file. Corrupted statistics for column \"[] required int64 ShortDecimalColumn (DECIMAL(5,2))\": [min: 100, max: 10, num_nulls: 0] [testFile]");
     }
 
     @Test
@@ -457,20 +566,12 @@ public class TestTupleDomainParquetPredicate
     private void testTimestampInt64(TimeUnit timeUnit, int precision, LocalDateTime baseTime, Object baseDomainValue)
             throws ParquetCorruptionException
     {
-        int parquetPrecision;
-        switch (timeUnit) {
-            case MILLIS:
-                parquetPrecision = 3;
-                break;
-            case MICROS:
-                parquetPrecision = 6;
-                break;
-            case NANOS:
-                parquetPrecision = 9;
-                break;
-            default:
-                throw new IllegalArgumentException("Unknown Parquet TimeUnit " + timeUnit);
-        }
+        int parquetPrecision = switch (timeUnit) {
+            case MILLIS -> 3;
+            case MICROS -> 6;
+            case NANOS -> 9;
+            default -> throw new IllegalArgumentException("Unknown Parquet TimeUnit " + timeUnit);
+        };
 
         PrimitiveType type = Types.required(INT64)
                 .as(LogicalTypeAnnotation.timestampType(false, timeUnit))
@@ -562,8 +663,7 @@ public class TestTupleDomainParquetPredicate
     {
         ColumnDescriptor column = createColumnDescriptor(INT32, "Test column");
         TupleDomain<ColumnDescriptor> effectivePredicate = TupleDomain.withColumnDomains(ImmutableMap.of(
-                column,
-                Domain.create(ValueSet.of(typeForParquetInt32, 42L, 43L, 44L, 112L), false)));
+                column, Domain.create(ValueSet.of(typeForParquetInt32, 42L, 43L, 44L, 112L), false)));
         TupleDomainParquetPredicate parquetPredicate = new TupleDomainParquetPredicate(effectivePredicate, singletonList(column), UTC);
 
         assertThat(parquetPredicate.getIndexLookupCandidates(ImmutableMap.of(column, 2L), ImmutableMap.of(column, intColumnStats(32, 42)), ID))
@@ -579,8 +679,7 @@ public class TestTupleDomainParquetPredicate
     {
         ColumnDescriptor column = new ColumnDescriptor(new String[] {"path"}, Types.optional(INT64).named("Test column"), 0, 0);
         TupleDomain<ColumnDescriptor> effectivePredicate = TupleDomain.withColumnDomains(ImmutableMap.of(
-                column,
-                Domain.create(ValueSet.of(BIGINT, 42L, 43L, 44L, 404L), false)));
+                column, Domain.create(ValueSet.of(BIGINT, 42L, 43L, 44L, 404L), false)));
         TupleDomainParquetPredicate parquetPredicate = new TupleDomainParquetPredicate(effectivePredicate, singletonList(column), UTC);
 
         assertThat(parquetPredicate.getIndexLookupCandidates(ImmutableMap.of(column, 2L), ImmutableMap.of(column, longColumnStats(32, 42)), ID))
@@ -600,8 +699,7 @@ public class TestTupleDomainParquetPredicate
         assertThat(parquetPredicate.matches(new DictionaryDescriptor(column, false, Optional.of(page)))).isTrue();
 
         effectivePredicate = withColumnDomains(ImmutableMap.of(
-                column,
-                singleValue(createVarcharType(255), Slices.utf8Slice("abc"), true)));
+                column, singleValue(createVarcharType(255), Slices.utf8Slice("abc"), true)));
         parquetPredicate = new TupleDomainParquetPredicate(effectivePredicate, singletonList(column), UTC);
         assertThat(parquetPredicate.matches(new DictionaryDescriptor(column, true, Optional.of(page)))).isTrue();
         assertThat(parquetPredicate.matches(new DictionaryDescriptor(column, false, Optional.of(page)))).isFalse();
@@ -649,15 +747,14 @@ public class TestTupleDomainParquetPredicate
         ColumnDescriptor columnA = new ColumnDescriptor(new String[] {"pathA"}, Types.optional(INT64).named("Test column A"), 0, 0);
         ColumnDescriptor columnB = new ColumnDescriptor(new String[] {"pathB"}, Types.optional(INT64).named("Test column B"), 0, 0);
         TupleDomain<ColumnDescriptor> effectivePredicate = TupleDomain.withColumnDomains(ImmutableMap.of(
-                columnA,
-                Domain.create(ValueSet.of(BIGINT, 42L, 43L, 44L, 404L), false),
-                columnB,
-                Domain.create(ValueSet.ofRanges(range(BIGINT, 42L, true, 404L, true)), false)));
+                columnA, Domain.create(ValueSet.of(BIGINT, 42L, 43L, 44L, 404L), false),
+                columnB, Domain.create(ValueSet.ofRanges(range(BIGINT, 42L, true, 404L, true)), false)));
 
         TupleDomainParquetPredicate parquetPredicate = new TupleDomainParquetPredicate(effectivePredicate, singletonList(columnA), UTC);
         assertThat(parquetPredicate.getIndexLookupCandidates(
                 ImmutableMap.of(columnA, 2L, columnB, 2L),
-                ImmutableMap.of(columnA, longColumnStats(32, 42), columnB, longColumnStats(42, 500)), ID))
+                ImmutableMap.of(columnA, longColumnStats(32, 42), columnB, longColumnStats(42, 500)),
+                ID))
                 .isEqualTo(Optional.of(ImmutableList.of(columnA)));
 
         parquetPredicate = new TupleDomainParquetPredicate(effectivePredicate, ImmutableList.of(columnA, columnB), UTC);
@@ -668,12 +765,14 @@ public class TestTupleDomainParquetPredicate
         // All possible values for columnB are covered by effectivePredicate
         assertThat(parquetPredicate.getIndexLookupCandidates(
                 ImmutableMap.of(columnA, 2L, columnB, 2L),
-                ImmutableMap.of(columnA, longColumnStats(32, 42), columnB, longColumnStats(50, 400)), ID))
+                ImmutableMap.of(columnA, longColumnStats(32, 42), columnB, longColumnStats(50, 400)),
+                ID))
                 .isEqualTo(Optional.of(ImmutableList.of(columnA)));
 
         assertThat(parquetPredicate.getIndexLookupCandidates(
                 ImmutableMap.of(columnA, 2L, columnB, 2L),
-                ImmutableMap.of(columnA, longColumnStats(32, 42), columnB, longColumnStats(42, 500)), ID))
+                ImmutableMap.of(columnA, longColumnStats(32, 42), columnB, longColumnStats(42, 500)),
+                ID))
                 .isEqualTo(Optional.of(ImmutableList.of(columnA, columnB)));
     }
 
@@ -722,6 +821,11 @@ public class TestTupleDomainParquetPredicate
     private ColumnDescriptor createColumnDescriptor(PrimitiveTypeName typeName, String columnName)
     {
         return new ColumnDescriptor(new String[] {}, new PrimitiveType(REQUIRED, typeName, columnName), 0, 0);
+    }
+
+    private ColumnDescriptor createColumnDescriptor(PrimitiveTypeName typeName, LogicalTypeAnnotation typeAnnotation, String columnName)
+    {
+        return new ColumnDescriptor(new String[] {}, new PrimitiveType(REQUIRED, typeName, columnName).withLogicalTypeAnnotation(typeAnnotation), 0, 0);
     }
 
     private TupleDomain<ColumnDescriptor> getEffectivePredicate(ColumnDescriptor column, VarcharType type, Slice value)
@@ -786,8 +890,8 @@ public class TestTupleDomainParquetPredicate
     private static BinaryStatistics binaryColumnStats(BigInteger minimum, BigInteger maximum)
     {
         return (BinaryStatistics) Statistics.getBuilderForReading(Types.optional(BINARY).named("BinaryColumn"))
-                .withMin(minimum.toByteArray())
-                .withMax(maximum.toByteArray())
+                .withMin(paddingBigInteger(minimum, 16))
+                .withMax(paddingBigInteger(maximum, 16))
                 .withNumNulls(0)
                 .build();
     }

@@ -47,7 +47,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/000000_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/000000_0" + Utilities.COPY_KEYWORD + "1", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/000000_0" + Utilities.COPY_KEYWORD + "2", 500, new byte[0]),
@@ -63,10 +64,10 @@ public class TestHiveAcidUtils
                 conf,
                 new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory()).isNull();
-        assertThat(dir.getCurrentDirectories().size()).isEqualTo(0);
-        assertThat(dir.getObsolete().size()).isEqualTo(0);
+        assertThat(dir.getCurrentDirectories()).isEmpty();
+        assertThat(dir.getObsolete()).isEmpty();
         List<HdfsFileStatusWithId> result = dir.getOriginalFiles();
-        assertThat(result.size()).isEqualTo(7);
+        assertThat(result).hasSize(7);
         assertThat(result.get(0).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/000000_0");
         assertThat(result.get(1).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/000000_0" + Utilities.COPY_KEYWORD + "1");
         assertThat(result.get(2).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/000000_0" + Utilities.COPY_KEYWORD + "2");
@@ -81,7 +82,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/000000_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/000001_1", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/000002_0", 500, new byte[0]),
@@ -101,18 +103,18 @@ public class TestHiveAcidUtils
                 new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory()).isNull();
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(2);
+        assertThat(obsolete).hasSize(2);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_025_025");
         assertThat(obsolete.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_029_029");
         List<HdfsFileStatusWithId> result = dir.getOriginalFiles();
-        assertThat(result.size()).isEqualTo(5);
+        assertThat(result).hasSize(5);
         assertThat(result.get(0).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/000000_0");
         assertThat(result.get(1).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/000001_1");
         assertThat(result.get(2).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/000002_0");
         assertThat(result.get(3).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/random");
         assertThat(result.get(4).getFileStatus().getPath().toString()).isEqualTo("mock:/tbl/part1/subdir/000000_0");
         List<AcidUtils.ParsedDelta> deltas = dir.getCurrentDirectories();
-        assertThat(deltas.size()).isEqualTo(2);
+        assertThat(deltas).hasSize(2);
         AcidUtils.ParsedDelta delt = deltas.get(0);
         assertThat(delt.getPath().toString()).isEqualTo("mock:/tbl/part1/delta_025_030");
         assertThat(delt.getMinWriteId()).isEqualTo(25);
@@ -128,7 +130,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/_tmp/bucket_0", 0, new byte[0]),
                 new MockFile("mock:/tbl/part1/_tmp/base_5/bucket_0", 0, new byte[0]),
                 new MockFile("mock:/tbl/part1/base_5/bucket_0", 500, new byte[0]),
@@ -143,15 +146,15 @@ public class TestHiveAcidUtils
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory().toString()).isEqualTo("mock:/tbl/part1/base_49");
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(5);
+        assertThat(obsolete).hasSize(5);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/base_10");
         assertThat(obsolete.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/base_5");
         assertThat(obsolete.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_025_030");
         assertThat(obsolete.get(3).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_025_025");
         assertThat(obsolete.get(4).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_029_029");
-        assertThat(dir.getOriginalFiles().size()).isEqualTo(0);
+        assertThat(dir.getOriginalFiles()).isEmpty();
         List<AcidUtils.ParsedDelta> deltas = dir.getCurrentDirectories();
-        assertThat(deltas.size()).isEqualTo(1);
+        assertThat(deltas).hasSize(1);
         AcidUtils.ParsedDelta delt = deltas.get(0);
         assertThat(delt.getPath().toString()).isEqualTo("mock:/tbl/part1/delta_050_105");
         assertThat(delt.getMinWriteId()).isEqualTo(50);
@@ -163,7 +166,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/base_10/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/base_5/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/000000_0", 500, new byte[0]),
@@ -172,7 +176,7 @@ public class TestHiveAcidUtils
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:150:" + Long.MAX_VALUE + ":"));
         // Obsolete list should include the two original bucket files, and the old base dir
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(3);
+        assertThat(obsolete).hasSize(3);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/base_5");
         assertThat(dir.getBaseDirectory().toString()).isEqualTo("mock:/tbl/part1/base_10");
     }
@@ -182,7 +186,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_0000063_63/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_000062_62/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_00061_61/bucket_0", 500, new byte[0]),
@@ -194,11 +199,11 @@ public class TestHiveAcidUtils
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory().toString()).isEqualTo("mock:/tbl/part1/base_50");
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(2);
+        assertThat(obsolete).hasSize(2);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_052_55");
         assertThat(obsolete.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_0060_60");
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(4);
+        assertThat(delts).hasSize(4);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_40_60");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_00061_61");
         assertThat(delts.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_000062_62");
@@ -210,7 +215,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_0000063_63_0/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_000062_62_0/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_000062_62_3/bucket_0", 500, new byte[0]),
@@ -226,14 +232,14 @@ public class TestHiveAcidUtils
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory().toString()).isEqualTo("mock:/tbl/part1/base_50");
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(5);
+        assertThat(obsolete).hasSize(5);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_052_55");
         assertThat(obsolete.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_058_58");
         assertThat(obsolete.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_0060_60_1");
         assertThat(obsolete.get(3).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_0060_60_4");
         assertThat(obsolete.get(4).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_0060_60_7");
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(5);
+        assertThat(delts).hasSize(5);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_40_60");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_00061_61_0");
         assertThat(delts.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_000062_62_0");
@@ -246,13 +252,14 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_1_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_2_5/bucket_0", 500, new byte[0]));
         Path part = new MockPath(fs, "mock:/tbl/part1");
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:4:4"));
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(2);
+        assertThat(delts).hasSize(2);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_1_1");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_2_5");
     }
@@ -262,7 +269,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_1_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_2_5/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_4_4_1/bucket_0", 500, new byte[0]),
@@ -271,7 +279,7 @@ public class TestHiveAcidUtils
         Path part = new MockPath(fs, "mock:/tbl/part1");
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:4:4"));
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(2);
+        assertThat(delts).hasSize(2);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_1_1");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_2_5");
     }
@@ -281,13 +289,14 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_1_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_2_5/bucket_0", 500, new byte[0]));
         Path part = new MockPath(fs, "mock:/tbl/part1");
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidCompactorWriteIdList("tbl:4:" + Long.MAX_VALUE));
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(1);
+        assertThat(delts).hasSize(1);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_1_1");
     }
 
@@ -296,7 +305,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_1_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_2_5/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_2_5/bucket_0" + AcidUtils.DELTA_SIDE_FILE_SUFFIX, 500, new byte[0]),
@@ -304,7 +314,7 @@ public class TestHiveAcidUtils
         Path part = new MockPath(fs, "mock:/tbl/part1");
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidCompactorWriteIdList("tbl:3:" + Long.MAX_VALUE));
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(1);
+        assertThat(delts).hasSize(1);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_1_1");
     }
 
@@ -313,7 +323,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/base_5/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/base_10/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/base_49/bucket_0", 500, new byte[0]),
@@ -329,7 +340,7 @@ public class TestHiveAcidUtils
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory().toString()).isEqualTo("mock:/tbl/part1/base_49");
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(7);
+        assertThat(obsolete).hasSize(7);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/base_10");
         assertThat(obsolete.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/base_5");
         assertThat(obsolete.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_025_030");
@@ -337,9 +348,9 @@ public class TestHiveAcidUtils
         assertThat(obsolete.get(4).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_025_025");
         assertThat(obsolete.get(5).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_029_029");
         assertThat(obsolete.get(6).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_029_029");
-        assertThat(dir.getOriginalFiles().size()).isEqualTo(0);
+        assertThat(dir.getOriginalFiles()).isEmpty();
         List<AcidUtils.ParsedDelta> deltas = dir.getCurrentDirectories();
-        assertThat(deltas.size()).isEqualTo(2);
+        assertThat(deltas).hasSize(2);
         assertThat(deltas.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_050_105");
         assertThat(deltas.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_050_105");
         // The delete_delta_110_110 should not be read because it is greater than the high watermark.
@@ -350,7 +361,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_0000063_63/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_000062_62/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_00061_61/bucket_0", 500, new byte[0]),
@@ -365,12 +377,12 @@ public class TestHiveAcidUtils
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory().toString()).isEqualTo("mock:/tbl/part1/base_50");
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(3);
+        assertThat(obsolete).hasSize(3);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_052_55");
         assertThat(obsolete.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_052_55");
         assertThat(obsolete.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_0060_60");
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(6);
+        assertThat(delts).hasSize(6);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_40_60");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_40_60");
         assertThat(delts.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_00061_61");
@@ -386,16 +398,17 @@ public class TestHiveAcidUtils
         // This test checks that if we have a minor compacted delta for the txn range [40,60]
         // then it will make any delete delta in that range as obsolete.
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_40_60/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delete_delta_50_50/bucket_0", 500, new byte[0]));
         Path part = new MockPath(fs, "mock:/tbl/part1");
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(1);
+        assertThat(obsolete).hasSize(1);
         assertThat(obsolete.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_50_50");
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(1);
+        assertThat(delts).hasSize(1);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_40_60");
     }
 
@@ -406,7 +419,8 @@ public class TestHiveAcidUtils
         // This tests checks that appropriate delta and delete_deltas are included when minor
         // compactions specifies a valid open txn range.
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_1_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delete_delta_2_2/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_2_5/bucket_0", 500, new byte[0]),
@@ -417,7 +431,7 @@ public class TestHiveAcidUtils
         Path part = new MockPath(fs, "mock:/tbl/part1");
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidCompactorWriteIdList("tbl:4:" + Long.MAX_VALUE + ":"));
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(2);
+        assertThat(delts).hasSize(2);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_1_1");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_2_2");
     }
@@ -427,7 +441,8 @@ public class TestHiveAcidUtils
             throws Exception
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/delta_1_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_2_5/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delete_delta_2_5/bucket_0", 500, new byte[0]),
@@ -438,7 +453,7 @@ public class TestHiveAcidUtils
         Path part = new MockPath(fs, "mock:/tbl/part1");
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:4:4"));
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(3);
+        assertThat(delts).hasSize(3);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_1_1");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_2_5");
         assertThat(delts.get(2).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_2_5");
@@ -460,7 +475,8 @@ public class TestHiveAcidUtils
             throws IOException
     {
         Configuration conf = new Configuration(false);
-        MockFileSystem fs = new MockFileSystem(conf,
+        MockFileSystem fs = new MockFileSystem(
+                conf,
                 new MockFile("mock:/tbl/part1/base_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/base_1/base_1/bucket_0", 500, new byte[0]),
                 new MockFile("mock:/tbl/part1/delta_025_025/bucket_0", 500, new byte[0]),
@@ -472,9 +488,9 @@ public class TestHiveAcidUtils
         AcidUtils.Directory dir = AcidUtils.getAcidState(part, conf, new ValidReaderWriteIdList("tbl:100:" + Long.MAX_VALUE + ":"));
         assertThat(dir.getBaseDirectory().toString()).isEqualTo("mock:/tbl/part1/base_1");
         List<FileStatus> obsolete = dir.getObsolete();
-        assertThat(obsolete.size()).isEqualTo(0);
+        assertThat(obsolete).isEmpty();
         List<AcidUtils.ParsedDelta> delts = dir.getCurrentDirectories();
-        assertThat(delts.size()).isEqualTo(2);
+        assertThat(delts).hasSize(2);
         assertThat(delts.get(0).getPath().toString()).isEqualTo("mock:/tbl/part1/delta_025_025");
         assertThat(delts.get(1).getPath().toString()).isEqualTo("mock:/tbl/part1/delete_delta_029_029");
     }

@@ -35,7 +35,7 @@ public class TestTimeType
 
     public static ValueBlock createTestBlock()
     {
-        BlockBuilder blockBuilder = TIME_MILLIS.createBlockBuilder(null, 15);
+        BlockBuilder blockBuilder = TIME_MILLIS.createFixedSizeBlockBuilder(15);
         TIME_MILLIS.writeLong(blockBuilder, 1_111_000_000_000L);
         TIME_MILLIS.writeLong(blockBuilder, 1_111_000_000_000L);
         TIME_MILLIS.writeLong(blockBuilder, 1_111_000_000_000L);
@@ -60,7 +60,7 @@ public class TestTimeType
     public void testRange()
     {
         Type.Range range = type.getRange().orElseThrow();
-        assertThat(range.getMin()).isEqualTo(0);
+        assertThat(range.getMin()).isEqualTo(0L);
         assertThat(range.getMax()).isEqualTo(PICOSECONDS_PER_DAY);
     }
 

@@ -18,11 +18,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ListMultimap;
+import io.trino.connector.CatalogHandle;
 import io.trino.exchange.SpoolingExchangeInput;
+import io.trino.execution.scheduler.StableHostAddressProvider;
 import io.trino.metadata.Split;
 import io.trino.spi.HostAddress;
 import io.trino.spi.SplitWeight;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.exchange.ExchangeSourceHandle;
 import io.trino.split.RemoteSplit;
 import io.trino.sql.planner.plan.PlanNodeId;
@@ -59,6 +60,7 @@ class ArbitraryDistributionSplitAssigner
     private final long maxTargetPartitionSizeInBytes;
     private final long standardSplitSizeInBytes;
     private final int maxTaskSplitCount;
+    private final StableHostAddressProvider stableHostAddressProvider;
 
     private int nextPartitionId;
     private int adaptiveCounter;
@@ -81,7 +83,8 @@ class ArbitraryDistributionSplitAssigner
             long minTargetPartitionSizeInBytes,
             long maxTargetPartitionSizeInBytes,
             long standardSplitSizeInBytes,
-            int maxTaskSplitCount)
+            int maxTaskSplitCount,
+            StableHostAddressProvider stableHostAddressProvider)
     {
         this.catalogRequirement = requireNonNull(catalogRequirement, "catalogRequirement is null");
         this.partitionedSources = ImmutableSet.copyOf(requireNonNull(partitionedSources, "partitionedSources is null"));
@@ -96,6 +99,7 @@ class ArbitraryDistributionSplitAssigner
         this.maxTargetPartitionSizeInBytes = maxTargetPartitionSizeInBytes;
         this.standardSplitSizeInBytes = standardSplitSizeInBytes;
         this.maxTaskSplitCount = maxTaskSplitCount;
+        this.stableHostAddressProvider = requireNonNull(stableHostAddressProvider, "stableHostAddressProvider is null");
 
         this.targetPartitionSizeInBytes = minTargetPartitionSizeInBytes;
         this.roundedTargetPartitionSizeInBytes = minTargetPartitionSizeInBytes;
@@ -154,7 +158,7 @@ class ArbitraryDistributionSplitAssigner
             if (allAssignments.isEmpty()) {
                 // at least a single partition is expected to be created
                 allAssignments.add(new PartitionAssignment(0));
-                assignment.addPartition(new Partition(0, new NodeRequirements(catalogRequirement, ImmutableSet.of(), true)));
+                assignment.addPartition(new Partition(0, new NodeRequirements(catalogRequirement, Optional.empty(), true)));
                 for (PlanNodeId replicatedSourceId : replicatedSources) {
                     assignment.updatePartition(new PartitionUpdate(
                             0,
@@ -272,7 +276,7 @@ class ArbitraryDistributionSplitAssigner
             if (allAssignments.isEmpty()) {
                 // at least a single partition is expected to be created
                 allAssignments.add(new PartitionAssignment(0));
-                assignment.addPartition(new Partition(0, new NodeRequirements(catalogRequirement, ImmutableSet.of(), true)));
+                assignment.addPartition(new Partition(0, new NodeRequirements(catalogRequirement, Optional.empty(), true)));
                 for (PlanNodeId replicatedSourceId : replicatedSources) {
                     assignment.updatePartition(new PartitionUpdate(
                             0,
@@ -348,8 +352,8 @@ class ArbitraryDistributionSplitAssigner
     private long rank(HostAddress address)
     {
         // The node-to-split map can have two entries for this address: one for remotely accessible splits and one for non remotely accessible splits.
-        PartitionAssignment flexEntry = openAssignments.get(new NodeRequirements(catalogRequirement, ImmutableSet.of(address), true));
-        PartitionAssignment rigidEntry = openAssignments.get(new NodeRequirements(catalogRequirement, ImmutableSet.of(address), false));
+        PartitionAssignment flexEntry = openAssignments.get(new NodeRequirements(catalogRequirement, Optional.of(address), true));
+        PartitionAssignment rigidEntry = openAssignments.get(new NodeRequirements(catalogRequirement, Optional.of(address), false));
         if (flexEntry == null && rigidEntry == null) {
             return -1; // Most desirable: an unassigned node.
         }
@@ -365,14 +369,17 @@ class ArbitraryDistributionSplitAssigner
 
     private NodeRequirements getNodeRequirements(Split split)
     {
-        if (split.getAddresses().isEmpty()) {
+        List<HostAddress> preferredAddresses = split.getConnectorSplit().getAffinityKey()
+                .map(stableHostAddressProvider::getHosts)
+                .orElseGet(split::getAddresses);
+        if (preferredAddresses.isEmpty()) {
             checkArgument(split.isRemotelyAccessible(), "split is not remotely accessible but the list of hosts is empty: %s", split);
-            return new NodeRequirements(catalogRequirement, ImmutableSet.of(), true);
+            return new NodeRequirements(catalogRequirement, Optional.empty(), true);
         }
-        HostAddress selectedAddress = split.getAddresses().stream()
-                .min(Comparator.comparing(this::rank))
+        HostAddress selectedAddress = preferredAddresses.stream()
+                .min(Comparator.comparingLong(this::rank))
                 .orElseThrow();
-        return new NodeRequirements(catalogRequirement, ImmutableSet.of(selectedAddress), split.isRemotelyAccessible());
+        return new NodeRequirements(catalogRequirement, Optional.of(selectedAddress), split.isRemotelyAccessible());
     }
 
     private long getSplitSizeInBytes(Split split)

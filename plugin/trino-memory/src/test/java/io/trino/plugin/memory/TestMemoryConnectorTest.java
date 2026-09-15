@@ -23,6 +23,7 @@ import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.QueryId;
 import io.trino.spi.metrics.Count;
 import io.trino.spi.metrics.Metrics;
+import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
@@ -33,15 +34,13 @@ import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.util.Comparator;
 import java.util.List;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.SystemSessionProperties.ENABLE_LARGE_DYNAMIC_FILTERS;
-import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.BROADCAST;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.abort;
 
 public class TestMemoryConnectorTest
         extends BaseConnectorTest
@@ -58,14 +57,12 @@ public class TestMemoryConnectorTest
         return MemoryQueryRunner.builder()
                 .addExtraProperties(ImmutableMap.<String, String>builder()
                         // Adjust DF limits to test edge cases
-                        .put("dynamic-filtering.small.max-distinct-values-per-driver", "100")
-                        .put("dynamic-filtering.small.range-row-limit-per-driver", "100")
-                        .put("dynamic-filtering.large.max-distinct-values-per-driver", "100")
-                        .put("dynamic-filtering.large.range-row-limit-per-driver", "100000")
-                        .put("dynamic-filtering.small-partitioned.max-distinct-values-per-driver", "100")
-                        .put("dynamic-filtering.small-partitioned.range-row-limit-per-driver", "200")
-                        .put("dynamic-filtering.large-partitioned.max-distinct-values-per-driver", "100")
-                        .put("dynamic-filtering.large-partitioned.range-row-limit-per-driver", "100000")
+                        .put("dynamic-filtering.max-distinct-values-per-driver", "100")
+                        .put("dynamic-filtering.range-row-limit-per-driver", "100000")
+                        .put("dynamic-filtering.max-size-per-driver", "100kB")
+                        .put("dynamic-filtering.partitioned.max-distinct-values-per-driver", "100")
+                        .put("dynamic-filtering.partitioned.range-row-limit-per-driver", "100000")
+                        .put("dynamic-filtering.partitioned.max-size-per-driver", "50kB")
                         // disable semi join to inner join rewrite to test semi join operators explicitly
                         .put("optimizer.rewrite-filtering-semi-join-to-inner-join", "false")
                         // enable CREATE FUNCTION
@@ -86,21 +83,21 @@ public class TestMemoryConnectorTest
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         return switch (connectorBehavior) {
-            case SUPPORTS_TRUNCATE -> true;
-            case SUPPORTS_ADD_FIELD,
+            case SUPPORTS_CREATE_FUNCTION,
+                 SUPPORTS_TRUNCATE -> true;
+            case SUPPORTS_ADD_COLUMN_WITH_POSITION,
+                 SUPPORTS_ADD_FIELD,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
                  SUPPORTS_CREATE_MATERIALIZED_VIEW,
                  SUPPORTS_DELETE,
                  SUPPORTS_DEREFERENCE_PUSHDOWN,
                  SUPPORTS_DROP_COLUMN,
-                 SUPPORTS_LIMIT_PUSHDOWN,
                  SUPPORTS_MERGE,
                  SUPPORTS_PREDICATE_PUSHDOWN,
                  SUPPORTS_RENAME_FIELD,
                  SUPPORTS_SET_COLUMN_TYPE,
                  SUPPORTS_TOPN_PUSHDOWN,
                  SUPPORTS_UPDATE -> false;
-            case SUPPORTS_CREATE_FUNCTION -> true;
             default -> super.hasBehavior(connectorBehavior);
         };
     }
@@ -108,7 +105,15 @@ public class TestMemoryConnectorTest
     @Override
     protected TestTable createTableWithDefaultColumns()
     {
-        return abort("Memory connector does not support column default values");
+        return newTrinoTable(
+                "test_default_columns",
+                """
+                (col_required BIGINT NOT NULL,
+                col_nullable BIGINT,
+                col_default BIGINT DEFAULT 43,
+                col_nonnull_default BIGINT DEFAULT 42 NOT NULL,
+                col_required2 BIGINT NOT NULL)
+                """);
     }
 
     @Test
@@ -211,7 +216,8 @@ public class TestMemoryConnectorTest
                     "SELECT * FROM lineitem JOIN orders ON lineitem.orderkey = orders.orderkey AND orders.totalprice < 0",
                     noJoinReordering(joinDistributionType),
                     0,
-                    0, ORDERS_COUNT);
+                    0,
+                    ORDERS_COUNT);
         }
     }
 
@@ -222,18 +228,13 @@ public class TestMemoryConnectorTest
         for (JoinDistributionType joinDistributionType : JoinDistributionType.values()) {
             @Language("SQL") String sql = "SELECT * FROM lineitem JOIN orders ON lineitem.orderkey = orders.orderkey and orders.custkey BETWEEN 300 AND 700";
             int expectedRowCount = 15793;
-            // Probe-side is fully scanned because the build-side is too large for dynamic filtering:
+            // Probe-side is partially scanned because we extract min/max from large build-side for dynamic filtering
             assertDynamicFiltering(
                     sql,
                     noJoinReordering(joinDistributionType),
                     expectedRowCount,
-                    LINEITEM_COUNT, ORDERS_COUNT);
-            // Probe-side is partially scanned because we extract min/max from large build-side for dynamic filtering
-            assertDynamicFiltering(
-                    sql,
-                    withLargeDynamicFilters(joinDistributionType),
-                    expectedRowCount,
-                    60139, ORDERS_COUNT);
+                    60139,
+                    ORDERS_COUNT);
         }
     }
 
@@ -253,14 +254,16 @@ public class TestMemoryConnectorTest
                     "SELECT * FROM lineitem JOIN orders ON lineitem.orderkey = orders.orderkey AND orders.comment = 'nstructions sleep furiously among '",
                     noJoinReordering(joinDistributionType),
                     6,
-                    6, ORDERS_COUNT);
+                    6,
+                    ORDERS_COUNT);
 
             // Join lineitem with a single row of part
             assertDynamicFiltering(
                     "SELECT l.comment FROM  lineitem l, part p WHERE p.partkey = l.partkey AND p.comment = 'onic deposits'",
                     noJoinReordering(joinDistributionType),
                     39,
-                    39, PART_COUNT);
+                    39,
+                    PART_COUNT);
         }
     }
 
@@ -273,7 +276,8 @@ public class TestMemoryConnectorTest
                 "SELECT * FROM coerce_test l JOIN orders o ON l.orderkey_int = o.orderkey AND o.comment = 'nstructions sleep furiously among '",
                 noJoinReordering(BROADCAST),
                 6,
-                6, ORDERS_COUNT);
+                6,
+                ORDERS_COUNT);
     }
 
     @Test
@@ -288,7 +292,8 @@ public class TestMemoryConnectorTest
                             " WHERE l.orderkey = o.orderkey AND o.comment = 'nstructions sleep furiously among '",
                     noJoinReordering(joinDistributionType),
                     6,
-                    6, ORDERS_COUNT);
+                    6,
+                    ORDERS_COUNT);
         }
     }
 
@@ -302,7 +307,8 @@ public class TestMemoryConnectorTest
                     "SELECT * FROM lineitem WHERE lineitem.orderkey IN (SELECT orders.orderkey FROM orders WHERE orders.totalprice < 0)",
                     noJoinReordering(joinDistributionType),
                     0,
-                    0, ORDERS_COUNT);
+                    0,
+                    ORDERS_COUNT);
         }
     }
 
@@ -315,18 +321,13 @@ public class TestMemoryConnectorTest
             @Language("SQL") String sql = "SELECT * FROM lineitem WHERE lineitem.orderkey IN " +
                     "(SELECT orders.orderkey FROM orders WHERE orders.custkey BETWEEN 300 AND 700)";
             int expectedRowCount = 15793;
-            // Probe-side is fully scanned because the build-side is too large for dynamic filtering:
+            // Probe-side is partially scanned because we extract min/max from large build-side for dynamic filtering
             assertDynamicFiltering(
                     sql,
                     noJoinReordering(joinDistributionType),
                     expectedRowCount,
-                    LINEITEM_COUNT, ORDERS_COUNT);
-            // Probe-side is partially scanned because we extract min/max from large build-side for dynamic filtering
-            assertDynamicFiltering(
-                    sql,
-                    withLargeDynamicFilters(joinDistributionType),
-                    expectedRowCount,
-                    60139, ORDERS_COUNT);
+                    60139,
+                    ORDERS_COUNT);
         }
     }
 
@@ -340,14 +341,16 @@ public class TestMemoryConnectorTest
                     "SELECT * FROM lineitem WHERE lineitem.orderkey IN (SELECT orders.orderkey FROM orders WHERE orders.comment = 'nstructions sleep furiously among ')",
                     noJoinReordering(joinDistributionType),
                     6,
-                    6, ORDERS_COUNT);
+                    6,
+                    ORDERS_COUNT);
 
             // Join lineitem with a single row of part
             assertDynamicFiltering(
                     "SELECT l.comment FROM lineitem l WHERE l.partkey IN (SELECT p.partkey FROM part p WHERE p.comment = 'onic deposits')",
                     noJoinReordering(joinDistributionType),
                     39,
-                    39, PART_COUNT);
+                    39,
+                    PART_COUNT);
         }
     }
 
@@ -363,7 +366,9 @@ public class TestMemoryConnectorTest
                             "WHERE t.partkey IN (SELECT p.partkey FROM part p WHERE p.comment = 'onic deposits')",
                     noJoinReordering(joinDistributionType),
                     1,
-                    1, ORDERS_COUNT, PART_COUNT);
+                    1,
+                    ORDERS_COUNT,
+                    PART_COUNT);
         }
     }
 
@@ -395,12 +400,12 @@ public class TestMemoryConnectorTest
         assertDynamicFiltering("SELECT * FROM probe, build WHERE v >= vmin AND v <= vmax", session, 2, 2, 2);
 
         // TODO: support complex inequality join clauses: https://github.com/trinodb/trino/issues/5755
-        assertDynamicFiltering("SELECT * FROM probe JOIN build ON v BETWEEN vmin AND vmax - 1", session, 1, 3, 2);
-        assertDynamicFiltering("SELECT * FROM probe JOIN build ON v BETWEEN vmin + 1 AND vmax", session, 1, 3, 2);
-        assertDynamicFiltering("SELECT * FROM probe JOIN build ON v BETWEEN vmin + 1 AND vmax - 1", session, 0, 5, 2);
-        assertDynamicFiltering("SELECT * FROM probe, build WHERE v BETWEEN vmin AND vmax - 1", session, 1, 3, 2);
-        assertDynamicFiltering("SELECT * FROM probe, build WHERE v BETWEEN vmin + 1 AND vmax", session, 1, 3, 2);
-        assertDynamicFiltering("SELECT * FROM probe, build WHERE v BETWEEN vmin + 1 AND vmax - 1", session, 0, 5, 2);
+        assertDynamicFiltering("SELECT * FROM probe JOIN build ON v BETWEEN vmin AND vmax - 1", session, 1, 1, 2);
+        assertDynamicFiltering("SELECT * FROM probe JOIN build ON v BETWEEN vmin + 1 AND vmax", session, 1, 1, 2);
+        assertDynamicFiltering("SELECT * FROM probe JOIN build ON v BETWEEN vmin + 1 AND vmax - 1", session, 0, 0, 2);
+        assertDynamicFiltering("SELECT * FROM probe, build WHERE v BETWEEN vmin AND vmax - 1", session, 1, 1, 2);
+        assertDynamicFiltering("SELECT * FROM probe, build WHERE v BETWEEN vmin + 1 AND vmax", session, 1, 1, 2);
+        assertDynamicFiltering("SELECT * FROM probe, build WHERE v BETWEEN vmin + 1 AND vmax - 1", session, 0, 0, 2);
 
         // TODO: make sure it works after https://github.com/trinodb/trino/issues/5777 is fixed
         assertDynamicFiltering("SELECT * FROM probe JOIN build ON v >= vmin AND v <= vmax - 1", session, 1, 1, 2);
@@ -436,12 +441,13 @@ public class TestMemoryConnectorTest
     @Test
     public void testCrossJoinLargeBuildSideDynamicFiltering()
     {
-        // Probe-side is fully scanned because the build-side is too large for dynamic filtering:
+        // Probe-side is partially scanned because we extract min/max from large build-side for dynamic filtering
         assertDynamicFiltering(
                 "SELECT * FROM orders o, customer c WHERE o.custkey < c.custkey AND c.name < 'Customer#000001000' AND o.custkey > 1000",
                 noJoinReordering(BROADCAST),
                 0,
-                ORDERS_COUNT, CUSTOMER_COUNT);
+                9894,
+                CUSTOMER_COUNT);
     }
 
     @Test
@@ -474,13 +480,6 @@ public class TestMemoryConnectorTest
         assertThat(getOperatorRowsRead(getDistributedQueryRunner(), result.queryId())).isEqualTo(Ints.asList(expectedOperatorRowsRead));
     }
 
-    private Session withLargeDynamicFilters(JoinDistributionType joinDistributionType)
-    {
-        return Session.builder(noJoinReordering(joinDistributionType))
-                .setSystemProperty(ENABLE_LARGE_DYNAMIC_FILTERS, "true")
-                .build();
-    }
-
     private static List<Integer> getOperatorRowsRead(QueryRunner runner, QueryId queryId)
     {
         return getScanOperatorStats(runner, queryId).stream()
@@ -494,8 +493,14 @@ public class TestMemoryConnectorTest
         QueryStats stats = runner.getCoordinator().getQueryManager().getFullQueryInfo(queryId).getQueryStats();
         return stats.getOperatorSummaries()
                 .stream()
+                .sorted(getOperatorStatsComparator())
                 .filter(summary -> summary.getOperatorType().contains("Scan"))
                 .collect(toImmutableList());
+    }
+
+    private static Comparator<OperatorStats> getOperatorStatsComparator()
+    {
+        return Comparator.comparing(s -> s.getStageId() + "/" + s.getPipelineId() + "/" + s.getOperatorId());
     }
 
     @Test
@@ -604,9 +609,28 @@ public class TestMemoryConnectorTest
     }
 
     @Test
+    void testDistinctAggregationsOverBetweenOnExpression()
+    {
+        // Splitting distinct aggregations over a BETWEEN expression must remap the Let binder with its body.
+        Session session = Session.builder(getSession())
+                .setSystemProperty("distinct_aggregations_strategy", "split_to_subqueries")
+                .build();
+
+        try (TestTable table = newTrinoTable(
+                "test_distinct_over_between",
+                "AS SELECT * FROM (VALUES (1, 10, 'abc'), (2, 20, 'abd'), (3, 30, 'zzz')) x(orderkey, partkey, comment)")) {
+            assertThat(query(
+                    session,
+                    "SELECT count(DISTINCT orderkey), count(DISTINCT partkey) FROM " + table.getName() +
+                            " WHERE substring(comment, 1, 3) BETWEEN 'a' AND 'b'"))
+                    .matches("VALUES (BIGINT '2', BIGINT '2')");
+        }
+    }
+
+    @Test
     void testInsertAfterTruncate()
     {
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_truncate", "AS SELECT 1 x")) {
+        try (TestTable table = newTrinoTable("test_truncate", "AS SELECT 1 x")) {
             assertUpdate("TRUNCATE TABLE " + table.getName());
             assertQueryReturnsEmptyResult("SELECT * FROM " + table.getName());
 

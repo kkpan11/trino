@@ -34,17 +34,27 @@ servers and other components of Trino's architecture.
 (trino-concept-cluster)=
 ### Cluster
 
-A Trino cluster consists of a {ref}`coordinator <trino-concept-coordinator>` and
-many {ref}`workers <trino-concept-worker>`. Users connect to the coordinator
-with their {ref}`SQL <glossSQL>` query tool. The coordinator collaborates with the
-workers. The coordinator and the workers access the connected
-{ref}`data sources <trino-concept-data-source>`. This access is configured in
-{ref}`catalogs <trino-concept-catalog>`.
+A Trino cluster consists of several Trino [nodes](trino-concept-node) - one
+[coordinator](trino-concept-coordinator) and zero or more
+[workers](trino-concept-worker). Users connect to the coordinator with their
+[SQL](glossSQL) query tool. The coordinator collaborates with the workers. The
+coordinator and the workers access the connected [data
+sources](trino-concept-data-source). This access is configured in
+[catalogs](trino-concept-catalog).
 
 Processing each query is a stateful operation. The workload is orchestrated by
 the coordinator and spread parallel across all workers in the cluster. Each node
 runs Trino in one JVM instance, and processing is parallelized further using
 threads.
+
+(trino-concept-node)=
+### Node
+
+Any Trino server in a specific Trino cluster is considered a **node** of the
+[cluster](trino-concept-cluster). Technically this refers to the Java process
+running the Trino program, but node is often used to refer to the computer
+running the process due to the recommendation to run only one Trino process per
+computer.
 
 (trino-concept-coordinator)=
 ### Coordinator
@@ -86,26 +96,29 @@ using a REST API.
 
 Clients allow you to connect to Trino, submit SQL queries, and receive the
 results. Clients can access all configured data sources using
-[catalogs](trino-concept-catalog). Clients are full-featured applications or
-libraries and drivers that allow you to connect to any application supporting
-that driver, or even your own custom application or script.
+[catalogs](trino-concept-catalog). Clients are full-featured client applications
+or client drivers and libraries that allow you to connect with any application
+supporting that driver, or even your own custom application or script.
 
-Clients include command line tools, desktop applications, web-based
+Clients applications include command line tools, desktop applications, web-based
 applications, and software-as-a-service solutions with features such as
 interactive SQL query authoring with editors, or rich user interfaces for
 graphical query creation, query running and result rendering, visualizations
 with charts and graphs, reporting, and dashboard creation.
 
-[A comprehensive list with more details for each client is available on the
-Trino website](https://trino.io/ecosystem/client).
+Client application that support other query languages or user interface
+components to build a query, must translate each request to [SQL as supported by
+Trino](/language).
 
-Clients can process the returned data from Trino and be used for data pipelines
-across catalogs and from other data sources to Trino catalogs.
+More details are available in the [Trino client documentation](/client).
 
-From a technical perspective, clients only interact with the
-[coordinator](trino-concept-coordinator) of the Trino cluster and use the
-[](/develop/client-protocol).
+(trino-concept-plugin)=
+## Plugin
 
+Trino uses a plugin architecture to extend its capabilities and integrate with
+various data sources and other systems. Details about different types of
+plugins, installation, removal, and other aspects are available in the [Plugin
+documentation](/installation/plugins).
 
 (trino-concept-data-source)=
 ## Data source
@@ -154,7 +167,7 @@ Trino contains [many built-in connectors](/connector):
   [Prometheus](/connector/prometheus), [SingleStore](/connector/singlestore),
   and [Snowflake](/connector/snowflake) connectors.
 * A number of other utility connectors such as the [JMX](/connector/jmx),
-  [System](/connector/system), and [TPCH](/connector/tpch) connectors.
+  [System](/connector/system), and [TPC-H](/connector/tpch) connectors.
 
 Every catalog uses a specific connector. If you examine a catalog configuration
 file, you see that each contains a mandatory property `connector.name` with the

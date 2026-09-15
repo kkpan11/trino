@@ -22,8 +22,8 @@ import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.block.RowBlock.getRowFieldsFromBlock;
-import static io.trino.spi.predicate.Utils.nativeValueToBlock;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -36,7 +36,7 @@ import static java.util.Objects.requireNonNull;
 public class ChangeOnlyUpdatedColumnsMergeProcessor
         implements MergeRowChangeProcessor
 {
-    private static final Block INSERT_FROM_UPDATE_BLOCK = nativeValueToBlock(TINYINT, 0L);
+    private static final Block INSERT_FROM_UPDATE_BLOCK = writeNativeValue(TINYINT, 0L);
 
     private final int rowIdChannel;
     private final int mergeRowChannel;
@@ -65,20 +65,16 @@ public class ChangeOnlyUpdatedColumnsMergeProcessor
         int positionCount = inputPage.getPositionCount();
         checkArgument(positionCount > 0, "positionCount should be > 0, but is %s", positionCount);
 
-        Block mergeRow = inputPage.getBlock(mergeRowChannel).getLoadedBlock();
-        if (mergeRow.mayHaveNull()) {
-            for (int position = 0; position < positionCount; position++) {
-                checkArgument(!mergeRow.isNull(position), "The mergeRow may not have null rows");
-            }
-        }
-
+        Block mergeRow = inputPage.getBlock(mergeRowChannel);
         List<Block> fields = getRowFieldsFromBlock(mergeRow);
-        List<Block> builder = new ArrayList<>(dataColumnChannels.size() + 3);
+        List<Block> builder = new ArrayList<>(dataColumnChannels.size() + 4);
         for (int channel : dataColumnChannels) {
             builder.add(fields.get(channel));
         }
         Block operationChannelBlock = fields.get(fields.size() - 2);
         builder.add(operationChannelBlock);
+        Block caseNumberChannelBlock = fields.get(fields.size() - 1);
+        builder.add(caseNumberChannelBlock);
         builder.add(inputPage.getBlock(rowIdChannel));
         builder.add(RunLengthEncodedBlock.create(INSERT_FROM_UPDATE_BLOCK, positionCount));
 
@@ -86,7 +82,7 @@ public class ChangeOnlyUpdatedColumnsMergeProcessor
 
         int defaultCaseCount = 0;
         for (int position = 0; position < positionCount; position++) {
-            if (TINYINT.getByte(operationChannelBlock, position) == DEFAULT_CASE_OPERATION_NUMBER) {
+            if (mergeRow.isNull(position)) {
                 defaultCaseCount++;
             }
         }
@@ -97,7 +93,7 @@ public class ChangeOnlyUpdatedColumnsMergeProcessor
         int usedCases = 0;
         int[] positions = new int[positionCount - defaultCaseCount];
         for (int position = 0; position < positionCount; position++) {
-            if (TINYINT.getByte(operationChannelBlock, position) != DEFAULT_CASE_OPERATION_NUMBER) {
+            if (!mergeRow.isNull(position)) {
                 positions[usedCases] = position;
                 usedCases++;
             }

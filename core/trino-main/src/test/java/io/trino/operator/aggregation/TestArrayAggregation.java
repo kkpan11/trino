@@ -15,6 +15,7 @@ package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.AggregationMetrics;
 import io.trino.operator.aggregation.groupby.AggregationTestInput;
 import io.trino.operator.aggregation.groupby.AggregationTestInputBuilder;
 import io.trino.operator.aggregation.groupby.AggregationTestOutput;
@@ -42,7 +43,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
 import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -156,7 +157,7 @@ public class TestArrayAggregation
     {
         TestingAggregationFunction bigIntAgg = FUNCTION_RESOLUTION.getAggregateFunction("array_agg", fromTypes(BIGINT));
         GroupedAggregator groupedAggregator = bigIntAgg.createAggregatorFactory(SINGLE, ImmutableList.of(), OptionalInt.empty())
-                .createGroupedAggregator();
+                .createGroupedAggregator(new AggregationMetrics());
         BlockBuilder blockBuilder = bigIntAgg.getFinalType().createBlockBuilder(null, 1000);
 
         groupedAggregator.evaluate(0, blockBuilder);
@@ -170,7 +171,8 @@ public class TestArrayAggregation
 
         AggregationTestInputBuilder testInputBuilder = new AggregationTestInputBuilder(
                 new Block[] {
-                        createStringsBlock("hello", "world", "hello2", "world2", "hello3", "world3", "goodbye")},
+                        createStringsBlock("hello", "world", "hello2", "world2", "hello3", "world3", "goodbye"),
+                },
                 varcharAgg);
         AggregationTestOutput testOutput = new AggregationTestOutput(ImmutableList.of("hello", "world", "hello2", "world2", "hello3", "world3", "goodbye"));
         AggregationTestInput testInput = testInputBuilder.build();
@@ -212,7 +214,7 @@ public class TestArrayAggregation
         int arraySize = 30;
         Random random = new Random();
         GroupedAggregator groupedAggregator = varcharAgg.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty())
-                .createGroupedAggregator();
+                .createGroupedAggregator(new AggregationMetrics());
 
         for (int j = 0; j < numGroups; j++) {
             List<String> expectedValues = new ArrayList<>();

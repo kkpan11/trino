@@ -16,12 +16,18 @@ package io.trino.plugin.jdbc;
 import com.google.inject.Inject;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeSink;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkId;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.MemoryContext;
+
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -30,23 +36,47 @@ public class JdbcPageSinkProvider
 {
     private final JdbcClient jdbcClient;
     private final RemoteQueryModifier queryModifier;
+    private final QueryBuilder queryBuilder;
 
     @Inject
-    public JdbcPageSinkProvider(JdbcClient jdbcClient, RemoteQueryModifier remoteQueryModifier)
+    public JdbcPageSinkProvider(JdbcClient jdbcClient, RemoteQueryModifier remoteQueryModifier, QueryBuilder queryBuilder)
     {
         this.jdbcClient = requireNonNull(jdbcClient, "jdbcClient is null");
         this.queryModifier = requireNonNull(remoteQueryModifier, "remoteQueryModifier is null");
+        this.queryBuilder = requireNonNull(queryBuilder, "queryBuilder is null");
     }
 
     @Override
-    public ConnectorPageSink createPageSink(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorOutputTableHandle tableHandle, ConnectorPageSinkId pageSinkId)
+    public ConnectorPageSink createPageSink(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorOutputTableHandle tableHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
     {
         return new JdbcPageSink(session, (JdbcOutputTableHandle) tableHandle, jdbcClient, pageSinkId, queryModifier, JdbcClient::buildInsertSql);
     }
 
     @Override
-    public ConnectorPageSink createPageSink(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorInsertTableHandle tableHandle, ConnectorPageSinkId pageSinkId)
+    public ConnectorPageSink createPageSink(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorInsertTableHandle tableHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
     {
         return new JdbcPageSink(session, (JdbcOutputTableHandle) tableHandle, jdbcClient, pageSinkId, queryModifier, JdbcClient::buildInsertSql);
+    }
+
+    @Override
+    public ConnectorMergeSink createMergeSink(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId,
+            MemoryContext memoryContext)
+    {
+        return new JdbcMergeSink(session, mergeHandle, jdbcClient, pageSinkId, queryModifier, queryBuilder);
     }
 }

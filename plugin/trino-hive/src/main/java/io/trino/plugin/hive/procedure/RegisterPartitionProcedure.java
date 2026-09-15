@@ -42,12 +42,12 @@ import java.lang.invoke.MethodHandle;
 import java.util.List;
 import java.util.Optional;
 
+import static io.trino.metastore.Partitions.makePartName;
 import static io.trino.plugin.base.util.Procedures.checkProcedureArgument;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_FILESYSTEM_ERROR;
 import static io.trino.plugin.hive.HiveMetadata.TRINO_QUERY_ID_NAME;
 import static io.trino.plugin.hive.procedure.Procedures.checkIsPartitionedTable;
 import static io.trino.plugin.hive.procedure.Procedures.checkPartitionColumns;
-import static io.trino.plugin.hive.util.HiveUtil.makePartName;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
@@ -125,7 +125,7 @@ public class RegisterPartitionProcedure
             Table table = metastore.getTable(schemaName, tableName)
                     .orElseThrow(() -> new TableNotFoundException(schemaTableName));
 
-            accessControl.checkCanInsertIntoTable(null, schemaTableName);
+            accessControl.checkCanInsertIntoTable(null, schemaTableName, Optional.empty());
 
             checkIsPartitionedTable(table);
             checkPartitionColumns(table, partitionColumns);

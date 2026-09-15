@@ -30,7 +30,7 @@ public final class CallArgument
 
     public CallArgument(NodeLocation location, Optional<Identifier> name, Expression value)
     {
-        super(Optional.of(location));
+        super(location);
         this.name = requireNonNull(name, "name is null");
         this.value = requireNonNull(value, "value is null");
     }
@@ -54,7 +54,16 @@ public final class CallArgument
     @Override
     public List<Node> getChildren()
     {
-        return ImmutableList.of(value);
+        ImmutableList.Builder<Node> children = ImmutableList.builder();
+        name.ifPresent(children::add);
+        children.add(value);
+        return children.build();
+    }
+
+    @Override
+    public boolean shallowEquals(Node other)
+    {
+        return sameClass(this, other);
     }
 
     @Override

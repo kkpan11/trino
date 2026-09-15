@@ -19,16 +19,15 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.testing.TempFile;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.TrinoOutputFile;
-import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
 import io.trino.filesystem.local.LocalInputFile;
 import io.trino.filesystem.local.LocalOutputFile;
 import io.trino.metadata.TableHandle;
 import io.trino.parquet.writer.ParquetSchemaConverter;
 import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.deltalake.transactionlog.MetadataEntry;
 import io.trino.plugin.deltalake.transactionlog.ProtocolEntry;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
 import io.trino.plugin.hive.HiveTransactionHandle;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
@@ -38,6 +37,8 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -60,10 +61,9 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
+import static io.trino.hdfs.HdfsTestUtils.HDFS_FILE_SYSTEM_FACTORY;
 import static io.trino.plugin.deltalake.DeltaLakeColumnType.PARTITION_KEY;
 import static io.trino.plugin.deltalake.DeltaLakeColumnType.REGULAR;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_ENVIRONMENT;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_FILE_SYSTEM_STATS;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.Decimals.writeShortDecimal;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -103,7 +103,7 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
             TrinoInputFile inputFile = new LocalInputFile(file.file());
 
             try (ParquetWriter writer = createParquetWriter(outputFile, schemaConverter)) {
-                BlockBuilder keyBuilder = INTEGER.createBlockBuilder(null, 1);
+                BlockBuilder keyBuilder = INTEGER.createFixedSizeBlockBuilder(1);
                 INTEGER.writeLong(keyBuilder, keyColumnValue);
                 BlockBuilder dataBuilder = VARCHAR.createBlockBuilder(null, 1);
                 VARCHAR.writeString(dataBuilder, dataColumnValue);
@@ -117,6 +117,7 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                     inputFile.length(),
                     Optional.empty(),
                     0,
+                    Optional.empty(),
                     Optional.empty(),
                     SplitWeight.standard(),
                     TupleDomain.all(),
@@ -142,10 +143,8 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                             new ProtocolEntry(1, 2, Optional.empty(), Optional.empty()),
                             TupleDomain.all(),
                             TupleDomain.all(),
-                            Optional.empty(),
+                            false,
                             Optional.of(Set.of(keyColumnHandle, dataColumnHandle)),
-                            Optional.empty(),
-                            Optional.empty(),
                             Optional.empty(),
                             0,
                             false),
@@ -153,18 +152,16 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
 
             TupleDomain<ColumnHandle> splitPruningPredicate = TupleDomain.withColumnDomains(
                     ImmutableMap.of(
-                            keyColumnHandle,
-                            Domain.singleValue(INTEGER, 1L)));
+                            keyColumnHandle, Domain.singleValue(INTEGER, 1L)));
             try (ConnectorPageSource emptyPageSource = createTestingPageSource(transaction, deltaLakeConfig, split, tableHandle, ImmutableList.of(keyColumnHandle, dataColumnHandle), getDynamicFilter(splitPruningPredicate))) {
-                assertThat(emptyPageSource.getNextPage()).isNull();
+                assertThat(emptyPageSource.getNextSourcePage()).isNull();
             }
 
             TupleDomain<ColumnHandle> nonSelectivePredicate = TupleDomain.withColumnDomains(
                     ImmutableMap.of(
-                            keyColumnHandle,
-                            Domain.singleValue(INTEGER, (long) keyColumnValue)));
+                            keyColumnHandle, Domain.singleValue(INTEGER, (long) keyColumnValue)));
             try (ConnectorPageSource nonEmptyPageSource = createTestingPageSource(transaction, deltaLakeConfig, split, tableHandle, ImmutableList.of(keyColumnHandle, dataColumnHandle), getDynamicFilter(nonSelectivePredicate))) {
-                Page page = nonEmptyPageSource.getNextPage();
+                SourcePage page = nonEmptyPageSource.getNextSourcePage();
                 assertThat(page).isNotNull();
                 assertThat(page.getPositionCount()).isEqualTo(1);
                 assertThat(INTEGER.getInt(page.getBlock(0), 0)).isEqualTo(keyColumnValue);
@@ -204,7 +201,7 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
             try (ParquetWriter writer = createParquetWriter(outputFile, schemaConverter)) {
                 BlockBuilder receiptBuilder = VARCHAR.createBlockBuilder(null, 1);
                 VARCHAR.writeString(receiptBuilder, receiptColumnValue);
-                BlockBuilder amountBuilder = amountColumnType.createBlockBuilder(null, 1);
+                BlockBuilder amountBuilder = amountColumnType.createFixedSizeBlockBuilder(1);
                 writeShortDecimal(amountBuilder, amountColumnValue.unscaledValue().longValueExact());
                 writer.write(new Page(receiptBuilder.build(), amountBuilder.build()));
             }
@@ -216,6 +213,7 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                     inputFile.length(),
                     Optional.empty(),
                     0,
+                    Optional.empty(),
                     Optional.empty(),
                     SplitWeight.standard(),
                     TupleDomain.all(),
@@ -242,10 +240,8 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                             new ProtocolEntry(1, 2, Optional.empty(), Optional.empty()),
                             TupleDomain.all(),
                             TupleDomain.all(),
-                            Optional.empty(),
+                            false,
                             Optional.of(Set.of(dateColumnHandle, receiptColumnHandle, amountColumnHandle)),
-                            Optional.empty(),
-                            Optional.empty(),
                             Optional.empty(),
                             0,
                             false),
@@ -256,12 +252,10 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
 
             TupleDomain<ColumnHandle> differentDatePredicate = TupleDomain.withColumnDomains(
                     ImmutableMap.of(
-                            dateColumnHandle,
-                            Domain.singleValue(DATE, LocalDate.of(2023, 2, 2).toEpochDay())));
+                            dateColumnHandle, Domain.singleValue(DATE, LocalDate.of(2023, 2, 2).toEpochDay())));
             TupleDomain<ColumnHandle> nonOverlappingDatePredicate = TupleDomain.withColumnDomains(
                     ImmutableMap.of(
-                            dateColumnHandle,
-                            Domain.create(ValueSet.ofRanges(Range.greaterThanOrEqual(DATE, LocalDate.of(2023, 2, 2).toEpochDay())), true)));
+                            dateColumnHandle, Domain.create(ValueSet.ofRanges(Range.greaterThanOrEqual(DATE, LocalDate.of(2023, 2, 2).toEpochDay())), true)));
             for (TupleDomain<ColumnHandle> partitionPredicate : List.of(differentDatePredicate, nonOverlappingDatePredicate)) {
                 try (ConnectorPageSource emptyPageSource = createTestingPageSource(
                         transaction,
@@ -270,18 +264,16 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                         tableHandle,
                         ImmutableList.of(dateColumnHandle, receiptColumnHandle, amountColumnHandle),
                         getDynamicFilter(partitionPredicate))) {
-                    assertThat(emptyPageSource.getNextPage()).isNull();
+                    assertThat(emptyPageSource.getNextSourcePage()).isNull();
                 }
             }
 
             TupleDomain<ColumnHandle> sameDatePredicate = TupleDomain.withColumnDomains(
                     ImmutableMap.of(
-                            dateColumnHandle,
-                            Domain.singleValue(DATE, dateColumnValue)));
+                            dateColumnHandle, Domain.singleValue(DATE, dateColumnValue)));
             TupleDomain<ColumnHandle> overlappingDatePredicate = TupleDomain.withColumnDomains(
                     ImmutableMap.of(
-                            dateColumnHandle,
-                            Domain.create(ValueSet.ofRanges(Range.range(DATE, LocalDate.of(2023, 1, 1).toEpochDay(), true, LocalDate.of(2023, 2, 1).toEpochDay(), false)), true)));
+                            dateColumnHandle, Domain.create(ValueSet.ofRanges(Range.range(DATE, LocalDate.of(2023, 1, 1).toEpochDay(), true, LocalDate.of(2023, 2, 1).toEpochDay(), false)), true)));
             for (TupleDomain<ColumnHandle> partitionPredicate : List.of(sameDatePredicate, overlappingDatePredicate)) {
                 try (ConnectorPageSource nonEmptyPageSource = createTestingPageSource(
                         transaction,
@@ -290,12 +282,12 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                         tableHandle,
                         ImmutableList.of(dateColumnHandle, receiptColumnHandle, amountColumnHandle),
                         getDynamicFilter(partitionPredicate))) {
-                    Page page = nonEmptyPageSource.getNextPage();
+                    SourcePage page = nonEmptyPageSource.getNextSourcePage();
                     assertThat(page).isNotNull();
                     assertThat(page.getPositionCount()).isEqualTo(1);
                     assertThat(INTEGER.getInt(page.getBlock(0), 0)).isEqualTo(dateColumnValue);
                     assertThat(VARCHAR.getSlice(page.getBlock(1), 0).toStringUtf8()).isEqualTo(receiptColumnValue);
-                    assertThat(((SqlDecimal) amountColumnType.getObjectValue(null, page.getBlock(2), 0)).toBigDecimal()).isEqualTo(amountColumnValue);
+                    assertThat(((SqlDecimal) amountColumnType.getObjectValue(page.getBlock(2), 0)).toBigDecimal()).isEqualTo(amountColumnValue);
                 }
             }
         }
@@ -325,7 +317,7 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
     {
         FileFormatDataSourceStats stats = new FileFormatDataSourceStats();
         DeltaLakePageSourceProvider provider = new DeltaLakePageSourceProvider(
-                new HdfsFileSystemFactory(HDFS_ENVIRONMENT, HDFS_FILE_SYSTEM_STATS),
+                new DefaultDeltaLakeFileSystemFactory(HDFS_FILE_SYSTEM_FACTORY, new NoOpTableCredentialsProvider()),
                 stats,
                 PARQUET_READER_CONFIG,
                 deltaLakeConfig,
@@ -336,8 +328,10 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                 getSession(deltaLakeConfig),
                 split,
                 tableHandle.connectorHandle(),
+                Optional.empty(),
                 columns,
-                dynamicFilter);
+                dynamicFilter,
+                MemoryContext.NO_LIMIT);
     }
 
     private static TestingConnectorSession getSession(DeltaLakeConfig deltaLakeConfig)

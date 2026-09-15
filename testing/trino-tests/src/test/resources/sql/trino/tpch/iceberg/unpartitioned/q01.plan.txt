@@ -1,0 +1,8 @@
+remote exchange (GATHER, SINGLE, [])
+    local exchange (GATHER, UNKNOWN, [])
+        remote exchange (REPARTITION, ROUND_ROBIN, [])
+            final aggregation over (returnflag, linestatus)
+                local exchange (GATHER, SINGLE, [])
+                    remote exchange (REPARTITION, HASH, [returnflag, linestatus])
+                        partial aggregation over (returnflag, linestatus)
+                            scan lineitem

@@ -37,6 +37,7 @@ import java.io.Closeable;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public interface ThriftMetastoreClient
         extends Closeable
@@ -51,6 +52,9 @@ public interface ThriftMetastoreClient
             throws TException;
 
     List<TableMeta> getTableMeta(String databaseName)
+            throws TException;
+
+    List<String> getTableNamesWithParameters(String databaseName, String parameterKey, Set<String> parameterValues)
             throws TException;
 
     void createDatabase(Database database)
@@ -90,6 +94,9 @@ public interface ThriftMetastoreClient
             throws TException;
 
     void setPartitionColumnStatistics(String databaseName, String tableName, String partitionName, List<ColumnStatisticsObj> statistics)
+            throws TException;
+
+    void setPartitionsColumnStatistics(String databaseName, String tableName, Map<String, List<ColumnStatisticsObj>> partitionStatistics)
             throws TException;
 
     void deletePartitionColumnStatistics(String databaseName, String tableName, String partitionName, String columnName)
@@ -187,6 +194,9 @@ public interface ThriftMetastoreClient
     {
         throw new UnsupportedOperationException();
     }
+
+    void alterPartitions(String databaseName, String tableName, List<Partition> partitions)
+            throws TException;
 
     void alterPartitions(String dbName, String tableName, List<Partition> partitions, long writeId)
             throws TException;

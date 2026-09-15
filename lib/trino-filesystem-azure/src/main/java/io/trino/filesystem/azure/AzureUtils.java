@@ -26,30 +26,60 @@ import java.io.IOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
+import java.util.OptionalInt;
 
 final class AzureUtils
 {
     private AzureUtils() {}
 
-    public static IOException handleAzureException(RuntimeException exception, String action, AzureLocation location)
+    public static IOException handleAzureException(Throwable exception, String action, AzureLocation location)
             throws IOException
     {
         if (isFileNotFoundException(exception)) {
             throw withCause(new FileNotFoundException(location.toString()), exception);
         }
         if (exception instanceof AzureException) {
-            throw new TrinoFileSystemException("Azure service error %s file: %s".formatted(action, location), exception);
+            String message = "Azure service error %s file: %s".formatted(action, location);
+            if (isRetryable(exception)) {
+                throw new IOException(message, exception);
+            }
+            throw new TrinoFileSystemException(message, exception);
         }
         throw new IOException("Error %s file: %s".formatted(action, location), exception);
     }
 
-    public static boolean isFileNotFoundException(RuntimeException exception)
+    private static boolean isRetryable(Throwable exception)
+    {
+        OptionalInt statusCode = statusCode(exception);
+        return statusCode.isPresent() && isRetryableStatusCode(statusCode.orElseThrow());
+    }
+
+    private static boolean isRetryableStatusCode(int statusCode)
+    {
+        return switch (statusCode) {
+            case 408, 429, 500, 502, 503, 504 -> true;
+            default -> false;
+        };
+    }
+
+    private static OptionalInt statusCode(Throwable exception)
+    {
+        if (exception instanceof BlobStorageException blobStorageException) {
+            return OptionalInt.of(blobStorageException.getStatusCode());
+        }
+        if (exception instanceof DataLakeStorageException dataLakeStorageException) {
+            return OptionalInt.of(dataLakeStorageException.getStatusCode());
+        }
+        return OptionalInt.empty();
+    }
+
+    public static boolean isFileNotFoundException(Throwable exception)
     {
         if (exception instanceof BlobStorageException blobStorageException) {
             return BlobErrorCode.BLOB_NOT_FOUND.equals(blobStorageException.getErrorCode());
         }
         if (exception instanceof DataLakeStorageException dataLakeStorageException) {
-            return "PathNotFound" .equals(dataLakeStorageException.getErrorCode());
+            return "PathNotFound".equals(dataLakeStorageException.getErrorCode());
         }
         return false;
     }

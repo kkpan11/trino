@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -32,7 +31,6 @@ public class ShowCreate
         SCHEMA,
         MATERIALIZED_VIEW,
         FUNCTION,
-        /**/;
     }
 
     private final Type type;
@@ -40,7 +38,7 @@ public class ShowCreate
 
     public ShowCreate(NodeLocation location, Type type, QualifiedName name)
     {
-        super(Optional.of(location));
+        super(location);
         this.type = requireNonNull(type, "type is null");
         this.name = requireNonNull(name, "name is null");
     }

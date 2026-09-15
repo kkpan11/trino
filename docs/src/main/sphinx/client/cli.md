@@ -5,13 +5,18 @@ queries. The CLI is a
 [self-executing](http://skife.org/java/unix/2011/06/20/really_executable_jars.html)
 JAR file, which means it acts like a normal UNIX executable.
 
+The CLI uses the [](/client/client-protocol) over HTTP/HTTPS to communicate with
+the coordinator on the cluster.
+
 ## Requirements
 
-The CLI requires a Java virtual machine available on the path.
-It can be used with Java version 8 and higher.
+The Trino CLI has the following requirements:
 
-The CLI uses the {doc}`Trino client REST API </develop/client-protocol>` over
-HTTP/HTTPS to communicate with the coordinator on the cluster.
+* Java version 11 or higher available on the path. Java 22 or higher is
+  recommended for improved decompression performance.
+* Network access over HTTP/HTTPS to the coordinator of the Trino cluster.
+* Network access to the configured object storage, if the
+  [](cli-spooling-protocol) is enabled.
 
 The CLI version should be identical to the version of the Trino cluster, or
 newer. Older versions typically work, but only a subset is regularly tested.
@@ -20,7 +25,7 @@ Versions before 350 are not supported.
 (cli-installation)=
 ## Installation
 
-Download {maven_download}`cli`, rename it to `trino`, make it executable with
+Download {download_gh}`cli`, rename it to `trino`, make it executable with
 `chmod +x`, and run it to show the version of the CLI:
 
 ```text
@@ -29,7 +34,7 @@ Download {maven_download}`cli`, rename it to `trino`, make it executable with
 
 Run the CLI with `--help` or `-h` to see all available options.
 
-Windows users, and users unable to execute the preceeding steps, can use the
+Windows users, and users unable to execute the preceding steps, can use the
 equivalent `java` command with the `-jar` option to run the CLI, and show
 the version:
 
@@ -131,8 +136,8 @@ mode:
 * - Option
   - Description
 * - `--catalog`
-  - Sets the default catalog. You can change the default catalog and schema with
-    [](/sql/use).
+  - Sets the default catalog. Optionally also use `--schema` to set the default
+    schema. You can change the default catalog and default schema with[](/sql/use).
 * - `--client-info`
   - Adds arbitrary text as extra information about the client.
 * - `--client-request-timeout`
@@ -147,7 +152,7 @@ mode:
     [](cli-troubleshooting). Displays more information about query
     processing statistics.
 * - `--decimal-data-size`
-  - Show data size and rate in base 10 (KB, MB, etc.) rather than the default 
+  - Show data size and rate in base 10 (kB, MB, etc.) rather than the default
     base 2 (KiB, MiB, etc.).
 * - `--disable-auto-suggestion`
   - Disables autocomplete suggestions.
@@ -156,6 +161,11 @@ mode:
 * - `--editing-mode`
   - Sets key bindings in the CLI to be compatible with VI or
     EMACS editors. Defaults to `EMACS`.
+* - `--extra-credential`
+  - Extra credentials (property can be used multiple times; format is key=value)
+* - `--extra-header`
+  - HTTP header to add to the authenticated HTTP requests
+    (property can be used multiple times; format is key=value).
 * - `--http-proxy`
   - Configures the URL of the HTTP proxy to connect to Trino.
 * - `--history-file`
@@ -174,16 +184,15 @@ mode:
   - Do not show query processing progress.
 * - `--path`
   - Set the default [SQL path](/sql/set-path) for the session. Useful for
-    setting a catalog and schema location for [catalog
-    routines](routine-catalog).
+    setting a catalog and schema location for [](udf-catalog).
 * - `--password`
   - Prompts for a password. Use if your Trino server requires password
     authentication. You can set the `TRINO_PASSWORD` environment variable with
     the password value to avoid the prompt. For more information, see
     [](cli-username-password-auth).
 * - `--schema`
-  - Sets the default schema. You can change the default catalog and schema
-    with [](/sql/use).
+  - Sets the default schema. Must be combined with `--catalog`. You can change
+    the default catalog and default schema with [](/sql/use).
 * - `--server`
   - The HTTP/HTTPS address and port of the Trino coordinator. The port must be
     set to the port the Trino coordinator is listening for connections on. Port
@@ -200,6 +209,15 @@ mode:
   - Specifies the name of the application or source connecting to Trino.
     Defaults to `trino-cli`. The value can be used as input for
     [](/admin/resource-groups).
+* - `--theme=<theme>`
+  - Selects the color theme for styled output. Options are `AUTO`, `DARK`,
+    `LIGHT`, `NONE`, `SOLARIZED_DARK`, `SOLARIZED_LIGHT`, `DRACULA`, `NORD`, or
+    `GRUVBOX_DARK`. Defaults to `AUTO`, which uses `DARK` for an interactive
+    terminal and disables color for a non-interactive terminal or when the
+    `NO_COLOR` environment variable is set. An explicit value other than `AUTO`
+    always applies, even when `NO_COLOR` is set. Use `NONE` to disable color.
+    The named schemes use 24-bit color, which is approximated on terminals
+    without truecolor support.
 * - `--timezone`
   - Sets the time zone for the session using the [time zone name](
     <https://wikipedia.org/wiki/List_of_tz_database_time_zones>). Defaults to
@@ -263,7 +281,7 @@ certificate usage:
 * - `--use-system-keystore`
   - Use a client certificate obtained from the system keystore of the operating
     system. Windows and macOS are supported. For other operating systems, the
-    default Java keystore is used. The keystore type can be overriden using
+    default Java keystore is used. The keystore type can be overridden using
     `--keystore-type`.
 * - `--truststore-password`
   - The password for the truststore. This must match the password you specified
@@ -294,7 +312,7 @@ Username and password authentication is typically configured in a cluster using
 the `PASSWORD` {doc}`authentication type </security/authentication-types>`,
 for example with {doc}`/security/ldap` or {doc}`/security/password-file`.
 
-The following code example connects to the server, establishes your user name,
+The following code example connects to the server, establishes your username,
 and prompts the CLI for your password:
 
 ```text
@@ -462,7 +480,7 @@ history by scrolling or searching. Use the up and down arrows to scroll and
 press {kbd}`Enter`.
 
 By default, you can locate the Trino history file in `~/.trino_history`.
-Use the `--history-file` option or the `` `TRINO_HISTORY_FILE `` environment variable
+Use the `--history-file` option or the `TRINO_HISTORY_FILE` environment variable
 to change the default.
 
 ### Auto suggestion
@@ -601,6 +619,20 @@ and displays an error message (which is unaffected by the output format):
 Query 20200707_170726_00030_2iup9 failed: line 1:25: Column 'region' cannot be resolved
 SELECT nationkey, name, region FROM tpch.sf1.nation LIMIT 3
 ```
+
+(cli-spooling-protocol)=
+## Spooling protocol
+
+The Trino CLI automatically uses the spooling protocol to improve throughput
+for client interactions with higher data transfer demands, if the
+[](protocol-spooling) is configured on the cluster.
+
+Optionally use the `--encoding` option to configure a different desired
+encoding, compared to the default on the cluster. The available values are
+`json+zstd` (recommended) for JSON with Zstandard compression, and `json+lz4`
+for JSON with LZ4 compression, and `json` for uncompressed JSON. 
+
+The CLI process must have network access to the spooling object storage.
 
 (cli-output-format)=
 ## Output formats

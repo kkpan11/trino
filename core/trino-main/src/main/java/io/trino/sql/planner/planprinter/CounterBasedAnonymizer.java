@@ -26,9 +26,18 @@ import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.ExpressionFormatter;
 import io.trino.sql.ir.Reference;
+import io.trino.sql.planner.Partitioning.ArgumentBinding;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SystemPartitioningHandle;
+import io.trino.sql.planner.plan.StatisticsWriterNode.WriteStatisticsHandle;
+import io.trino.sql.planner.plan.StatisticsWriterNode.WriteStatisticsTarget;
+import io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
+import io.trino.sql.planner.plan.TableWriterNode.InsertTarget;
+import io.trino.sql.planner.plan.TableWriterNode.MergeTarget;
+import io.trino.sql.planner.plan.TableWriterNode.RefreshMaterializedViewTarget;
+import io.trino.sql.planner.plan.TableWriterNode.TableExecuteTarget;
+import io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -36,15 +45,6 @@ import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.sql.planner.Partitioning.ArgumentBinding;
-import static io.trino.sql.planner.plan.StatisticsWriterNode.WriteStatisticsHandle;
-import static io.trino.sql.planner.plan.StatisticsWriterNode.WriteStatisticsTarget;
-import static io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
-import static io.trino.sql.planner.plan.TableWriterNode.InsertTarget;
-import static io.trino.sql.planner.plan.TableWriterNode.MergeTarget;
-import static io.trino.sql.planner.plan.TableWriterNode.RefreshMaterializedViewTarget;
-import static io.trino.sql.planner.plan.TableWriterNode.TableExecuteTarget;
-import static io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
 import static java.util.Locale.ENGLISH;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toMap;
@@ -63,14 +63,14 @@ public class CounterBasedAnonymizer
         COLUMN,
         SYMBOL,
         LITERAL,
-        VALUE
+        VALUE,
     }
 
     private final ExpressionFormatter.Formatter anonymizeExpressionFormatter =
             new ExpressionFormatter.Formatter(Optional.of(this::anonymizeLiteral), Optional.of(this::anonymizeSymbolReference));
     private final Map<String, String> anonymizedMap = new HashMap<>();
     private final Map<ObjectType, Integer> counterMap = Arrays.stream(ObjectType.values())
-            .collect(toMap(objectType -> objectType, objectType -> 0));
+            .collect(toMap(objectType -> objectType, _ -> 0));
 
     @Override
     public String anonymize(Type type, String value)
@@ -153,8 +153,8 @@ public class CounterBasedAnonymizer
     public String anonymize(TableHandle tableHandle, TableInfo tableInfo)
     {
         ImmutableMap.Builder<String, String> result = ImmutableMap.<String, String>builder()
-                .put("table", anonymize(tableInfo.getTableName()));
-        tableInfo.getConnectorName().ifPresent(connector -> result.put("connector", connector));
+                .put("table", anonymize(tableInfo.tableName()));
+        tableInfo.connectorName().ifPresent(connector -> result.put("connector", connector));
         return formatMap(result.buildOrThrow());
     }
 
@@ -167,9 +167,9 @@ public class CounterBasedAnonymizer
         partitioningHandle.getCatalogHandle()
                 .ifPresent(catalog -> result.put("catalog", anonymize(catalog.getCatalogName().toString(), ObjectType.CATALOG)));
 
-        if (connectorHandle instanceof SystemPartitioningHandle) {
-            result.put("partitioning", ((SystemPartitioningHandle) connectorHandle).getPartitioningName())
-                    .put("function", ((SystemPartitioningHandle) connectorHandle).getFunction().name());
+        if (connectorHandle instanceof SystemPartitioningHandle systemPartitioningHandle) {
+            result.put("partitioning", systemPartitioningHandle.getPartitioningName())
+                    .put("function", systemPartitioningHandle.getFunction().name());
         }
         return formatMap(result.buildOrThrow());
     }
@@ -177,20 +177,20 @@ public class CounterBasedAnonymizer
     @Override
     public String anonymize(WriterTarget target)
     {
-        if (target instanceof CreateTarget) {
-            return anonymize((CreateTarget) target);
+        if (target instanceof CreateTarget createTarget) {
+            return anonymize(createTarget);
         }
-        if (target instanceof InsertTarget) {
-            return anonymize((InsertTarget) target);
+        if (target instanceof InsertTarget insertTarget) {
+            return anonymize(insertTarget);
         }
-        if (target instanceof MergeTarget) {
-            return anonymize((MergeTarget) target);
+        if (target instanceof MergeTarget mergeTarget) {
+            return anonymize(mergeTarget);
         }
-        if (target instanceof RefreshMaterializedViewTarget) {
-            return anonymize((RefreshMaterializedViewTarget) target);
+        if (target instanceof RefreshMaterializedViewTarget refreshMaterializedViewTarget) {
+            return anonymize(refreshMaterializedViewTarget);
         }
-        if (target instanceof TableExecuteTarget) {
-            return anonymize((TableExecuteTarget) target);
+        if (target instanceof TableExecuteTarget tableExecuteTarget) {
+            return anonymize(tableExecuteTarget);
         }
         throw new UnsupportedOperationException("Anonymization is not supported for WriterTarget type: " + target.getClass().getSimpleName());
     }
@@ -198,9 +198,9 @@ public class CounterBasedAnonymizer
     @Override
     public String anonymize(WriteStatisticsTarget target)
     {
-        if (target instanceof WriteStatisticsHandle) {
+        if (target instanceof WriteStatisticsHandle writeStatisticsHandle) {
             return anonymize(
-                    ((WriteStatisticsHandle) target).getHandle().catalogHandle().getCatalogName().toString(),
+                    writeStatisticsHandle.getHandle().catalogHandle().getCatalogName().toString(),
                     ObjectType.CATALOG);
         }
         throw new UnsupportedOperationException("Anonymization is not supported for WriterTarget type: " + target.getClass().getSimpleName());
@@ -270,7 +270,7 @@ public class CounterBasedAnonymizer
     private <T> String anonymize(T object, ObjectType objectType)
     {
         return anonymizedMap.computeIfAbsent(objectType.name() + object, _ -> {
-            Integer counter = counterMap.computeIfPresent(objectType, (k, v) -> v + 1);
+            Integer counter = counterMap.computeIfPresent(objectType, (_, v) -> v + 1);
             return objectType.name().toLowerCase(ENGLISH) + "_" + counter;
         });
     }

@@ -22,12 +22,12 @@ import io.trino.metadata.ViewInfo;
 import io.trino.security.AccessControl;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
-import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.RelationType;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.RoleGrant;
@@ -51,7 +51,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static io.trino.SystemSessionProperties.isOmitDateTimeTypePrecision;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.connector.informationschema.InformationSchemaMetadata.defaultPrefixes;
 import static io.trino.connector.informationschema.InformationSchemaMetadata.isTablesEnumeratingTable;
 import static io.trino.metadata.MetadataListing.getRelationTypes;
@@ -62,7 +62,6 @@ import static io.trino.metadata.MetadataListing.listTablePrivileges;
 import static io.trino.metadata.MetadataListing.listTables;
 import static io.trino.spi.security.PrincipalType.USER;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
-import static io.trino.type.TypeUtils.getDisplayLabel;
 import static java.util.Objects.requireNonNull;
 
 public class InformationSchemaPageSource
@@ -141,18 +140,12 @@ public class InformationSchemaPageSource
                 .boxed()
                 .collect(toImmutableMap(i -> columnMetadata.get(i).getName(), Function.identity()));
 
-        List<Integer> channels = columns.stream()
+        int[] channels = columns.stream()
                 .map(columnHandle -> (InformationSchemaColumnHandle) columnHandle)
-                .map(columnHandle -> columnNameToChannel.get(columnHandle.columnName()))
-                .collect(toImmutableList());
+                .mapToInt(columnHandle -> columnNameToChannel.get(columnHandle.columnName()))
+                .toArray();
 
-        projection = page -> {
-            Block[] blocks = new Block[channels.size()];
-            for (int i = 0; i < blocks.length; i++) {
-                blocks[i] = page.getBlock(channels.get(i));
-            }
-            return new Page(page.getPositionCount(), blocks);
-        };
+        projection = page -> page.getColumns(channels);
     }
 
     @Override
@@ -175,7 +168,7 @@ public class InformationSchemaPageSource
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         if (isFinished()) {
             return null;
@@ -194,7 +187,7 @@ public class InformationSchemaPageSource
         memoryUsageBytes -= page.getRetainedSizeInBytes();
         Page outputPage = projection.apply(page);
         completedBytes += outputPage.getSizeInBytes();
-        return outputPage;
+        return SourcePage.create(outputPage);
     }
 
     @Override
@@ -214,30 +207,14 @@ public class InformationSchemaPageSource
         while (pages.isEmpty() && prefixIterator.get().hasNext() && !closed && !isLimitExhausted()) {
             QualifiedTablePrefix prefix = prefixIterator.get().next();
             switch (table) {
-                case COLUMNS:
-                    addColumnsRecords(prefix);
-                    break;
-                case TABLES:
-                    addTablesRecords(prefix);
-                    break;
-                case VIEWS:
-                    addViewsRecords(prefix);
-                    break;
-                case SCHEMATA:
-                    addSchemataRecords();
-                    break;
-                case TABLE_PRIVILEGES:
-                    addTablePrivilegesRecords(prefix);
-                    break;
-                case ROLES:
-                    addRolesRecords();
-                    break;
-                case APPLICABLE_ROLES:
-                    addApplicableRolesRecords();
-                    break;
-                case ENABLED_ROLES:
-                    addEnabledRolesRecords();
-                    break;
+                case COLUMNS -> addColumnsRecords(prefix);
+                case TABLES -> addTablesRecords(prefix);
+                case VIEWS -> addViewsRecords(prefix);
+                case SCHEMATA -> addSchemataRecords();
+                case TABLE_PRIVILEGES -> addTablePrivilegesRecords(prefix);
+                case ROLES -> addRolesRecords();
+                case APPLICABLE_ROLES -> addApplicableRolesRecords();
+                case ENABLED_ROLES -> addEnabledRolesRecords();
             }
         }
         if (!prefixIterator.get().hasNext() || isLimitExhausted()) {
@@ -261,12 +238,12 @@ public class InformationSchemaPageSource
                         tableName.getTableName(),
                         column.getName(),
                         ordinalPosition,
-                        null,
+                        column.getDefaultValue().orElse(null),
                         column.isNullable() ? "YES" : "NO",
-                        getDisplayLabel(column.getType(), isOmitDateTimeTypePrecision(session)),
-                        column.getComment(),
-                        column.getExtraInfo(),
-                        column.getComment());
+                        column.getType().getDisplayName(),
+                        column.getComment().orElse(null),
+                        column.getExtraInfo().orElse(null),
+                        column.getComment().orElse(null));
                 ordinalPosition++;
                 if (isLimitExhausted()) {
                     return;
@@ -341,9 +318,9 @@ public class InformationSchemaPageSource
         List<GrantInfo> grants = ImmutableList.copyOf(listTablePrivileges(session, metadata, accessControl, prefix));
         for (GrantInfo grant : grants) {
             addRecord(
-                    grant.getGrantor().map(TrinoPrincipal::getName).orElse(null),
+                    grant.getGrantor().map(TrinoPrincipal::getPrincipalName).orElse(null),
                     grant.getGrantor().map(principal -> principal.getType().toString()).orElse(null),
-                    grant.getGrantee().getName(),
+                    grant.getGrantee().getPrincipalName(),
                     grant.getGrantee().getType().toString(),
                     prefix.getCatalogName(),
                     grant.getSchemaTableName().getSchemaName(),
@@ -380,7 +357,7 @@ public class InformationSchemaPageSource
         Optional<String> catalogName = metadata.isCatalogManagedSecurity(session, this.catalogName) ? Optional.of(this.catalogName) : Optional.empty();
         for (RoleGrant grant : metadata.listApplicableRoles(session, new TrinoPrincipal(USER, session.getUser()), catalogName)) {
             addRecord(
-                    grant.getGrantee().getName(),
+                    grant.getGrantee().getPrincipalName(),
                     grant.getGrantee().getType().toString(),
                     grant.getRoleName(),
                     grant.isGrantable() ? "YES" : "NO");
@@ -404,7 +381,7 @@ public class InformationSchemaPageSource
     {
         pageBuilder.declarePosition();
         for (int i = 0; i < types.size(); i++) {
-            writeNativeValue(types.get(i), pageBuilder.getBlockBuilder(i), values[i]);
+            writeNativeValue(types.get(i), pageBuilder.getBlockBuilder(i), values[i] instanceof String string ? utf8Slice(string) : values[i]);
         }
         if (pageBuilder.isFull()) {
             flushPageBuilder();
@@ -423,6 +400,6 @@ public class InformationSchemaPageSource
 
     private boolean isLimitExhausted()
     {
-        return limit.isPresent() && recordCount >= limit.getAsLong();
+        return limit.isPresent() && recordCount >= limit.orElseThrow();
     }
 }

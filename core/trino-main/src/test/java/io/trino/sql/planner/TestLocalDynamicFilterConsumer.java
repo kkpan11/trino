@@ -247,8 +247,6 @@ public class TestLocalDynamicFilterConsumer
                 ImmutableList.of(),
                 ImmutableList.of(),
                 Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
                 ImmutableMap.of(filter1, right1, filter2, right2, filter3, right3));
         TestingDynamicFilterCollector collector = new TestingDynamicFilterCollector();
         LocalDynamicFilterConsumer consumer = LocalDynamicFilterConsumer.create(
@@ -330,7 +328,7 @@ public class TestLocalDynamicFilterConsumer
         assertThat(collector.isCollectionComplete()).isFalse();
 
         Domain domain3 = Domain.singleValue(VARCHAR, utf8Slice(IntStream.range(0, 800)
-                .mapToObj(i -> "x")
+                .mapToObj(_ -> "x")
                 .collect(joining())));
 
         assertThat(domain1.union(domain2).union(domain3).simplify(1).getRetainedSizeInBytes())

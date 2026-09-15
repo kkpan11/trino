@@ -61,6 +61,7 @@ public class TestIterativeOptimizer
         try (PlanTester planTester = PlanTester.create(sessionBuilder.build())) {
             PlanOptimizersStatsCollector planOptimizersStatsCollector = new PlanOptimizersStatsCollector(10);
             PlanOptimizer optimizer = new IterativeOptimizer(
+                    "TestRuleStatsCollection",
                     planTester.getPlannerContext(),
                     new RuleStatsRecorder(),
                     planTester.getStatsCalculator(),
@@ -72,7 +73,7 @@ public class TestIterativeOptimizer
                     planTester.createPlan(transactionSession, "SELECT 1", ImmutableList.of(optimizer), OPTIMIZED_AND_VALIDATED, NOOP, planOptimizersStatsCollector));
             Optional<QueryPlanOptimizerStatistics> queryRuleStats = planOptimizersStatsCollector.getTopRuleStats().stream().findFirst();
 
-            assertThat(queryRuleStats.isPresent()).isTrue();
+            assertThat(queryRuleStats).isPresent();
             QueryPlanOptimizerStatistics queryRuleStat = queryRuleStats.get();
             assertThat(queryRuleStat.rule()).isEqualTo(RemoveRedundantIdentityProjections.class.getCanonicalName());
             assertThat(queryRuleStat.invocations()).isEqualTo(4);
@@ -92,11 +93,13 @@ public class TestIterativeOptimizer
                 .setSystemProperty("iterative_optimizer_timeout", "1ms");
 
         try (PlanTester planTester = PlanTester.create(sessionBuilder.build())) {
-            planTester.createCatalog(planTester.getDefaultSession().getCatalog().get(),
+            planTester.createCatalog(
+                    planTester.getDefaultSession().getCatalog().get(),
                     new TpchConnectorFactory(1),
                     ImmutableMap.of());
 
             PlanOptimizer optimizer = new IterativeOptimizer(
+                    "TestTimeoutOnNonConvergingPlan",
                     planTester.getPlannerContext(),
                     new RuleStatsRecorder(),
                     planTester.getStatsCalculator(),

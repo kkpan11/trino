@@ -93,8 +93,10 @@ public class TestPushProjectionThroughExchange
                     Symbol x = p.symbol("x", INTEGER);
                     return p.project(
                             Assignments.of(
-                                    x, new Constant(INTEGER, 3L),
-                                    c2, new Reference(BIGINT, "c")),
+                                    x,
+                                    new Constant(INTEGER, 3L),
+                                    c2,
+                                    new Reference(BIGINT, "c")),
                             p.exchange(e -> e
                                     .addSource(
                                             p.values(a))
@@ -106,11 +108,9 @@ public class TestPushProjectionThroughExchange
                 })
                 .matches(
                         exchange(
-                                project(
-                                        values(ImmutableList.of("a")))
+                                project(values(ImmutableList.of("a")))
                                         .withAlias("x1", expression(new Constant(INTEGER, 3L))),
-                                project(
-                                        values(ImmutableList.of("b")))
+                                project(values(ImmutableList.of("b")))
                                         .withAlias("x2", expression(new Constant(INTEGER, 3L))))
                                 // verify that data originally on symbols aliased as x1 and x2 is part of exchange output
                                 .withAlias("x1")
@@ -123,21 +123,18 @@ public class TestPushProjectionThroughExchange
         tester().assertThat(new PushProjectionThroughExchange())
                 .on(p -> {
                     Symbol a = p.symbol("a", INTEGER);
-                    Symbol h1 = p.symbol("h_1");
                     Symbol c = p.symbol("c", INTEGER);
-                    Symbol h = p.symbol("h");
                     Symbol cTimes5 = p.symbol("c_times_5", INTEGER);
                     return p.project(
                             Assignments.of(
                                     cTimes5, new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "c"), new Constant(INTEGER, 5L)))),
                             p.exchange(e -> e
                                     .addSource(
-                                            p.values(a, h1))
-                                    .addInputsSet(a, h1)
+                                            p.values(a))
+                                    .addInputsSet(a)
                                     .fixedHashDistributionPartitioningScheme(
-                                            ImmutableList.of(c, h),
                                             ImmutableList.of(c),
-                                            h)));
+                                            ImmutableList.of(c))));
                 })
                 .matches(
                         project(
@@ -145,9 +142,8 @@ public class TestPushProjectionThroughExchange
                                         strictProject(
                                                 ImmutableMap.of(
                                                         "a", expression(new Reference(INTEGER, "a")),
-                                                        "h_1", expression(new Reference(BIGINT, "h_1")),
                                                         "a_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L))))),
-                                                values(ImmutableList.of("a", "h_1"))))));
+                                                values(ImmutableList.of("a"))))));
     }
 
     @Test
@@ -165,8 +161,10 @@ public class TestPushProjectionThroughExchange
                     Symbol aTimes5 = p.symbol("a_times_5", INTEGER);
                     return p.project(
                             Assignments.of(
-                                    aTimes5, new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L))),
-                                    a, a.toSymbolReference()),
+                                    aTimes5,
+                                    new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L))),
+                                    a,
+                                    a.toSymbolReference()),
                             p.exchange(e -> e
                                     .addSource(p.values(a))
                                     .addInputsSet(a)
@@ -191,8 +189,10 @@ public class TestPushProjectionThroughExchange
                     Symbol b = p.symbol("b", BIGINT);
                     return p.project(
                             Assignments.of(
-                                    bTimes5, new Call(MULTIPLY_BIGINT, ImmutableList.of(new Reference(BIGINT, "b"), new Constant(BIGINT, 5L))),
-                                    b, b.toSymbolReference()),
+                                    bTimes5,
+                                    new Call(MULTIPLY_BIGINT, ImmutableList.of(new Reference(BIGINT, "b"), new Constant(BIGINT, 5L))),
+                                    b,
+                                    b.toSymbolReference()),
                             p.exchange(e -> e
                                     .addSource(p.values(a))
                                     .addInputsSet(a)
@@ -220,8 +220,10 @@ public class TestPushProjectionThroughExchange
                     Symbol aTimes5 = p.symbol("a_times_5", INTEGER);
                     return p.project(
                             Assignments.of(
-                                    aTimes5, new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L))),
-                                    a, a.toSymbolReference()),
+                                    aTimes5,
+                                    new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L))),
+                                    a,
+                                    a.toSymbolReference()),
                             p.exchange(e -> e
                                     .addSource(p.values(a))
                                     .addInputsSet(a)
@@ -246,8 +248,10 @@ public class TestPushProjectionThroughExchange
                     Symbol b = p.symbol("b", BIGINT);
                     return p.project(
                             Assignments.of(
-                                    bTimes5, new Call(MULTIPLY_BIGINT, ImmutableList.of(new Reference(BIGINT, "b"), new Constant(BIGINT, 5L))),
-                                    b, b.toSymbolReference()),
+                                    bTimes5,
+                                    new Call(MULTIPLY_BIGINT, ImmutableList.of(new Reference(BIGINT, "b"), new Constant(BIGINT, 5L))),
+                                    b,
+                                    b.toSymbolReference()),
                             p.exchange(e -> e
                                     .addSource(p.values(a))
                                     .addInputsSet(a)
@@ -269,39 +273,31 @@ public class TestPushProjectionThroughExchange
                 .on(p -> {
                     Symbol a = p.symbol("a", INTEGER);
                     Symbol b = p.symbol("b", INTEGER);
-                    Symbol h = p.symbol("h", INTEGER);
                     Symbol aTimes5 = p.symbol("a_times_5", INTEGER);
                     Symbol bTimes5 = p.symbol("b_times_5", INTEGER);
-                    Symbol hTimes5 = p.symbol("h_times_5", INTEGER);
                     return p.project(
                             Assignments.builder()
                                     .put(aTimes5, new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L))))
                                     .put(bTimes5, new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "b"), new Constant(INTEGER, 5L))))
-                                    .put(hTimes5, new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "h"), new Constant(INTEGER, 5L))))
                                     .build(),
                             p.exchange(e -> e
                                     .addSource(
-                                            p.values(a, b, h))
-                                    .addInputsSet(a, b, h)
+                                            p.values(a, b))
+                                    .addInputsSet(a, b)
                                     .fixedHashDistributionPartitioningScheme(
-                                            ImmutableList.of(a, b, h),
-                                            ImmutableList.of(b),
-                                            h)));
+                                            ImmutableList.of(a, b),
+                                            ImmutableList.of(b))));
                 })
                 .matches(
                         project(
                                 exchange(
                                         project(
                                                 values(
-                                                        ImmutableList.of("a", "b", "h"))
-                                        ).withNumberOfOutputColumns(5)
+                                                        ImmutableList.of("a", "b"))).withNumberOfOutputColumns(3)
                                                 .withAlias("b", expression(new Reference(INTEGER, "b")))
-                                                .withAlias("h", expression(new Reference(INTEGER, "h")))
                                                 .withAlias("a_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L)))))
-                                                .withAlias("b_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "b"), new Constant(INTEGER, 5L)))))
-                                                .withAlias("h_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "h"), new Constant(INTEGER, 5L))))))
-                        ).withNumberOfOutputColumns(3)
-                                .withExactOutputs("a_times_5", "b_times_5", "h_times_5"));
+                                                .withAlias("b_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "b"), new Constant(INTEGER, 5L))))))).withNumberOfOutputColumns(2)
+                                .withExactOutputs("a_times_5", "b_times_5"));
     }
 
     @Test
@@ -341,8 +337,7 @@ public class TestPushProjectionThroughExchange
                                                 .withAlias("a_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "a"), new Constant(INTEGER, 5L)))))
                                                 .withAlias("b_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "b"), new Constant(INTEGER, 5L)))))
                                                 .withAlias("h_times_5", expression(new Call(MULTIPLY_INTEGER, ImmutableList.of(new Reference(INTEGER, "h"), new Constant(INTEGER, 5L)))))
-                                                .withAlias("sortSymbol", expression(new Reference(INTEGER, "sortSymbol"))))
-                        ).withNumberOfOutputColumns(3)
+                                                .withAlias("sortSymbol", expression(new Reference(INTEGER, "sortSymbol"))))).withNumberOfOutputColumns(3)
                                 .withExactOutputs("a_times_5", "b_times_5", "h_times_5"));
     }
 }

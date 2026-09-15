@@ -35,7 +35,6 @@ import org.junit.jupiter.api.parallel.Execution;
 import java.util.List;
 import java.util.Optional;
 
-import static io.trino.plugin.tpch.TpchConnectorFactory.TPCH_SPLITS_PER_NODE;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -86,7 +85,7 @@ public class TestSubqueries
 
         QueryRunner runner = new StandaloneQueryRunner(session);
         runner.installPlugin(new TpchPlugin());
-        runner.createCatalog(TEST_CATALOG_NAME, "tpch", ImmutableMap.of(TPCH_SPLITS_PER_NODE, "1"));
+        runner.createCatalog(TEST_CATALOG_NAME, "tpch", ImmutableMap.of("tpch.splits-per-node", "1"));
 
         assertions = new QueryAssertions(runner);
     }
@@ -317,7 +316,8 @@ public class TestSubqueries
                                 anyTree(
                                         aggregation(ImmutableMap.of(), FINAL,
                                                 anyTree(
-                                                        aggregation(ImmutableMap.of(), PARTIAL,
+                                                        aggregation(ImmutableMap.of(),
+                                                                PARTIAL,
                                                                 values("a"))))))));
 
         assertThat(assertions.query(
@@ -334,7 +334,8 @@ public class TestSubqueries
                                 anyTree(
                                         aggregation(ImmutableMap.of(), FINAL,
                                                 anyTree(
-                                                        aggregation(ImmutableMap.of(), PARTIAL,
+                                                        aggregation(ImmutableMap.of(),
+                                                                PARTIAL,
                                                                 values("u_cid"))))))));
 
         assertThat(assertions.query(
@@ -485,7 +486,8 @@ public class TestSubqueries
                                 anyTree(
                                         aggregation(ImmutableMap.of(), FINAL,
                                                 anyTree(
-                                                        aggregation(ImmutableMap.of(), PARTIAL,
+                                                        aggregation(ImmutableMap.of(),
+                                                                PARTIAL,
                                                                 values("a"))))))));
 
         assertions.assertQueryAndPlan(
@@ -502,7 +504,8 @@ public class TestSubqueries
                                                                 anyTree(
                                                                         aggregation(ImmutableMap.of(), FINAL,
                                                                                 anyTree(
-                                                                                        aggregation(ImmutableMap.of(), PARTIAL,
+                                                                                        aggregation(ImmutableMap.of(),
+                                                                                                PARTIAL,
                                                                                                 values("t_a", "t_b"))))))))))));
 
         assertions.assertQueryAndPlan(
@@ -563,7 +566,8 @@ public class TestSubqueries
                                                                 anyTree(
                                                                         aggregation(ImmutableMap.of(), FINAL,
                                                                                 anyTree(
-                                                                                        aggregation(ImmutableMap.of(), PARTIAL,
+                                                                                        aggregation(ImmutableMap.of(),
+                                                                                                PARTIAL,
                                                                                                 values("t_a", "t_b"))))))))))));
 
         assertions.assertQueryAndPlan(
@@ -576,7 +580,8 @@ public class TestSubqueries
                                 anyTree(
                                         aggregation(ImmutableMap.of(), FINAL,
                                                 anyTree(
-                                                        aggregation(ImmutableMap.of(), PARTIAL,
+                                                        aggregation(ImmutableMap.of(),
+                                                                PARTIAL,
                                                                 values("a"))))))));
 
         assertThat(assertions.query(
@@ -594,7 +599,8 @@ public class TestSubqueries
                                 anyTree(
                                         aggregation(ImmutableMap.of(), FINAL,
                                                 anyTree(
-                                                        aggregation(ImmutableMap.of(), PARTIAL,
+                                                        aggregation(ImmutableMap.of(),
+                                                                PARTIAL,
                                                                 values("a"))))))));
     }
 
@@ -1725,7 +1731,7 @@ public class TestSubqueries
                 .matches("SELECT CAST(ROW(1, 'a') AS row(a integer, b varchar(1)))");
 
         // The quoted identifiers are needed due to some pre-existing inconsistencies
-        // in how identifiers are canonicalized (see TypeSignatureTranslator.canonicalize())
+        // in how identifiers are canonicalized (see TypeDescriptorTranslator.canonicalize())
         assertThat(assertions.query(
                 "SELECT (SELECT t.* AS (x, y) FROM (SELECT 1, 'a') t)"))
                 .matches("SELECT CAST(ROW(1, 'a') AS row(\"X\" integer, \"Y\" varchar(1)))");

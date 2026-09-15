@@ -19,12 +19,15 @@ import io.trino.spi.function.FunctionKind;
 
 import java.security.Principal;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static java.lang.String.format;
+import static java.util.Locale.ENGLISH;
+import static java.util.stream.Collectors.joining;
 
 public class AccessDeniedException
         extends TrinoException
@@ -171,11 +174,19 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot rename schema from %s to %s%s", schemaName, newSchemaName, formatExtraInfo(extraInfo)));
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetSchemaAuthorization(String schemaName, TrinoPrincipal principal)
     {
         denySetSchemaAuthorization(schemaName, principal, null);
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal, String)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetSchemaAuthorization(String schemaName, TrinoPrincipal principal, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot set authorization for schema %s to %s%s", schemaName, principal, formatExtraInfo(extraInfo)));
@@ -331,11 +342,19 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot alter a column for table %s%s", tableName, formatExtraInfo(extraInfo)));
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetTableAuthorization(String tableName, TrinoPrincipal principal)
     {
         denySetTableAuthorization(tableName, principal, null);
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal, String)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetTableAuthorization(String tableName, TrinoPrincipal principal, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot set authorization for table %s to %s%s", tableName, principal, formatExtraInfo(extraInfo)));
@@ -353,32 +372,68 @@ public class AccessDeniedException
 
     public static void denySelectTable(String tableName)
     {
-        denySelectTable(tableName, null);
+        denySelectTable(tableName, (String) null);
     }
 
     public static void denySelectTable(String tableName, String extraInfo)
     {
-        throw new AccessDeniedException(format("Cannot select from table %s%s", tableName, formatExtraInfo(extraInfo)));
+        denySelectTable(tableName, Optional.empty(), extraInfo);
+    }
+
+    public static void denySelectTable(String tableName, Optional<String> branchName)
+    {
+        denySelectTable(tableName, branchName, null);
+    }
+
+    public static void denySelectTable(String tableName, Optional<String> branchName, String extraInfo)
+    {
+        throw new AccessDeniedException(branchName
+                .map(branch -> format("Cannot select from branch %s in table %s%s", branch, tableName, formatExtraInfo(extraInfo)))
+                .orElseGet(() -> format("Cannot select from table %s%s", tableName, formatExtraInfo(extraInfo))));
     }
 
     public static void denyInsertTable(String tableName)
     {
-        denyInsertTable(tableName, null);
+        denyInsertTable(tableName, (String) null);
     }
 
     public static void denyInsertTable(String tableName, String extraInfo)
     {
-        throw new AccessDeniedException(format("Cannot insert into table %s%s", tableName, formatExtraInfo(extraInfo)));
+        denyInsertTable(tableName, Optional.empty(), extraInfo);
+    }
+
+    public static void denyInsertTable(String tableName, Optional<String> branchName)
+    {
+        denyInsertTable(tableName, branchName, null);
+    }
+
+    public static void denyInsertTable(String tableName, Optional<String> branchName, String extraInfo)
+    {
+        throw new AccessDeniedException(branchName
+                .map(branch -> format("Cannot insert into branch %s in table %s%s", branch, tableName, formatExtraInfo(extraInfo)))
+                .orElseGet(() -> format("Cannot insert into table %s%s", tableName, formatExtraInfo(extraInfo))));
     }
 
     public static void denyDeleteTable(String tableName)
     {
-        denyDeleteTable(tableName, null);
+        denyDeleteTable(tableName, (String) null);
     }
 
     public static void denyDeleteTable(String tableName, String extraInfo)
     {
-        throw new AccessDeniedException(format("Cannot delete from table %s%s", tableName, formatExtraInfo(extraInfo)));
+        denyDeleteTable(tableName, Optional.empty(), extraInfo);
+    }
+
+    public static void denyDeleteTable(String tableName, Optional<String> branchName)
+    {
+        denyDeleteTable(tableName, branchName, null);
+    }
+
+    public static void denyDeleteTable(String tableName, Optional<String> branchName, String extraInfo)
+    {
+        throw new AccessDeniedException(branchName
+                .map(branch -> format("Cannot delete from branch %s in table %s%s", branch, tableName, formatExtraInfo(extraInfo)))
+                .orElseGet(() -> format("Cannot delete from table %s%s", tableName, formatExtraInfo(extraInfo))));
     }
 
     public static void denyTruncateTable(String tableName)
@@ -398,7 +453,19 @@ public class AccessDeniedException
 
     public static void denyUpdateTableColumns(String tableName, Set<String> updatedColumnNames, String extraInfo)
     {
-        throw new AccessDeniedException(format("Cannot update columns %s in table %s%s", updatedColumnNames, tableName, formatExtraInfo(extraInfo)));
+        denyUpdateTableColumns(tableName, Optional.empty(), updatedColumnNames, extraInfo);
+    }
+
+    public static void denyUpdateTableColumns(String tableName, Optional<String> branchName, Set<String> updatedColumnNames)
+    {
+        denyUpdateTableColumns(tableName, branchName, updatedColumnNames, null);
+    }
+
+    public static void denyUpdateTableColumns(String tableName, Optional<String> branchName, Set<String> updatedColumnNames, String extraInfo)
+    {
+        throw new AccessDeniedException(branchName
+                .map(branch -> format("Cannot update columns %s in branch %s in table %s%s", updatedColumnNames, branch, tableName, formatExtraInfo(extraInfo)))
+                .orElseGet(() -> format("Cannot update columns %s in table %s%s", updatedColumnNames, tableName, formatExtraInfo(extraInfo))));
     }
 
     public static void denyCreateView(String viewName)
@@ -423,7 +490,24 @@ public class AccessDeniedException
 
     public static void denyCreateViewWithSelect(String sourceName, ConnectorIdentity identity, String extraInfo)
     {
-        throw new AccessDeniedException(format("View owner '%s' cannot create view that selects from %s%s", identity.getUser(), sourceName, formatExtraInfo(extraInfo)));
+        denyCreateViewWithSelect(sourceName, Optional.empty(), identity, extraInfo);
+    }
+
+    public static void denyCreateViewWithSelect(String sourceName, Optional<String> branchName, Identity identity)
+    {
+        denyCreateViewWithSelect(sourceName, branchName, identity.toConnectorIdentity());
+    }
+
+    public static void denyCreateViewWithSelect(String sourceName, Optional<String> branchName, ConnectorIdentity identity)
+    {
+        denyCreateViewWithSelect(sourceName, branchName, identity, null);
+    }
+
+    public static void denyCreateViewWithSelect(String sourceName, Optional<String> branchName, ConnectorIdentity identity, String extraInfo)
+    {
+        throw new AccessDeniedException(branchName
+                .map(branch -> format("View owner '%s' cannot create view that selects from branch %s in %s%s", identity.getUser(), branch, sourceName, formatExtraInfo(extraInfo)))
+                .orElseGet(() -> format("View owner '%s' cannot create view that selects from %s%s", identity.getUser(), sourceName, formatExtraInfo(extraInfo))));
     }
 
     public static void denyRenameView(String viewName, String newViewName)
@@ -436,11 +520,29 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot rename view from %s to %s%s", viewName, newViewName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyRefreshView(String viewName)
+    {
+        denyRefreshView(viewName, null);
+    }
+
+    public static void denyRefreshView(String viewName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot refresh view %s%s", viewName, formatExtraInfo(extraInfo)));
+    }
+
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetViewAuthorization(String viewName, TrinoPrincipal principal)
     {
         denySetViewAuthorization(viewName, principal, null);
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal, String)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetViewAuthorization(String viewName, TrinoPrincipal principal, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot set authorization for view %s to %s%s", viewName, principal, formatExtraInfo(extraInfo)));
@@ -566,6 +668,36 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot revoke privilege %s on table %s%s", privilege, tableName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyGrantTableBranchPrivilege(String privilege, String tableName, String branchName)
+    {
+        denyGrantTableBranchPrivilege(privilege, tableName, branchName, null);
+    }
+
+    public static void denyGrantTableBranchPrivilege(String privilege, String tableName, String branchName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot grant privilege %s on branch %s in table %s%s", privilege, branchName, tableName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyDenyTableBranchPrivilege(String privilege, String tableName, String branchName)
+    {
+        denyDenyTableBranchPrivilege(privilege, tableName, branchName, null);
+    }
+
+    public static void denyDenyTableBranchPrivilege(String privilege, String tableName, String branchName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot deny privilege %s on branch %s in table %s%s", privilege, branchName, tableName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyRevokeTableBranchPrivilege(String privilege, String tableName, String branchName)
+    {
+        denyRevokeTableBranchPrivilege(privilege, tableName, branchName, null);
+    }
+
+    public static void denyRevokeTableBranchPrivilege(String privilege, String tableName, String branchName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot revoke privilege %s on branch %s in table %s%s", privilege, branchName, tableName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denyGrantEntityPrivilege(String privilege, EntityKindAndName entity)
     {
         denyGrantEntityPrivilege(privilege, entity, null);
@@ -598,7 +730,8 @@ public class AccessDeniedException
 
     private static void entityPrivilegeException(String operation, String privilege, EntityKindAndName entity, String extraInfo)
     {
-        throw new AccessDeniedException(format("Cannot %s privilege %s on %s %s%s",
+        throw new AccessDeniedException(format(
+                "Cannot %s privilege %s on %s %s%s",
                 operation,
                 privilege,
                 entity.entityKind().toLowerCase(Locale.ROOT),
@@ -653,7 +786,19 @@ public class AccessDeniedException
 
     public static void denySelectColumns(String tableName, Collection<String> columnNames, String extraInfo)
     {
-        throw new AccessDeniedException(format("Cannot select from columns %s in table or view %s%s", columnNames, tableName, formatExtraInfo(extraInfo)));
+        denySelectColumns(tableName, Optional.empty(), columnNames, extraInfo);
+    }
+
+    public static void denySelectColumns(String tableName, Optional<String> branchName, Collection<String> columnNames)
+    {
+        denySelectColumns(tableName, branchName, columnNames, null);
+    }
+
+    public static void denySelectColumns(String tableName, Optional<String> branchName, Collection<String> columnNames, String extraInfo)
+    {
+        throw new AccessDeniedException(branchName
+                .map(branch -> format("Cannot select from columns %s in branch %s in table %s%s", columnNames, branch, tableName, formatExtraInfo(extraInfo)))
+                .orElseGet(() -> format("Cannot select from columns %s in table or view %s%s", columnNames, tableName, formatExtraInfo(extraInfo))));
     }
 
     public static void denyCreateRole(String roleName)
@@ -744,6 +889,66 @@ public class AccessDeniedException
     public static void denyShowCreateFunction(String functionName, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot show create function for %s%s", functionName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyShowBranches(String tableName)
+    {
+        denyShowBranches(tableName, null);
+    }
+
+    public static void denyShowBranches(String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot show branches of table %s%s", tableName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyCreateBranch(String tableName)
+    {
+        denyCreateBranch(tableName, null);
+    }
+
+    public static void denyCreateBranch(String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot create a branch in %s%s", tableName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyDropBranch(String tableName)
+    {
+        denyDropBranch(tableName, null);
+    }
+
+    public static void denyDropBranch(String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot drop a branch from %s%s", tableName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyFastForwardBranch(String tableName)
+    {
+        denyFastForwardBranch(tableName, null);
+    }
+
+    public static void denyFastForwardBranch(String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot fast-forward a branch in %s%s", tableName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denySetEntityAuthorization(EntityKindAndName entityKindAndName, TrinoPrincipal principal)
+    {
+        denySetEntityAuthorization(entityKindAndName, principal, null);
+    }
+
+    public static void denySetEntityAuthorization(EntityKindAndName entityKindAndName, TrinoPrincipal principal, String extraInfo)
+    {
+        throw new AccessDeniedException(format(
+                "Cannot set authorization for %s %s to %s%s",
+                entityKindAndName.entityKind().toLowerCase(ENGLISH),
+                entityNameString(entityKindAndName.name()),
+                principal,
+                formatExtraInfo(extraInfo)));
+    }
+
+    private static String entityNameString(List<String> name)
+    {
+        return name.stream().collect(joining("."));
     }
 
     private static Object formatExtraInfo(String extraInfo)

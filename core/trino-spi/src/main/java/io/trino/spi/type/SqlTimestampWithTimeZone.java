@@ -13,15 +13,15 @@
  */
 package io.trino.spi.type;
 
-import com.fasterxml.jackson.annotation.JsonValue;
-
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Objects;
 
 import static io.trino.spi.type.Timestamps.MILLISECONDS_PER_SECOND;
+import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
 import static io.trino.spi.type.Timestamps.formatTimestampWithTimeZone;
 import static io.trino.spi.type.Timestamps.round;
 import static io.trino.spi.type.Timestamps.roundDiv;
@@ -32,9 +32,6 @@ import static java.util.Objects.requireNonNull;
 
 public final class SqlTimestampWithTimeZone
 {
-    private static final int NANOSECONDS_PER_MILLISECOND = 1_000_000;
-    private static final int PICOSECONDS_PER_NANOSECOND = 1_000;
-
     private final int precision;
     private final long epochMillis;
     private final int picosOfMilli;
@@ -132,7 +129,6 @@ public final class SqlTimestampWithTimeZone
         return newInstanceWithRounding(precision, epochMillis, picosOfMilli, timeZoneKey);
     }
 
-    @JsonValue
     @Override
     public String toString()
     {

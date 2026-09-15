@@ -13,8 +13,6 @@
  */
 package io.trino.plugin.cassandra.ptf;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
@@ -79,14 +77,14 @@ public class Query
 
         public QueryFunction(CassandraMetadata cassandraMetadata)
         {
-            super(
-                    SCHEMA_NAME,
+            super(SCHEMA_NAME,
                     NAME,
                     ImmutableList.of(ScalarArgumentSpecification.builder()
                             .name("QUERY")
                             .type(VARCHAR)
                             .build()),
-                    GENERIC_TABLE);
+                    GENERIC_TABLE,
+                    "");
             this.cassandraMetadata = requireNonNull(cassandraMetadata, "metadata is null");
         }
 
@@ -125,21 +123,12 @@ public class Query
         }
     }
 
-    public static class QueryHandle
+    public record QueryHandle(CassandraTableHandle tableHandle)
             implements ConnectorTableFunctionHandle
     {
-        private final CassandraTableHandle tableHandle;
-
-        @JsonCreator
-        public QueryHandle(@JsonProperty("tableHandle") CassandraTableHandle tableHandle)
+        public QueryHandle
         {
-            this.tableHandle = requireNonNull(tableHandle, "tableHandle is null");
-        }
-
-        @JsonProperty
-        public CassandraTableHandle getTableHandle()
-        {
-            return tableHandle;
+            requireNonNull(tableHandle, "tableHandle is null");
         }
     }
 }

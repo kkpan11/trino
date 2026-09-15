@@ -15,10 +15,11 @@ package io.trino.plugin.deltalake;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.Session;
+import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.deltalake.transactionlog.AddFileEntry;
 import io.trino.plugin.deltalake.transactionlog.TransactionLogAccess;
 import io.trino.plugin.deltalake.transactionlog.statistics.DeltaLakeFileStatistics;
-import io.trino.plugin.hive.containers.HiveMinioDataLake;
+import io.trino.plugin.hive.containers.Hive3FlociDataLake;
 import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.DoubleType;
@@ -62,18 +63,19 @@ public class TestDeltaLakeCreateTableStatistics
 {
     private String bucketName;
     private TransactionLogAccess transactionLogAccess;
+    private TrinoFileSystemFactory fileSystemFactory;
 
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
         this.bucketName = "delta-test-create-table-statistics-" + randomNameSuffix();
-        HiveMinioDataLake hiveMinioDataLake = closeAfterClass(new HiveMinioDataLake(bucketName));
-        hiveMinioDataLake.start();
+        Hive3FlociDataLake hiveFlociDataLake = closeAfterClass(new Hive3FlociDataLake(bucketName));
+        hiveFlociDataLake.start();
 
         return DeltaLakeQueryRunner.builder()
-                .addMetastoreProperties(hiveMinioDataLake.getHiveHadoop())
-                .addS3Properties(hiveMinioDataLake.getMinio(), bucketName)
+                .addMetastoreProperties(hiveFlociDataLake.getHiveHadoop())
+                .addS3Properties(hiveFlociDataLake.floci(), bucketName)
                 .addDeltaProperty("delta.enable-non-concurrent-writes", "true")
                 .build();
     }
@@ -82,6 +84,7 @@ public class TestDeltaLakeCreateTableStatistics
     public void initTransactionLogAccess()
     {
         transactionLogAccess = getConnectorService(getQueryRunner(), TransactionLogAccess.class);
+        fileSystemFactory = getConnectorService(getQueryRunner(), TrinoFileSystemFactory.class);
     }
 
     @Test
@@ -404,7 +407,7 @@ public class TestDeltaLakeCreateTableStatistics
                 ImmutableList.of(partitionColumn),
                 "VALUES ('a', 1), ('b', 1), ('c', 1), ('c', 2), ('d', 2), ('e', 2), (null, 1)")) {
             List<AddFileEntry> addFileEntries = getAddFileEntries(table.getName());
-            assertThat(addFileEntries.size()).isEqualTo(2);
+            assertThat(addFileEntries).hasSize(2);
 
             for (AddFileEntry addFileEntry : addFileEntries) {
                 assertThat(addFileEntry.getStats()).isPresent();
@@ -464,8 +467,13 @@ public class TestDeltaLakeCreateTableStatistics
                     "(" + String.join(",", columnNames) + ")";
             String partitionedBy = partitionNames.isEmpty() ? "" :
                     format(", partitioned_by = ARRAY[%s]", partitionNames.stream().map(partitionName -> "'" + partitionName + "'").collect(Collectors.joining(",")));
-            computeActual(session, format("CREATE TABLE %s %s WITH (location = 's3://%s/%1$s' %s) AS %s",
-                    this.name, columns, bucketName, partitionedBy, values));
+            computeActual(session, format(
+                    "CREATE TABLE %s %s WITH (location = 's3://%s/%1$s' %s) AS %s",
+                    this.name,
+                    columns,
+                    bucketName,
+                    partitionedBy,
+                    values));
         }
 
         public TestTable(String name, List<String> columnNames, List<String> partitionNames, String values)
@@ -488,6 +496,6 @@ public class TestDeltaLakeCreateTableStatistics
     protected List<AddFileEntry> getAddFileEntries(String tableName)
             throws IOException
     {
-        return getTableActiveFiles(transactionLogAccess, format("s3://%s/%s", bucketName, tableName));
+        return getTableActiveFiles(transactionLogAccess, fileSystemFactory, format("s3://%s/%s", bucketName, tableName));
     }
 }

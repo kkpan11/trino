@@ -24,6 +24,7 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.SqlDate;
 import io.trino.spi.type.SqlDecimal;
 import io.trino.spi.type.SqlTime;
@@ -123,12 +124,12 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
         ALL_SUPPORTED_TYPES_GENERIC_RECORD = new GenericData.Record(ALL_SUPPORTED_TYPES_SCHEMA);
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timestampMillis", testTime.getTime());
-        BlockBuilder timestampMilliBlock = TimestampType.TIMESTAMP_MILLIS.createBlockBuilder(null, 1);
+        BlockBuilder timestampMilliBlock = TimestampType.TIMESTAMP_MILLIS.createFixedSizeBlockBuilder(1);
         TimestampType.TIMESTAMP_MILLIS.writeLong(timestampMilliBlock, testTime.getTime() * Timestamps.MICROSECONDS_PER_MILLISECOND);
         blocks.add(timestampMilliBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timestampMicros", testTime.getTime() * 1000);
-        BlockBuilder timestampMicroBlock = TimestampType.TIMESTAMP_MICROS.createBlockBuilder(null, 1);
+        BlockBuilder timestampMicroBlock = TimestampType.TIMESTAMP_MICROS.createFixedSizeBlockBuilder(1);
         TimestampType.TIMESTAMP_MICROS.writeLong(timestampMicroBlock, testTime.getTime() * Timestamps.MICROSECONDS_PER_MILLISECOND);
         blocks.add(timestampMicroBlock.build());
 
@@ -147,22 +148,22 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
         blocks.add(largeDecimalBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("date", 9035);
-        BlockBuilder dateBlockBuilder = DateType.DATE.createBlockBuilder(null, 1);
+        BlockBuilder dateBlockBuilder = DateType.DATE.createFixedSizeBlockBuilder(1);
         DateType.DATE.writeInt(dateBlockBuilder, 9035);
         blocks.add(dateBlockBuilder.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timeMillis", 39_600_000);
-        BlockBuilder timeMillisBlock = TimeType.TIME_MILLIS.createBlockBuilder(null, 1);
+        BlockBuilder timeMillisBlock = TimeType.TIME_MILLIS.createFixedSizeBlockBuilder(1);
         TimeType.TIME_MILLIS.writeLong(timeMillisBlock, 39_600_000L * Timestamps.PICOSECONDS_PER_MILLISECOND);
         blocks.add(timeMillisBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timeMicros", 39_600_000_000L);
-        BlockBuilder timeMicrosBlock = TimeType.TIME_MICROS.createBlockBuilder(null, 1);
+        BlockBuilder timeMicrosBlock = TimeType.TIME_MICROS.createFixedSizeBlockBuilder(1);
         TimeType.TIME_MICROS.writeLong(timeMicrosBlock, 39_600_000_000L * Timestamps.PICOSECONDS_PER_MICROSECOND);
         blocks.add(timeMicrosBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("id", RANDOM_UUID.toString());
-        BlockBuilder uuidBlock = UuidType.UUID.createBlockBuilder(null, 1);
+        BlockBuilder uuidBlock = UuidType.UUID.createFixedSizeBlockBuilder(1);
         UuidType.UUID.writeSlice(uuidBlock, UuidType.javaUuidToTrinoUuid(RANDOM_UUID));
         blocks.add(uuidBlock.build());
 
@@ -219,19 +220,19 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
                 Page p = avroFileReader.next();
                 for (int i = 0; i < p.getPositionCount(); i++) {
                     // millis timestamp const
-                    SqlTimestamp milliTimestamp = (SqlTimestamp) TimestampType.TIMESTAMP_MILLIS.getObjectValue(null, p.getBlock(0), i);
+                    SqlTimestamp milliTimestamp = (SqlTimestamp) TimestampType.TIMESTAMP_MILLIS.getObjectValue(p.getBlock(0), i);
                     assertThat(milliTimestamp.getEpochMicros()).isEqualTo(testTime.getTime() * 1000);
 
                     // decimal bytes const
-                    SqlDecimal smallBytesDecimal = (SqlDecimal) SMALL_DECIMAL_TYPE.getObjectValue(null, p.getBlock(1), i);
+                    SqlDecimal smallBytesDecimal = (SqlDecimal) SMALL_DECIMAL_TYPE.getObjectValue(p.getBlock(1), i);
                     assertThat(smallBytesDecimal.getUnscaledValue()).isEqualTo(new BigInteger(Longs.toByteArray(testTime.getTime())));
 
                     // time micros const
-                    SqlTime timeMicros = (SqlTime) TimeType.TIME_MICROS.getObjectValue(null, p.getBlock(2), i);
+                    SqlTime timeMicros = (SqlTime) TimeType.TIME_MICROS.getObjectValue(p.getBlock(2), i);
                     assertThat(timeMicros.getPicos()).isEqualTo(39_600_000_000L * 1_000_000L);
 
-                    //UUID const assert
-                    assertThat(id).isEqualTo(UuidType.UUID.getObjectValue(null, p.getBlock(3), i));
+                    // UUID const assert
+                    assertThat(id).isEqualTo(UuidType.UUID.getObjectValue(p.getBlock(3), i));
                 }
                 totalRecords += p.getPositionCount();
             }
@@ -244,6 +245,7 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
             throws IOException, AvroTypeException
     {
         Location testLocation = createLocalTempLocation();
+        RowType type = (RowType) new NativeLogicalTypesAvroTypeBlockHandler().typeFor(ALL_SUPPORTED_TYPES_SCHEMA);
         try (AvroFileWriter fileWriter = new AvroFileWriter(
                 trinoLocalFilesystem.newOutputFile(testLocation).create(),
                 ALL_SUPPORTED_TYPES_SCHEMA,
@@ -251,7 +253,8 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
                 AvroCompressionKind.NULL,
                 ImmutableMap.of(),
                 ALL_SUPPORTED_TYPES_SCHEMA.getFields().stream().map(Schema.Field::name).collect(toImmutableList()),
-                new NativeLogicalTypesAvroTypeBlockHandler().typeFor(ALL_SUPPORTED_TYPES_SCHEMA).getTypeParameters(), false)) {
+                type.getFieldTypes(),
+                false)) {
             fileWriter.write(ALL_SUPPORTED_PAGE);
         }
 
@@ -269,16 +272,16 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
     {
         assertThat(p.getPositionCount()).isEqualTo(1);
         // Timestamps equal
-        SqlTimestamp milliTimestamp = (SqlTimestamp) TimestampType.TIMESTAMP_MILLIS.getObjectValue(null, p.getBlock(0), 0);
-        SqlTimestamp microTimestamp = (SqlTimestamp) TimestampType.TIMESTAMP_MICROS.getObjectValue(null, p.getBlock(1), 0);
+        SqlTimestamp milliTimestamp = (SqlTimestamp) TimestampType.TIMESTAMP_MILLIS.getObjectValue(p.getBlock(0), 0);
+        SqlTimestamp microTimestamp = (SqlTimestamp) TimestampType.TIMESTAMP_MICROS.getObjectValue(p.getBlock(1), 0);
         assertThat(milliTimestamp).isEqualTo(microTimestamp.roundTo(3));
         assertThat(microTimestamp.getEpochMicros()).isEqualTo(testTime.getTime() * 1000);
 
         // Decimals Equal
-        SqlDecimal smallBytesDecimal = (SqlDecimal) SMALL_DECIMAL_TYPE.getObjectValue(null, p.getBlock(2), 0);
-        SqlDecimal smallFixedDecimal = (SqlDecimal) SMALL_DECIMAL_TYPE.getObjectValue(null, p.getBlock(3), 0);
-        SqlDecimal largeBytesDecimal = (SqlDecimal) LARGE_DECIMAL_TYPE.getObjectValue(null, p.getBlock(4), 0);
-        SqlDecimal largeFixedDecimal = (SqlDecimal) LARGE_DECIMAL_TYPE.getObjectValue(null, p.getBlock(5), 0);
+        SqlDecimal smallBytesDecimal = (SqlDecimal) SMALL_DECIMAL_TYPE.getObjectValue(p.getBlock(2), 0);
+        SqlDecimal smallFixedDecimal = (SqlDecimal) SMALL_DECIMAL_TYPE.getObjectValue(p.getBlock(3), 0);
+        SqlDecimal largeBytesDecimal = (SqlDecimal) LARGE_DECIMAL_TYPE.getObjectValue(p.getBlock(4), 0);
+        SqlDecimal largeFixedDecimal = (SqlDecimal) LARGE_DECIMAL_TYPE.getObjectValue(p.getBlock(5), 0);
 
         assertThat(smallBytesDecimal).isEqualTo(smallFixedDecimal);
         assertThat(largeBytesDecimal).isEqualTo(largeFixedDecimal);
@@ -286,16 +289,16 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
         assertThat(smallBytesDecimal.getUnscaledValue()).isEqualTo(new BigInteger(Longs.toByteArray(78068160000000L)));
 
         // Get date
-        SqlDate date = (SqlDate) DateType.DATE.getObjectValue(null, p.getBlock(6), 0);
+        SqlDate date = (SqlDate) DateType.DATE.getObjectValue(p.getBlock(6), 0);
         assertThat(date.getDays()).isEqualTo(9035);
 
         // Time equals
-        SqlTime timeMillis = (SqlTime) TimeType.TIME_MILLIS.getObjectValue(null, p.getBlock(7), 0);
-        SqlTime timeMicros = (SqlTime) TimeType.TIME_MICROS.getObjectValue(null, p.getBlock(8), 0);
+        SqlTime timeMillis = (SqlTime) TimeType.TIME_MILLIS.getObjectValue(p.getBlock(7), 0);
+        SqlTime timeMicros = (SqlTime) TimeType.TIME_MICROS.getObjectValue(p.getBlock(8), 0);
         assertThat(timeMillis).isEqualTo(timeMicros.roundTo(3));
         assertThat(timeMillis.getPicos()).isEqualTo(timeMicros.getPicos()).isEqualTo(39_600_000_000L * 1_000_000L);
 
-        //UUID
-        assertThat(RANDOM_UUID.toString()).isEqualTo(UuidType.UUID.getObjectValue(null, p.getBlock(9), 0));
+        // UUID
+        assertThat(RANDOM_UUID.toString()).isEqualTo(UuidType.UUID.getObjectValue(p.getBlock(9), 0));
     }
 }

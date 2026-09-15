@@ -33,26 +33,28 @@ import io.trino.execution.buffer.OutputBufferInfo;
 import io.trino.execution.buffer.OutputBufferStatus;
 import io.trino.execution.buffer.OutputBuffers;
 import io.trino.execution.buffer.SpoolingOutputStats;
-import io.trino.metadata.InternalNode;
 import io.trino.metadata.Split;
+import io.trino.node.InternalNode;
 import io.trino.operator.TaskStats;
 import io.trino.plugin.base.metrics.TDigestHistogram;
+import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.sql.planner.PlanFragment;
 import io.trino.sql.planner.plan.DynamicFilterId;
 import io.trino.sql.planner.plan.PlanNodeId;
-import org.joda.time.DateTime;
 
 import java.net.URI;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.Sets.newConcurrentHashSet;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.units.DataSize.Unit.BYTE;
@@ -64,7 +66,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 public class TestingRemoteTaskFactory
         implements RemoteTaskFactory
 {
-    private static final String TASK_INSTANCE_ID = "task-instance-id";
+    private static final long TASK_INSTANCE_ID = 0x1337;
 
     private final Map<TaskId, TestingRemoteTask> tasks = new HashMap<>();
 
@@ -76,6 +78,7 @@ public class TestingRemoteTaskFactory
             InternalNode node,
             boolean speculative,
             PlanFragment fragment,
+            Map<PlanNodeId, ConnectorTableCredentials> tableCredentials,
             Multimap<PlanNodeId, Split> initialSplits,
             OutputBuffers outputBuffers,
             PartitionedSplitCountTracker partitionedSplitCountTracker,
@@ -106,7 +109,7 @@ public class TestingRemoteTaskFactory
         private final AtomicLong nextTaskStatusVersion = new AtomicLong(TaskStatus.STARTING_VERSION);
 
         private final AtomicBoolean started = new AtomicBoolean();
-        private final Set<PlanNodeId> noMoreSplits = newConcurrentHashSet();
+        private final Set<PlanNodeId> noMoreSplits = ConcurrentHashMap.newKeySet();
         @GuardedBy("this")
         private final Multimap<PlanNodeId, Split> splits = ArrayListMultimap.create();
         @GuardedBy("this")
@@ -142,7 +145,7 @@ public class TestingRemoteTaskFactory
         {
             return new TaskInfo(
                     getTaskStatus(),
-                    DateTime.now(),
+                    Instant.now(),
                     new OutputBufferInfo(
                             "TESTING",
                             BufferState.FINISHED,
@@ -154,9 +157,10 @@ public class TestingRemoteTaskFactory
                             0,
                             Optional.empty(),
                             Optional.of(new TDigestHistogram(new TDigest())),
+                            Optional.empty(),
                             Optional.empty()),
                     ImmutableSet.copyOf(noMoreSplits),
-                    new TaskStats(DateTime.now(), null),
+                    new TaskStats(Instant.now(), null),
                     Optional.empty(),
                     false);
         }
@@ -184,7 +188,7 @@ public class TestingRemoteTaskFactory
                     DataSize.of(0, BYTE),
                     DataSize.of(0, BYTE),
                     DataSize.of(0, BYTE),
-                    Optional.empty(),
+                    OptionalInt.empty(),
                     DataSize.of(0, BYTE),
                     DataSize.of(0, BYTE),
                     DataSize.of(0, BYTE),
@@ -237,7 +241,7 @@ public class TestingRemoteTaskFactory
         @Override
         public void setSpeculative(boolean speculative)
         {
-           // ignore
+            // ignore
         }
 
         public synchronized OutputBuffers getOutputBuffers()
@@ -248,7 +252,7 @@ public class TestingRemoteTaskFactory
         @Override
         public void addStateChangeListener(StateChangeListener<TaskStatus> stateChangeListener)
         {
-            taskStateMachine.addStateChangeListener(newValue -> stateChangeListener.stateChanged(getTaskStatus()));
+            taskStateMachine.addStateChangeListener(_ -> stateChangeListener.stateChanged(getTaskStatus()));
         }
 
         @Override
@@ -303,6 +307,9 @@ public class TestingRemoteTaskFactory
             taskStateMachine.failed(cause);
             taskStateMachine.terminationComplete();
         }
+
+        @Override
+        public void forceFinalizationUsingTaskStatus() {}
 
         @Override
         public PartitionedSplitsInfo getQueuedPartitionedSplitsInfo()

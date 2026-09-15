@@ -72,18 +72,18 @@ public class TestColocatedJoin
     protected PlanTester createPlanTester()
     {
         MockConnectorFactory connectorFactory = MockConnectorFactory.builder()
-                .withGetTableHandle((session, tableName) -> {
+                .withGetTableHandle((_, tableName) -> {
                     if (tableName.getTableName().equals(TABLE_NAME)) {
                         return new MockConnectorTableHandle(tableName);
                     }
                     return null;
                 })
                 .withPartitionProvider(new TestPartitioningProvider())
-                .withGetColumns(schemaTableName -> ImmutableList.of(
+                .withGetColumns(_ -> ImmutableList.of(
                         new ColumnMetadata(COLUMN_A, BIGINT),
                         new ColumnMetadata(COLUMN_B, VARCHAR)))
                 .withName(CATALOG_NAME)
-                .withGetTableProperties((session, tableHandle) -> new ConnectorTableProperties(
+                .withGetTableProperties((_, _) -> new ConnectorTableProperties(
                         TupleDomain.all(),
                         Optional.of(new ConnectorTablePartitioning(
                                 PARTITIONING_HANDLE,
@@ -123,7 +123,7 @@ public class TestColocatedJoin
                         WHERE
                             orders.column_a = t.column_a
                         AND orders.column_b = t.column_b
-                """,
+                    """,
                     prepareSession(20, colocatedJoinEnabled),
                     anyTree(
                             anyTree(
@@ -191,7 +191,11 @@ public class TestColocatedJoin
         }
 
         @Override
-        public ToIntFunction<ConnectorSplit> getSplitBucketFunction(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorPartitioningHandle partitioningHandle)
+        public ToIntFunction<ConnectorSplit> getSplitBucketFunction(
+                ConnectorTransactionHandle transactionHandle,
+                ConnectorSession session,
+                ConnectorPartitioningHandle partitioningHandle,
+                int bucketCount)
         {
             throw new UnsupportedOperationException();
         }

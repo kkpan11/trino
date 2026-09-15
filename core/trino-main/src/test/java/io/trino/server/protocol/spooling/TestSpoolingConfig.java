@@ -23,7 +23,10 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.trino.server.protocol.spooling.SpoolingConfig.SegmentRetrievalMode.COORDINATOR_STORAGE_REDIRECT;
+import static io.trino.server.protocol.spooling.SpoolingConfig.SegmentRetrievalMode.STORAGE;
 import static io.trino.util.Ciphers.createRandomAesEncryptionKey;
 
 class TestSpoolingConfig
@@ -32,13 +35,13 @@ class TestSpoolingConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(SpoolingConfig.class)
-                .setUseWorkers(false)
-                .setDirectStorageAccess(true)
-                .setDirectStorageFallback(false)
-                .setInlineSegments(true)
-                .setSharedEncryptionKey(null)
+                .setSharedSecretKey(null)
+                .setRetrievalMode(STORAGE)
                 .setInitialSegmentSize(DataSize.of(8, MEGABYTE))
-                .setMaximumSegmentSize(DataSize.of(16, MEGABYTE)));
+                .setMaximumSegmentSize(DataSize.of(16, MEGABYTE))
+                .setInliningMaxRows(50000)
+                .setInliningMaxSize(DataSize.of(3, MEGABYTE))
+                .setInliningEnabled(true));
     }
 
     @Test
@@ -47,23 +50,23 @@ class TestSpoolingConfig
         String randomAesEncryptionKey = Base64.getEncoder().encodeToString(createRandomAesEncryptionKey().getEncoded());
 
         Map<String, String> properties = ImmutableMap.<String, String>builder()
-                .put("protocol.spooling.worker-access", "true")
-                .put("protocol.spooling.direct-storage-access", "false")
-                .put("protocol.spooling.direct-storage-fallback", "true")
-                .put("protocol.spooling.inline-segments", "false")
                 .put("protocol.spooling.shared-secret-key", randomAesEncryptionKey) // 256 bits
-                .put("protocol.spooling.initial-segment-size", "2MB")
-                .put("protocol.spooling.maximum-segment-size", "4MB")
+                .put("protocol.spooling.retrieval-mode", "coordinator_storage_redirect")
+                .put("protocol.spooling.inlining.enabled", "false")
+                .put("protocol.spooling.initial-segment-size", "1kB")
+                .put("protocol.spooling.max-segment-size", "8kB")
+                .put("protocol.spooling.inlining.max-rows", "10000")
+                .put("protocol.spooling.inlining.max-size", "1MB")
                 .buildOrThrow();
 
         SpoolingConfig expected = new SpoolingConfig()
-                .setUseWorkers(true)
-                .setDirectStorageAccess(false)
-                .setDirectStorageFallback(true)
-                .setInlineSegments(false)
-                .setSharedEncryptionKey(randomAesEncryptionKey)
-                .setInitialSegmentSize(DataSize.of(2, MEGABYTE))
-                .setMaximumSegmentSize(DataSize.of(4, MEGABYTE));
+                .setRetrievalMode(COORDINATOR_STORAGE_REDIRECT)
+                .setSharedSecretKey(randomAesEncryptionKey)
+                .setInitialSegmentSize(DataSize.of(1, KILOBYTE))
+                .setMaximumSegmentSize(DataSize.of(8, KILOBYTE))
+                .setInliningMaxRows(10000)
+                .setInliningMaxSize(DataSize.of(1, MEGABYTE))
+                .setInliningEnabled(false);
 
         assertFullMapping(properties, expected);
     }

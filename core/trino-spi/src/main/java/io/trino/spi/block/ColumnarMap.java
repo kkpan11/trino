@@ -27,9 +27,6 @@ public class ColumnarMap
     {
         requireNonNull(block, "block is null");
 
-        if (block instanceof LazyBlock lazyBlock) {
-            block = lazyBlock.getBlock();
-        }
         if (block instanceof DictionaryBlock dictionaryBlock) {
             return toColumnarMap(dictionaryBlock);
         }
@@ -42,7 +39,7 @@ public class ColumnarMap
         }
 
         int offsetBase = mapBlock.getOffsetBase();
-        int[] offsets = mapBlock.getOffsets();
+        int[] offsets = mapBlock.getRawOffsets();
 
         // get the keys and values for visible region
         int firstEntryPosition = offsets[offsetBase];

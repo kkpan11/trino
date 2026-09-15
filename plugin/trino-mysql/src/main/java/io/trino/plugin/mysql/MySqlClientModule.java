@@ -40,6 +40,8 @@ import java.util.Properties;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.trino.plugin.jdbc.DecimalModule.MappingToNumber.ON_BY_DEFAULT;
+import static io.trino.plugin.jdbc.JdbcModule.bindTablePropertiesProvider;
 
 public class MySqlClientModule
         extends AbstractConfigurationAwareModule
@@ -53,7 +55,8 @@ public class MySqlClientModule
         configBinder(binder).bindConfig(MySqlJdbcConfig.class);
         configBinder(binder).bindConfig(MySqlConfig.class);
         configBinder(binder).bindConfig(JdbcStatisticsConfig.class);
-        install(new DecimalModule());
+        bindTablePropertiesProvider(binder, MySqlTableProperties.class);
+        install(DecimalModule.withNumberMapping(ON_BY_DEFAULT));
         install(new JdbcJoinPushdownSupportModule());
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
     }
@@ -81,7 +84,7 @@ public class MySqlClientModule
 
         // connectionTimeZone = LOCAL means the JDBC driver uses the JVM zone as the session zone
         // forceConnectionTimeZoneToSession = true means that the server side connection zone is changed to match local JVM zone
-        // https://dev.mysql.com/doc/connector-j/8.1/en/connector-j-time-instants.html (Solution 2b)
+        // https://dev.mysql.com/doc/connector-j/en/connector-j-time-instants.html (Solution 2b)
         connectionProperties.setProperty("connectionTimeZone", "LOCAL");
         connectionProperties.setProperty("forceConnectionTimeZoneToSession", "true");
 

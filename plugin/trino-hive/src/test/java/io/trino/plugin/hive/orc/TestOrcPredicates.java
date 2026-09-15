@@ -23,16 +23,17 @@ import io.trino.filesystem.memory.MemoryFileSystemFactory;
 import io.trino.metastore.HiveType;
 import io.trino.orc.OrcReaderOptions;
 import io.trino.orc.OrcWriterOptions;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.hive.FileWriter;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HiveColumnProjectionInfo;
 import io.trino.plugin.hive.HiveCompressionCodec;
 import io.trino.plugin.hive.HiveConfig;
 import io.trino.plugin.hive.HivePageSourceProvider;
-import io.trino.plugin.hive.NodeVersion;
+import io.trino.plugin.hive.Schema;
 import io.trino.plugin.hive.WriterKind;
 import io.trino.plugin.hive.util.HiveTypeTranslator;
+import io.trino.spi.NodeVersion;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.IntArrayBlock;
@@ -41,6 +42,8 @@ import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.RowType;
@@ -142,7 +145,7 @@ class TestOrcPredicates
         try (ConnectorPageSource pageSource = createPageSource(fileSystemFactory, location, effectivePredicate, columnsToRead, session)) {
             int filteredRows = 0;
             while (!pageSource.isFinished()) {
-                Page page = pageSource.getNextPage();
+                SourcePage page = pageSource.getNextSourcePage();
                 if (page != null) {
                     filteredRows += page.getPositionCount();
                 }
@@ -183,7 +186,13 @@ class TestOrcPredicates
                         length,
                         length,
                         inputFile.lastModified().toEpochMilli(),
-                        getTableProperties(),
+                        new Schema(
+                                ORC.getSerde(),
+                                false,
+                                ImmutableMap.<String, String>builder()
+                                        .put(LIST_COLUMNS, COLUMNS.stream().map(HiveColumnHandle::getName).collect(Collectors.joining(",")))
+                                        .put(LIST_COLUMN_TYPES, COLUMNS.stream().map(HiveColumnHandle::getHiveType).map(HiveType::toString).collect(Collectors.joining(",")))
+                                        .buildOrThrow()),
                         effectivePredicate,
                         TESTING_TYPE_MANAGER,
                         Optional.empty(),
@@ -191,7 +200,8 @@ class TestOrcPredicates
                         Optional.empty(),
                         false,
                         NO_ACID_TRANSACTION,
-                        columnMappings)
+                        columnMappings,
+                        MemoryContext.NO_LIMIT)
                 .orElseThrow();
     }
 
@@ -216,7 +226,8 @@ class TestOrcPredicates
                 RunLengthEncodedBlock.create(
                         RowBlock.fromFieldBlocks(1, new Block[] {
                                 new LongArrayBlock(1, Optional.empty(), new long[] {4}),
-                                new LongArrayBlock(1, Optional.empty(), new long[] {5})}),
+                                new LongArrayBlock(1, Optional.empty(), new long[] {5}),
+                        }),
                         NUM_ROWS),
                 RunLengthEncodedBlock.create(new LongArrayBlock(1, Optional.empty(), new long[] {6}), NUM_ROWS)));
 

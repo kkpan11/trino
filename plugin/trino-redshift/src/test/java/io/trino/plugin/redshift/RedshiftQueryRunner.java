@@ -38,7 +38,6 @@ import static io.trino.plugin.redshift.TestingRedshiftServer.JDBC_URL;
 import static io.trino.plugin.redshift.TestingRedshiftServer.JDBC_USER;
 import static io.trino.plugin.redshift.TestingRedshiftServer.TEST_DATABASE;
 import static io.trino.plugin.redshift.TestingRedshiftServer.TEST_SCHEMA;
-import static io.trino.plugin.redshift.TestingRedshiftServer.executeInRedshift;
 import static io.trino.plugin.redshift.TestingRedshiftServer.executeInRedshiftWithRetry;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.testing.TestingProperties.requiredNonEmptySystemProperty;
@@ -56,7 +55,7 @@ public final class RedshiftQueryRunner
     private static final Logger log = Logger.get(RedshiftQueryRunner.class);
 
     private static final String S3_TPCH_TABLES_ROOT = requiredNonEmptySystemProperty("test.redshift.s3.tpch.tables.root");
-    private static final String IAM_ROLE = requiredNonEmptySystemProperty("test.redshift.iam.role");
+    public static final String IAM_ROLE = requiredNonEmptySystemProperty("test.redshift.iam.role");
 
     private static final String TEST_CATALOG = "redshift";
     private static final String CONNECTOR_NAME = "redshift";
@@ -125,8 +124,9 @@ public final class RedshiftQueryRunner
                 provisionTables(runner, initialTables);
 
                 // This step is necessary for product tests
-                executeInRedshiftWithRetry(format("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s TO %s", TEST_SCHEMA, GRANTED_USER));
-
+                for (TpchTable<?> table : initialTables) {
+                    executeInRedshiftWithRetry(format("GRANT ALL PRIVILEGES ON TABLE %s.%s TO %s", TEST_SCHEMA, table.getTableName(), GRANTED_USER));
+                }
                 return runner;
             }
             catch (Throwable e) {
@@ -139,7 +139,7 @@ public final class RedshiftQueryRunner
     private static void createUserIfNotExists(String user, String password)
     {
         try {
-            executeInRedshift("CREATE USER " + user + " PASSWORD " + "'" + password + "'");
+            executeInRedshiftWithRetry("CREATE USER " + user + " PASSWORD " + "'" + password + "'");
         }
         catch (Exception e) {
             // if user already exists, swallow the exception
@@ -212,7 +212,7 @@ public final class RedshiftQueryRunner
         }
     }
 
-    public static void main(String[] args)
+    static void main()
             throws Exception
     {
         Logging.initialize();

@@ -17,6 +17,8 @@ import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.trino.client.Column;
+import org.jline.utils.AttributedString;
+import org.jline.utils.AttributedStyle;
 
 import java.io.IOException;
 import java.io.Writer;
@@ -25,7 +27,6 @@ import java.util.List;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.base.Strings.repeat;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.cli.FormatUtils.formatValue;
 import static io.trino.client.ClientStandardTypes.BIGINT;
@@ -39,6 +40,7 @@ import static java.lang.Math.max;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static org.jline.utils.AttributedString.stripAnsi;
+import static org.jline.utils.AttributedStyle.DEFAULT;
 import static org.jline.utils.WCWidth.wcwidth;
 
 public class AlignedTablePrinter
@@ -51,11 +53,12 @@ public class AlignedTablePrinter
     private final List<String> fieldNames;
     private final List<Boolean> numericFields;
     private final Writer writer;
+    private final Theme theme;
 
     private boolean headerRendered;
     private long rowCount;
 
-    public AlignedTablePrinter(List<Column> columns, Writer writer)
+    public AlignedTablePrinter(List<Column> columns, Writer writer, Theme theme)
     {
         requireNonNull(columns, "columns is null");
         this.fieldNames = columns.stream()
@@ -66,6 +69,7 @@ public class AlignedTablePrinter
                 .map(signature -> NUMERIC_TYPES.contains(signature.getRawType()))
                 .collect(toImmutableList());
         this.writer = requireNonNull(writer, "writer is null");
+        this.theme = requireNonNull(theme, "theme is null");
     }
 
     @Override
@@ -103,7 +107,7 @@ public class AlignedTablePrinter
                 if (i > 0) {
                     writer.append('|');
                 }
-                writer.append(center(fieldNames.get(i), columnWidth[i], 1));
+                writer.append(colored(center(fieldNames.get(i), columnWidth[i], 1), theme.keyword()));
             }
             writer.append('\n');
 
@@ -111,7 +115,7 @@ public class AlignedTablePrinter
                 if (i > 0) {
                     writer.append('+');
                 }
-                writer.append(repeat("-", columnWidth[i] + 2));
+                writer.append("-".repeat(columnWidth[i] + 2));
             }
             writer.append('\n');
         }
@@ -121,7 +125,7 @@ public class AlignedTablePrinter
             int maxLines = 1;
             for (int i = 0; i < columns; i++) {
                 String value = formatValue(row.get(i));
-                ImmutableList<String> lines = ImmutableList.copyOf(LINE_SPLITTER.split(value));
+                List<String> lines = ImmutableList.copyOf(LINE_SPLITTER.split(value));
                 columnLines.add(lines);
                 maxLines = max(maxLines, lines.size());
             }
@@ -147,21 +151,29 @@ public class AlignedTablePrinter
         writer.flush();
     }
 
+    private String colored(String value, AttributedStyle style)
+    {
+        if ((style == DEFAULT) || value.isEmpty()) {
+            return value;
+        }
+        return new AttributedString(value, style).toAnsi();
+    }
+
     private static String center(String value, int maxWidth, int padding)
     {
         int width = consoleWidth(value);
         checkState(width <= maxWidth, format("Variable width %d is greater than column width %d", width, maxWidth));
         int left = (maxWidth - width) / 2;
         int right = maxWidth - (left + width);
-        return repeat(" ", left + padding) + value + repeat(" ", right + padding);
+        return " ".repeat(left + padding) + value + " ".repeat(right + padding);
     }
 
     private static String align(String value, int maxWidth, int padding, boolean right)
     {
         int width = consoleWidth(value);
         checkState(width <= maxWidth, format("Variable width %d is greater than column width %d", width, maxWidth));
-        String large = repeat(" ", maxWidth - width + padding);
-        String small = repeat(" ", padding);
+        String large = " ".repeat(maxWidth - width + padding);
+        String small = " ".repeat(padding);
         return right ? (large + value + small) : (small + value + large);
     }
 

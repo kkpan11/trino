@@ -189,15 +189,6 @@ public class TracingAccessControl
     }
 
     @Override
-    public void checkCanSetSchemaAuthorization(SecurityContext context, CatalogSchemaName schemaName, TrinoPrincipal principal)
-    {
-        Span span = startSpan("checkCanSetSchemaAuthorization");
-        try (var _ = scopedSpan(span)) {
-            delegate.checkCanSetSchemaAuthorization(context, schemaName, principal);
-        }
-    }
-
-    @Override
     public void checkCanShowSchemas(SecurityContext context, String catalogName)
     {
         Span span = startSpan("checkCanShowSchemas");
@@ -360,15 +351,6 @@ public class TracingAccessControl
     }
 
     @Override
-    public void checkCanSetTableAuthorization(SecurityContext context, QualifiedObjectName tableName, TrinoPrincipal principal)
-    {
-        Span span = startSpan("checkCanSetTableAuthorization");
-        try (var _ = scopedSpan(span)) {
-            delegate.checkCanSetTableAuthorization(context, tableName, principal);
-        }
-    }
-
-    @Override
     public void checkCanRenameColumn(SecurityContext context, QualifiedObjectName tableName)
     {
         Span span = startSpan("checkCanRenameColumn");
@@ -378,20 +360,20 @@ public class TracingAccessControl
     }
 
     @Override
-    public void checkCanInsertIntoTable(SecurityContext context, QualifiedObjectName tableName)
+    public void checkCanInsertIntoTable(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch)
     {
         Span span = startSpan("checkCanInsertIntoTable");
         try (var _ = scopedSpan(span)) {
-            delegate.checkCanInsertIntoTable(context, tableName);
+            delegate.checkCanInsertIntoTable(context, tableName, branch);
         }
     }
 
     @Override
-    public void checkCanDeleteFromTable(SecurityContext context, QualifiedObjectName tableName)
+    public void checkCanDeleteFromTable(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch)
     {
         Span span = startSpan("checkCanDeleteFromTable");
         try (var _ = scopedSpan(span)) {
-            delegate.checkCanDeleteFromTable(context, tableName);
+            delegate.checkCanDeleteFromTable(context, tableName, branch);
         }
     }
 
@@ -405,11 +387,11 @@ public class TracingAccessControl
     }
 
     @Override
-    public void checkCanUpdateTableColumns(SecurityContext context, QualifiedObjectName tableName, Set<String> updatedColumnNames)
+    public void checkCanUpdateTableColumns(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch, Set<String> updatedColumnNames)
     {
         Span span = startSpan("checkCanUpdateTableColumns");
         try (var _ = scopedSpan(span)) {
-            delegate.checkCanUpdateTableColumns(context, tableName, updatedColumnNames);
+            delegate.checkCanUpdateTableColumns(context, tableName, branch, updatedColumnNames);
         }
     }
 
@@ -432,11 +414,11 @@ public class TracingAccessControl
     }
 
     @Override
-    public void checkCanSetViewAuthorization(SecurityContext context, QualifiedObjectName view, TrinoPrincipal principal)
+    public void checkCanRefreshView(SecurityContext context, QualifiedObjectName viewName)
     {
-        Span span = startSpan("checkCanSetViewAuthorization");
+        Span span = startSpan("checkCanRefreshView");
         try (var _ = scopedSpan(span)) {
-            delegate.checkCanSetViewAuthorization(context, view, principal);
+            delegate.checkCanRefreshView(context, viewName);
         }
     }
 
@@ -450,11 +432,11 @@ public class TracingAccessControl
     }
 
     @Override
-    public void checkCanCreateViewWithSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Set<String> columnNames)
+    public void checkCanCreateViewWithSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch, Set<String> columnNames)
     {
         Span span = startSpan("checkCanCreateViewWithSelectFromColumns");
         try (var _ = scopedSpan(span)) {
-            delegate.checkCanCreateViewWithSelectFromColumns(context, tableName, columnNames);
+            delegate.checkCanCreateViewWithSelectFromColumns(context, tableName, branch, columnNames);
         }
     }
 
@@ -558,6 +540,33 @@ public class TracingAccessControl
     }
 
     @Override
+    public void checkCanGrantTableBranchPrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, String branchName, TrinoPrincipal grantee, boolean grantOption)
+    {
+        Span span = startSpan("checkCanGrantTableBranchPrivilege");
+        try (var _ = scopedSpan(span)) {
+            delegate.checkCanGrantTableBranchPrivilege(context, privilege, tableName, branchName, grantee, grantOption);
+        }
+    }
+
+    @Override
+    public void checkCanDenyTableBranchPrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, String branchName, TrinoPrincipal grantee)
+    {
+        Span span = startSpan("checkCanDenyTableBranchPrivilege");
+        try (var _ = scopedSpan(span)) {
+            delegate.checkCanDenyTableBranchPrivilege(context, privilege, tableName, branchName, grantee);
+        }
+    }
+
+    @Override
+    public void checkCanRevokeTableBranchPrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, String branchName, TrinoPrincipal revokee, boolean grantOption)
+    {
+        Span span = startSpan("checkCanRevokeTableBranchPrivilege");
+        try (var _ = scopedSpan(span)) {
+            delegate.checkCanRevokeTableBranchPrivilege(context, privilege, tableName, branchName, revokee, grantOption);
+        }
+    }
+
+    @Override
     public void checkCanGrantEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee, boolean grantOption)
     {
         Span span = startSpan("checkCanGrantEntityPrivilege");
@@ -603,11 +612,11 @@ public class TracingAccessControl
     }
 
     @Override
-    public void checkCanSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Set<String> columnNames)
+    public void checkCanSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Optional<String> branch, Set<String> columnNames)
     {
         Span span = startSpan("checkCanSelectFromColumns");
         try (var _ = scopedSpan(span)) {
-            delegate.checkCanSelectFromColumns(context, tableName, columnNames);
+            delegate.checkCanSelectFromColumns(context, tableName, branch, columnNames);
         }
     }
 
@@ -765,6 +774,42 @@ public class TracingAccessControl
     }
 
     @Override
+    public void checkCanShowBranches(SecurityContext context, QualifiedObjectName tableName)
+    {
+        Span span = startSpan("checkCanShowBranches");
+        try (var ignored = scopedSpan(span)) {
+            delegate.checkCanShowBranches(context, tableName);
+        }
+    }
+
+    @Override
+    public void checkCanCreateBranch(SecurityContext context, QualifiedObjectName tableName, String branchName)
+    {
+        Span span = startSpan("checkCanCreateBranch");
+        try (var ignored = scopedSpan(span)) {
+            delegate.checkCanCreateBranch(context, tableName, branchName);
+        }
+    }
+
+    @Override
+    public void checkCanDropBranch(SecurityContext context, QualifiedObjectName tableName, String branchName)
+    {
+        Span span = startSpan("checkCanDropBranch");
+        try (var ignored = scopedSpan(span)) {
+            delegate.checkCanDropBranch(context, tableName, branchName);
+        }
+    }
+
+    @Override
+    public void checkCanFastForwardBranch(SecurityContext context, QualifiedObjectName tableName, String sourceBranchName, String targetBranchName)
+    {
+        Span span = startSpan("checkCanFastForwardBranch");
+        try (var ignored = scopedSpan(span)) {
+            delegate.checkCanFastForwardBranch(context, tableName, sourceBranchName, targetBranchName);
+        }
+    }
+
+    @Override
     public List<ViewExpression> getRowFilters(SecurityContext context, QualifiedObjectName tableName)
     {
         Span span = startSpan("getRowFilters");
@@ -779,6 +824,15 @@ public class TracingAccessControl
         Span span = startSpan("getColumnMasks");
         try (var _ = scopedSpan(span)) {
             return delegate.getColumnMasks(context, tableName, columns);
+        }
+    }
+
+    @Override
+    public void checkCanSetEntityAuthorization(SecurityContext context, EntityKindAndName entityKindAndName, TrinoPrincipal principal)
+    {
+        Span span = startSpan("checkCanSetEntityAuthorization");
+        try (var ignored = scopedSpan(span)) {
+            delegate.checkCanSetEntityAuthorization(context, entityKindAndName, principal);
         }
     }
 

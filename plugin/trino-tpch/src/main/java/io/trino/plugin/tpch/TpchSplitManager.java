@@ -14,8 +14,10 @@
 package io.trino.plugin.tpch;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.spi.Node;
 import io.trino.spi.NodeManager;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -23,7 +25,6 @@ import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 
 import java.util.List;
@@ -32,12 +33,19 @@ import java.util.Set;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Comparator.comparing;
+import static java.util.Objects.requireNonNull;
 
 public class TpchSplitManager
         implements ConnectorSplitManager
 {
     private final NodeManager nodeManager;
     private final int splitsPerNode;
+
+    @Inject
+    public TpchSplitManager(NodeManager nodeManager, TpchConfig config)
+    {
+        this(requireNonNull(nodeManager, "nodeManager is null"), requireNonNull(config, "config is null").getSplitsPerNode());
+    }
 
     public TpchSplitManager(NodeManager nodeManager, int splitsPerNode)
     {
@@ -51,7 +59,7 @@ public class TpchSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            DynamicFilter dynamicFilter,
+            Set<ColumnHandle> dynamicFilterColumns,
             Constraint constraint)
     {
         Set<Node> nodes = nodeManager.getRequiredWorkerNodes();

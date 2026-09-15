@@ -15,10 +15,10 @@ package io.trino.plugin.hive.metastore.thrift;
 
 import io.trino.metastore.Database;
 import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.SchemaAlreadyExistsException;
 import io.trino.metastore.Table;
+import io.trino.metastore.TableAlreadyExistsException;
 import io.trino.plugin.base.util.AutoCloseableCloser;
-import io.trino.plugin.hive.SchemaAlreadyExistsException;
-import io.trino.plugin.hive.TableAlreadyExistsException;
 import io.trino.plugin.hive.containers.HiveHadoop;
 import io.trino.plugin.hive.metastore.AbstractTestHiveMetastore;
 import org.junit.jupiter.api.AfterAll;
@@ -55,7 +55,7 @@ final class TestBridgingHiveMetastore
         HiveHadoop hiveHadoop = closer.register(HiveHadoop.builder().build());
         hiveHadoop.start();
 
-        MetastoreClientAdapterProvider metastoreClientAdapterProvider = delegate -> newProxy(ThriftMetastoreClient.class, (proxy, method, methodArgs) -> {
+        MetastoreClientAdapterProvider metastoreClientAdapterProvider = delegate -> newProxy(ThriftMetastoreClient.class, (_, method, methodArgs) -> {
             Object result;
             try {
                 result = method.invoke(delegate, methodArgs);

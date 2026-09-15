@@ -51,7 +51,8 @@ public class TestJoin
     @Test
     public void testCrossJoinEliminationWithOuterJoin()
     {
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 WITH
                   a AS (SELECT id FROM (VALUES (1)) AS t(id)),
                   b AS (SELECT id FROM (VALUES (1)) AS t(id)),
@@ -69,7 +70,8 @@ public class TestJoin
     @Test
     public void testSingleRowNonDeterministicSource()
     {
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 WITH data(id) AS (SELECT uuid())
                 SELECT COUNT(DISTINCT id)
                 FROM (VALUES 1, 2, 3, 4, 5, 6, 7, 8)
@@ -81,7 +83,8 @@ public class TestJoin
     @Test
     public void testJoinOnNan()
     {
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 WITH t(x) AS (VALUES nan())
                 SELECT * FROM t t1 JOIN t t2 ON NOT t1.x < t2.x
                 """))
@@ -95,10 +98,11 @@ public class TestJoin
         // The issue happens because ReorderJoins evaluates candidates for equality inference
         // based on one form of the join criteria (i.e., CAST(...) = CASE ... END)) and then
         // attempts to make reformulate the join criteria based on another form of the expression
-        // with the terms flipped (i.e., CASE ... END = CAST(...)). Because NullabilityAnalyzer.mayReturnNullOnNonNullInput
+        // with the terms flipped (i.e., CASE ... END = CAST(...)). Because IrExpressions.mayReturnNullOnNonNullInput
         // could return an inconsistent result for both forms, the expression ended being dropped
         // from the join clause.
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 WITH
                     t1 (id, v) as (
                         VALUES
@@ -119,7 +123,8 @@ public class TestJoin
     public void testAliasingOfNullCasts()
     {
         // Test for https://github.com/trinodb/trino/issues/13565
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 WITH t AS (
                     SELECT CAST(null AS varchar) AS x, CAST(null AS varchar) AS y
                     FROM (VALUES 1) t(a) JOIN (VALUES 1) u(a) USING (a))
@@ -135,7 +140,8 @@ public class TestJoin
     public void testInPredicateInJoinCriteria()
     {
         // IN with subquery containing column references
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 WITH
                     t(x, y) AS (VALUES (1, 10), (2, 20)),
                     u(x) AS (VALUES 1, 2),
@@ -284,7 +290,8 @@ public class TestJoin
     @Test
     public void testPredicateOverOuterJoin()
     {
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 SELECT 5
                 FROM (VALUES (1,'foo')) l(l1, l2)
                 LEFT JOIN (VALUES (2,'bar')) r(r1, r2)
@@ -293,7 +300,8 @@ public class TestJoin
                 """))
                 .matches("VALUES 5");
 
-        assertThat(assertions.query("""
+        assertThat(assertions.query(
+                """
                 SELECT 5
                 FROM (VALUES (2,'foo')) l(l1, l2)
                 RIGHT JOIN (VALUES (1,'bar')) r(r1, r2)
@@ -309,18 +317,18 @@ public class TestJoin
         assertThat(assertions.query(
                 """
                 WITH
-                	t(x,y) AS (
-                	    VALUES
+                    t(x,y) AS (
+                        VALUES
                             ('a', '1'),
                             ('b', 'x'),
                             (null, 'y')
-                	),
-                	u(x,y) AS (
-                	    VALUES
+                    ),
+                    u(x,y) AS (
+                        VALUES
                             ('a', '1'),
                             ('c', 'x'),
                             (null, 'y')
-                	)
+                    )
                 SELECT *
                 FROM t JOIN u ON t.x = u.x
                 WHERE CAST(t.y AS int) = 1
@@ -333,11 +341,71 @@ public class TestJoin
                     a(k, v) AS (VALUES if(random() >= 0, (1, CAST('10' AS varchar)))),
                     b(k, v) AS (VALUES if(random() >= 0, (1, CAST('foo' AS varchar)))),
                     t AS (
-                		SELECT k, CAST(v AS BIGINT) v1, v
-                		FROM a)
+                        SELECT k, CAST(v AS BIGINT) v1, v
+                        FROM a)
                 SELECT t.k, b.k
                 FROM t JOIN b ON t.k = b.k AND t.v1 = 10 AND t.v = b.v
                 """))
                 .returnsEmptyResult();
+    }
+
+    @Test
+    void testNullKeysInEquiJoin()
+    {
+        // Multi-column varchar keys route through DefaultPagesHash, whose equality codegen assumes non-null keys.
+        // EQUAL excludes rows with any null key.
+        assertThat(assertions.query(
+                """
+                SELECT *
+                FROM (VALUES ('a', 'x'), ('b', CAST(null AS varchar)), (CAST(null AS varchar), 'z')) t(a, b)
+                JOIN (VALUES ('a', 'x'), ('b', CAST(null AS varchar)), (CAST(null AS varchar), 'z')) u(a, b)
+                  ON t.a = u.a AND t.b = u.b
+                """))
+                .skippingTypesCheck()
+                .matches("VALUES ('a', 'x', 'a', 'x')");
+
+        // IS NOT DISTINCT FROM matches null to null and stays in the join filter, not the equi-join keys.
+        assertThat(assertions.query(
+                """
+                SELECT *
+                FROM (VALUES ('a', 'x'), ('b', CAST(null AS varchar)), (CAST(null AS varchar), 'z')) t(a, b)
+                JOIN (VALUES ('a', 'x'), ('b', CAST(null AS varchar)), (CAST(null AS varchar), 'z')) u(a, b)
+                  ON t.a IS NOT DISTINCT FROM u.a AND t.b IS NOT DISTINCT FROM u.b
+                """))
+                .skippingTypesCheck()
+                .matches("VALUES ('a', 'x', 'a', 'x'), ('b', null, 'b', null), (null, 'z', null, 'z')");
+    }
+
+    @Test
+    public void testCountOverOuterJoinWithEmptyInnerSide()
+    {
+        assertThat(assertions.query(
+                """
+                SELECT count(*)
+                FROM (VALUES 1) l(a)
+                LEFT JOIN (SELECT * FROM UNNEST(CAST(ARRAY[] AS array(integer)))) r(b) ON true
+                """))
+                .matches("VALUES BIGINT '1'");
+
+        assertThat(assertions.query(
+                """
+                SELECT count(*)
+                FROM (SELECT * FROM UNNEST(CAST(ARRAY[] AS array(integer)))) l(a)
+                RIGHT JOIN (VALUES 1) r(b) ON true
+                """))
+                .matches("VALUES BIGINT '1'");
+    }
+
+    @Test
+    public void testGroupedCountOverOuterJoinWithEmptyInnerSide()
+    {
+        assertThat(assertions.query(
+                """
+                SELECT a, count(*)
+                FROM (SELECT DISTINCT a FROM (VALUES 1, 2) t(a)) l
+                LEFT JOIN (SELECT * FROM UNNEST(CAST(ARRAY[] AS array(integer)))) r(b) ON true
+                GROUP BY a
+                """))
+                .matches("VALUES (1, BIGINT '1'), (2, BIGINT '1')");
     }
 }

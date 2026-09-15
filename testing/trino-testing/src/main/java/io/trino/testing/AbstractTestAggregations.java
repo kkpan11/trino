@@ -94,7 +94,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testAggregationPushdownThroughOuterJoinNotFiringInCorrelatedAggregatesLeftSide()
     {
-        assertQuery("SELECT max(x) FROM" +
+        assertQuery(
+                "SELECT max(x) FROM" +
                         "(SELECT * from (VALUES 1) t(x) LEFT JOIN (VALUES 1) t2(y) ON t.x = t2.y)" +
                         "GROUP BY x",
                 "VALUES 1");
@@ -103,7 +104,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testAggregationPushdownThroughOuterJoinNotFiringInCorrelatedAggregatesRightSide()
     {
-        assertQuery("SELECT max(y) FROM" +
+        assertQuery(
+                "SELECT max(y) FROM" +
                         "(SELECT * from (VALUES 1) t(x) LEFT JOIN (VALUES 1) t2(y) ON t.x = t2.y)" +
                         "GROUP BY y",
                 "VALUES 1");
@@ -117,8 +119,8 @@ public abstract class AbstractTestAggregations
     public void testAggregationUsingOuterTableSymbols()
     {
         assertQuery(
-                "SELECT max_by(n.nationkey, r.regionkey) FROM (SELECT DISTINCT regionkey FROM region) r LEFT JOIN nation n ON n.regionkey = r.regionkey GROUP BY r.regionkey",
-                "VALUES 16, 20, 21, 23, 24");
+                "SELECT max_by(r.regionkey, n.nationkey) FROM (SELECT DISTINCT regionkey FROM region) r LEFT JOIN nation n ON n.regionkey = r.regionkey GROUP BY r.regionkey",
+                "VALUES 0, 1, 2, 3, 4");
     }
 
     /**
@@ -337,11 +339,13 @@ public abstract class AbstractTestAggregations
     @Test
     public void testMultipleDifferentDistinctOverUnion()
     {
-        assertQuery("""
+        assertQuery(
+                """
                 SELECT custkey, COUNT(DISTINCT orderkey), COUNT(DISTINCT orderstatus)
                 FROM (SELECT orderkey, orderstatus, custkey FROM orders WHERE orderstatus = 'O'
                 UNION ALL SELECT orderkey, orderstatus, custkey FROM orders WHERE orderstatus = 'F')
-                GROUP BY custkey""");
+                GROUP BY custkey
+                """);
     }
 
     @Test
@@ -379,7 +383,7 @@ public abstract class AbstractTestAggregations
         assertQuery("SELECT orderstatus, COUNT(DISTINCT orderkey), COUNT(DISTINCT custkey), COUNT(DISTINCT totalprice), COUNT(custkey), SUM(totalprice) from orders group by orderstatus");
         assertQuery("SELECT orderstatus, COUNT(DISTINCT orderkey), COUNT(DISTINCT totalprice), SUM(totalprice) from orders group by orderstatus");
         assertQuery("SELECT orderstatus, orderpriority, COUNT(orderstatus), COUNT(DISTINCT orderpriority)," +
-                    " COUNT(DISTINCT orderkey), COUNT(DISTINCT totalprice), SUM(totalprice), MAX(custkey) from orders group by orderstatus, orderpriority");
+                " COUNT(DISTINCT orderkey), COUNT(DISTINCT totalprice), SUM(totalprice), MAX(custkey) from orders group by orderstatus, orderpriority");
     }
 
     // Make sure redundant NULL values are not passed to the aggregations which potentially could happen in GroupId based mixed distinct and non-distinct aggregation implementation
@@ -408,42 +412,42 @@ public abstract class AbstractTestAggregations
     {
         assertQuery(
                 "SELECT corr(DISTINCT x, y) FROM " +
-                "(VALUES " +
-                "   (1, 1)," +
-                "   (2, 2)," +
-                "   (2, 2)," +
-                "   (3, 3)" +
-                ") t(x, y)",
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
                 "VALUES (1.0)");
 
         assertQuery(
                 "SELECT corr(DISTINCT x, y), corr(DISTINCT y, x) FROM " +
-                "(VALUES " +
-                "   (1, 1)," +
-                "   (2, 2)," +
-                "   (2, 2)," +
-                "   (3, 3)" +
-                ") t(x, y)",
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
                 "VALUES (1.0, 1.0)");
 
         assertQuery(
                 "SELECT corr(DISTINCT x, y), corr(DISTINCT y, x), count(*) FROM " +
-                "(VALUES " +
-                "   (1, 1)," +
-                "   (2, 2)," +
-                "   (2, 2)," +
-                "   (3, 3)" +
-                ") t(x, y)",
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
                 "VALUES (1.0, 1.0, 4)");
 
         assertQuery(
                 "SELECT corr(DISTINCT x, y), corr(DISTINCT y, x), count(DISTINCT x) FROM " +
-                "(VALUES " +
-                "   (1, 1)," +
-                "   (2, 2)," +
-                "   (2, 2)," +
-                "   (3, 3)" +
-                ") t(x, y)",
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
                 "VALUES (1.0, 1.0, 3)");
     }
 
@@ -456,7 +460,8 @@ public abstract class AbstractTestAggregations
         assertQuery("SELECT count(*) FILTER (WHERE x > 1), sum(x) FROM (VALUES (1, 3), (2, 4), (2, 4), (4, 5)) t (x, y)", "SELECT 3, 9");
         assertQuery("SELECT count(*) FILTER (WHERE x > 1), count(DISTINCT y) FROM (VALUES (1, 10), (2, 10), (3, 10), (4, 20)) t (x, y)", "SELECT 3, 2");
 
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "SELECT sum(b) FILTER (WHERE true) " +
                         "FROM (SELECT count(*) FILTER (WHERE true) AS b)",
                 "SELECT 1");
@@ -471,7 +476,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testAggregationFilterWithSubquery()
     {
-        assertQuery("" +
+        assertQuery(
+                "" +
                         "WITH company AS (SELECT * FROM (VALUES (1, 10), (2, 20)) t(dep_id, salary)), " +
                         "department AS (SELECT 1 id) " +
                         "SELECT dep_id, sum(salary), sum(salary) FILTER (WHERE EXISTS (SELECT 1 FROM department WHERE department.id = company.dep_id)) " +
@@ -505,7 +511,8 @@ public abstract class AbstractTestAggregations
         // this should return one row since value is always 'value'
         // this test verifies that the two streams produced by the right join
         // are handled gathered for the aggregation operator
-        assertQueryOrdered("" +
+        assertQueryOrdered(
+                "" +
                         "SELECT\n" +
                         "  value\n" +
                         "FROM\n" +
@@ -1011,7 +1018,7 @@ public abstract class AbstractTestAggregations
     {
         MaterializedResult actual = computeActual("SELECT a, b, c FROM (VALUES ROW(nan(), 1, 2), ROW(nan(), 1, 2)) t(a, b, c) GROUP BY 1, 2, 3");
         List<MaterializedRow> actualRows = actual.getMaterializedRows();
-        assertThat(actualRows.size()).isEqualTo(1);
+        assertThat(actualRows).hasSize(1);
         assertThat(Double.isNaN((Double) actualRows.get(0).getField(0))).isTrue();
         assertThat(actualRows.get(0).getField(1)).isEqualTo(1);
         assertThat(actualRows.get(0).getField(2)).isEqualTo(2);
@@ -1022,7 +1029,7 @@ public abstract class AbstractTestAggregations
     {
         MaterializedResult actual = computeActual("SELECT a FROM (VALUES (ARRAY[nan(), 2e0, 3e0]), (ARRAY[nan(), 2e0, 3e0])) t(a) GROUP BY a");
         List<MaterializedRow> actualRows = actual.getMaterializedRows();
-        assertThat(actualRows.size()).isEqualTo(1);
+        assertThat(actualRows).hasSize(1);
         @SuppressWarnings("unchecked")
         List<Double> value = (List<Double>) actualRows.get(0).getField(0);
         assertThat(Double.isNaN(value.get(0))).isTrue();
@@ -1080,7 +1087,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupByEmptyGroupingSet()
     {
-        assertQuery("SELECT SUM(CAST(quantity AS BIGINT)) FROM lineitem GROUP BY ()",
+        assertQuery(
+                "SELECT SUM(CAST(quantity AS BIGINT)) FROM lineitem GROUP BY ()",
                 "SELECT SUM(CAST(quantity AS BIGINT)) FROM lineitem");
     }
 
@@ -1171,7 +1179,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetsWithMultipleDistinctNoInput()
     {
-        assertQuery("SELECT linenumber, suppkey, SUM(DISTINCT CAST(quantity AS BIGINT)), COUNT(DISTINCT linestatus) " +
+        assertQuery(
+                "SELECT linenumber, suppkey, SUM(DISTINCT CAST(quantity AS BIGINT)), COUNT(DISTINCT linestatus) " +
                         "FROM lineitem " +
                         "WHERE quantity < 0 " +
                         "GROUP BY GROUPING SETS ((linenumber, suppkey), (suppkey))",
@@ -1251,7 +1260,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetsOnlyGrandTotalSet()
     {
-        assertQuery("SELECT SUM(CAST(quantity AS BIGINT)) FROM lineitem GROUP BY GROUPING SETS (())",
+        assertQuery(
+                "SELECT SUM(CAST(quantity AS BIGINT)) FROM lineitem GROUP BY GROUPING SETS (())",
                 "SELECT SUM(CAST(quantity AS BIGINT)) FROM lineitem");
     }
 
@@ -1274,7 +1284,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetsAliasedGroupingColumns()
     {
-        assertQuery("SELECT lna, lnb, SUM(quantity) " +
+        assertQuery(
+                "SELECT lna, lnb, SUM(quantity) " +
                         "FROM (SELECT linenumber lna, linenumber lnb, CAST(quantity AS BIGINT) quantity FROM lineitem) " +
                         "GROUP BY GROUPING SETS ((lna, lnb), (lna), (lnb), ())",
                 "SELECT linenumber, linenumber, SUM(CAST(quantity AS BIGINT)) FROM lineitem GROUP BY linenumber UNION ALL " +
@@ -1302,7 +1313,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetSubsetAndPartitioning()
     {
-        assertQuery("SELECT COUNT_IF(x IS NULL) FROM (" +
+        assertQuery(
+                "SELECT COUNT_IF(x IS NULL) FROM (" +
                         "SELECT x, y, COUNT(z) FROM (SELECT CAST(lineitem.orderkey AS BIGINT) x, lineitem.linestatus y, SUM(lineitem.quantity) z FROM lineitem " +
                         "JOIN orders ON lineitem.orderkey = orders.orderkey GROUP BY 1, 2) GROUP BY GROUPING SETS ((x, y), ()))",
                 "SELECT 1");
@@ -1311,7 +1323,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetPredicatePushdown()
     {
-        assertQuery("SELECT * FROM (" +
+        assertQuery(
+                "SELECT * FROM (" +
                         "SELECT COALESCE(orderpriority, 'ALL'), COALESCE(shippriority, -1) sp FROM (" +
                         "SELECT orderpriority, shippriority, COUNT(1) FROM orders GROUP BY GROUPING SETS ((orderpriority), (shippriority)))) WHERE sp=-1",
                 "SELECT orderpriority, -1 FROM orders GROUP BY orderpriority");
@@ -1352,7 +1365,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetsWithSingleDistinctAndUnion()
     {
-        assertQuery("SELECT suppkey, COUNT(DISTINCT linenumber) FROM " +
+        assertQuery(
+                "SELECT suppkey, COUNT(DISTINCT linenumber) FROM " +
                         "(SELECT * FROM lineitem WHERE linenumber%2 = 0 UNION ALL SELECT * FROM lineitem WHERE linenumber%2 = 1) " +
                         "GROUP BY GROUPING SETS ((suppkey), ())",
                 "SELECT suppkey, COUNT(DISTINCT linenumber) FROM lineitem GROUP BY suppkey UNION ALL " +
@@ -1362,7 +1376,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetsWithSingleDistinctAndUnionGroupedArguments()
     {
-        assertQuery("SELECT linenumber, COUNT(DISTINCT linenumber) FROM " +
+        assertQuery(
+                "SELECT linenumber, COUNT(DISTINCT linenumber) FROM " +
                         "(SELECT * FROM lineitem WHERE linenumber%2 = 0 UNION ALL SELECT * FROM lineitem WHERE linenumber%2 = 1) " +
                         "GROUP BY GROUPING SETS ((linenumber), ())",
                 "SELECT DISTINCT linenumber, 1 FROM lineitem UNION ALL " +
@@ -1372,7 +1387,8 @@ public abstract class AbstractTestAggregations
     @Test
     public void testGroupingSetsWithMultipleDistinctAndUnion()
     {
-        assertQuery("SELECT linenumber, COUNT(DISTINCT linenumber), SUM(DISTINCT suppkey) FROM " +
+        assertQuery(
+                "SELECT linenumber, COUNT(DISTINCT linenumber), SUM(DISTINCT suppkey) FROM " +
                         "(SELECT * FROM lineitem WHERE linenumber%2 = 0 UNION ALL SELECT * FROM lineitem WHERE linenumber%2 = 1) " +
                         "GROUP BY GROUPING SETS ((linenumber), ())",
                 "SELECT linenumber, 1, SUM(DISTINCT suppkey) FROM lineitem GROUP BY linenumber UNION ALL " +
@@ -1490,38 +1506,74 @@ public abstract class AbstractTestAggregations
     @Test
     public void testApproxMostFrequentWithLongGroupBy()
     {
-        MaterializedResult actual1 = computeActual("SELECT k, approx_most_frequent(3, cast(v as bigint), 15) FROM (values ('a', 1), ('b', 2), ('a', 1), ('c', 3), ('a', 1), ('b', 2), ('c', 3), ('a', 4), ('b', 5)) t(k, v) GROUP BY 1 ORDER BY 1");
-        assertThat(actual1.getRowCount()).isEqualTo(3);
-        assertThat(actual1.getMaterializedRows().get(0).getFields().get(0)).isEqualTo("a");
-        assertThat(actual1.getMaterializedRows().get(0).getFields().get(1)).isEqualTo(ImmutableMap.of(1L, 3L, 4L, 1L));
-        assertThat(actual1.getMaterializedRows().get(1).getFields().get(0)).isEqualTo("b");
-        assertThat(actual1.getMaterializedRows().get(1).getFields().get(1)).isEqualTo(ImmutableMap.of(2L, 2L, 5L, 1L));
-        assertThat(actual1.getMaterializedRows().get(2).getFields().get(0)).isEqualTo("c");
-        assertThat(actual1.getMaterializedRows().get(2).getFields().get(1)).isEqualTo(ImmutableMap.of(3L, 2L));
+        MaterializedResult actual = computeActual("SELECT k, approx_most_frequent(3, cast(v as bigint), 15) FROM (values ('a', 1), ('b', 2), ('a', 1), ('c', 3), ('a', 1), ('b', 2), ('c', 3), ('a', 4), ('b', 5)) t(k, v) GROUP BY 1 ORDER BY 1");
+        assertThat(actual.getRowCount()).isEqualTo(3);
+        assertThat(actual.getMaterializedRows().get(0).getFields().get(0)).isEqualTo("a");
+        assertThat(actual.getMaterializedRows().get(0).getFields().get(1)).isEqualTo(ImmutableMap.of(1L, 3L, 4L, 1L));
+        assertThat(actual.getMaterializedRows().get(1).getFields().get(0)).isEqualTo("b");
+        assertThat(actual.getMaterializedRows().get(1).getFields().get(1)).isEqualTo(ImmutableMap.of(2L, 2L, 5L, 1L));
+        assertThat(actual.getMaterializedRows().get(2).getFields().get(0)).isEqualTo("c");
+        assertThat(actual.getMaterializedRows().get(2).getFields().get(1)).isEqualTo(ImmutableMap.of(3L, 2L));
     }
 
     @Test
     public void testApproxMostFrequentWithStringGroupBy()
     {
-        MaterializedResult actual1 = computeActual("SELECT k, approx_most_frequent(3, v, 15) FROM (values ('a', 'A'), ('b', 'B'), ('a', 'A'), ('c', 'C'), ('a', 'A'), ('b', 'B'), ('c', 'C'), ('a', 'D'), ('b', 'E')) t(k, v) GROUP BY 1 ORDER BY 1");
-        assertThat(actual1.getRowCount()).isEqualTo(3);
-        assertThat(actual1.getMaterializedRows().get(0).getFields().get(0)).isEqualTo("a");
-        assertThat(actual1.getMaterializedRows().get(0).getFields().get(1)).isEqualTo(ImmutableMap.of("A", 3L, "D", 1L));
-        assertThat(actual1.getMaterializedRows().get(1).getFields().get(0)).isEqualTo("b");
-        assertThat(actual1.getMaterializedRows().get(1).getFields().get(1)).isEqualTo(ImmutableMap.of("B", 2L, "E", 1L));
-        assertThat(actual1.getMaterializedRows().get(2).getFields().get(0)).isEqualTo("c");
-        assertThat(actual1.getMaterializedRows().get(2).getFields().get(1)).isEqualTo(ImmutableMap.of("C", 2L));
+        MaterializedResult actual = computeActual("SELECT k, approx_most_frequent(3, v, 15) FROM (values ('a', 'A'), ('b', 'B'), ('a', 'A'), ('c', 'C'), ('a', 'A'), ('b', 'B'), ('c', 'C'), ('a', 'D'), ('b', 'E')) t(k, v) GROUP BY 1 ORDER BY 1");
+        assertThat(actual.getRowCount()).isEqualTo(3);
+        assertThat(actual.getMaterializedRows().get(0).getFields().get(0)).isEqualTo("a");
+        assertThat(actual.getMaterializedRows().get(0).getFields().get(1)).isEqualTo(ImmutableMap.of("A", 3L, "D", 1L));
+        assertThat(actual.getMaterializedRows().get(1).getFields().get(0)).isEqualTo("b");
+        assertThat(actual.getMaterializedRows().get(1).getFields().get(1)).isEqualTo(ImmutableMap.of("B", 2L, "E", 1L));
+        assertThat(actual.getMaterializedRows().get(2).getFields().get(0)).isEqualTo("c");
+        assertThat(actual.getMaterializedRows().get(2).getFields().get(1)).isEqualTo(ImmutableMap.of("C", 2L));
     }
 
     @Test
     public void testLongDecimalAggregations()
     {
-        assertQuery("""
+        assertQuery(
+                """
                 SELECT avg(value_big), sum(value_big), avg(value_small), sum(value_small)
                 FROM (
                     SELECT orderkey as id, CAST(power(2, 65) as DECIMAL(38, 0)) as value_big, CAST(1 as DECIMAL(38, 0)) as value_small
                     FROM orders
                     LIMIT 10)
-                GROUP BY id""");
+                GROUP BY id
+                """);
+    }
+
+    @Test
+    public void testSumDecimalOverflow()
+    {
+        // max DECIMAL(38,0)
+        assertThat(query("SELECT sum(v) FROM (VALUES (DECIMAL '99999999999999999999999999999999999999'), (DECIMAL '99999999999999999999999999999999999999')) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
+        assertThat(query("SELECT sum(v) FROM (VALUES (DECIMAL '-99999999999999999999999999999999999999'), (DECIMAL '-99999999999999999999999999999999999999')) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
+        // max DECIMAL(38,10)
+        assertThat(query("SELECT sum(v) FROM (VALUES (DECIMAL '9999999999999999999999999999.9999999999'), (DECIMAL '9999999999999999999999999999.9999999999')) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
+        assertThat(query("SELECT sum(v) FROM (VALUES (DECIMAL '-9999999999999999999999999999.9999999999'), (DECIMAL '-9999999999999999999999999999.9999999999')) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
+
+        // Overflow after adding couple values
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '45000000000000000000000000000000000000' FROM (VALUES 1, 2) t(x)) t(v)"))
+                .matches("VALUES DECIMAL '90000000000000000000000000000000000000'");
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '45000000000000000000000000000000000000' FROM (VALUES 1, 2, 3, 4) t(x)) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '-45000000000000000000000000000000000000' FROM (VALUES 1, 2) t(x)) t(v)"))
+                .matches("VALUES DECIMAL '-90000000000000000000000000000000000000'");
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '-45000000000000000000000000000000000000' FROM (VALUES 1, 2, 3, 4) t(x)) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
+        // same with non-zero scale: DECIMAL(38,10)
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '4500000000000000000000000000.0000000000' FROM (VALUES 1, 2) t(x)) t(v)"))
+                .matches("VALUES DECIMAL '9000000000000000000000000000.0000000000'");
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '4500000000000000000000000000.0000000000' FROM (VALUES 1, 2, 3, 4) t(x)) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '-4500000000000000000000000000.0000000000' FROM (VALUES 1, 2) t(x)) t(v)"))
+                .matches("VALUES DECIMAL '-9000000000000000000000000000.0000000000'");
+        assertThat(query("SELECT sum(v) FROM (SELECT DECIMAL '-4500000000000000000000000000.0000000000' FROM (VALUES 1, 2, 3, 4) t(x)) t(v)"))
+                .failure().hasMessageContaining("Decimal overflow");
     }
 }

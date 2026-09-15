@@ -13,33 +13,51 @@
  */
 package io.trino.plugin.hive.metastore.glue;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.Multiset;
+import com.google.common.collect.Sets;
 import io.airlift.log.Logger;
 import io.trino.Session;
+import io.trino.filesystem.FileIterator;
+import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.filesystem.TrinoInput;
+import io.trino.filesystem.TrinoInputFile;
+import io.trino.plugin.hive.FlociS3AndGlue;
 import io.trino.plugin.hive.HiveQueryRunner;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableMultiset.toImmutableMultiset;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.plugin.hive.TestingHiveUtils.getConnectorService;
+import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.BATCH_UPDATE_PARTITION;
+import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.CREATE_PARTITIONS;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.CREATE_TABLE;
+import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.DELETE_COLUMN_STATISTICS_FOR_PARTITION;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.DELETE_COLUMN_STATISTICS_FOR_TABLE;
+import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_COLUMN_STATISTICS_FOR_PARTITION;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_COLUMN_STATISTICS_FOR_TABLE;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_DATABASE;
+import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_PARTITION;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_PARTITIONS;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_PARTITION_NAMES;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_TABLE;
@@ -49,6 +67,8 @@ import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.UPDATE_TAB
 import static io.trino.testing.MultisetAssertions.assertMultisetsEqual;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static java.lang.Math.toIntExact;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
@@ -62,29 +82,111 @@ public class TestHiveGlueMetastoreAccessOperations
     private final String testSchema = "test_schema_" + randomNameSuffix();
 
     private GlueMetastoreStats glueStats;
+    private String schemaLocation;
 
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
+        FlociS3AndGlue floci = closeAfterClass(new FlociS3AndGlue());
+        String bucketName = "test-hive-glue-access-operations-" + randomNameSuffix();
+        floci.createBucket(bucketName);
+        schemaLocation = "s3://%s/%s".formatted(bucketName, testSchema);
+
         DistributedQueryRunner queryRunner = HiveQueryRunner.builder(testSessionBuilder()
                         .setCatalog("hive")
                         .setSchema(testSchema)
                         .build())
                 .addHiveProperty("hive.metastore", "glue")
-                .addHiveProperty("hive.metastore.glue.default-warehouse-dir", "local:///glue")
+                .addHiveProperty("hive.metastore.glue.default-warehouse-dir", "s3://%s/".formatted(bucketName))
                 .addHiveProperty("hive.security", "allow-all")
+                .addHiveProperty("fs.s3.enabled", "true")
+                .addHiveProperties(floci.s3AndGlueProperties())
                 .setCreateTpchSchemas(false)
                 .build();
-        queryRunner.execute("CREATE SCHEMA " + testSchema);
+        queryRunner.execute("CREATE SCHEMA " + testSchema + " WITH (location = '" + schemaLocation + "')");
         glueStats = getConnectorService(queryRunner, GlueHiveMetastore.class).getStats();
         return queryRunner;
     }
 
-    @AfterAll
-    public void cleanUpSchema()
+    @Test
+    void testInsertOverwriteStatisticsDisabled()
     {
-        getQueryRunner().execute("DROP SCHEMA " + testSchema + " CASCADE");
+        String tableName = "test_insert_overwrite_" + randomNameSuffix();
+
+        try {
+            assertUpdate("CREATE TABLE " + tableName + " (id INT, part INT) WITH (partitioned_by = ARRAY['part'])");
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, 1), (2, 1)", 2);
+
+            Session insertOverwriteSession = Session.builder(getQueryRunner().getDefaultSession())
+                    .setCatalogSessionProperty("hive", "insert_existing_partitions_behavior", "OVERWRITE")
+                    .setCatalogSessionProperty("hive", "collect_column_statistics_on_write", "false")
+                    .setCatalogSessionProperty("hive", "statistics_enabled", "false")
+                    .build();
+            assertInvocations(
+                    insertOverwriteSession,
+                    "INSERT INTO " + tableName + " VALUES (3, 1)",
+                    ImmutableMultiset.<GlueMetastoreMethod>builder()
+                            .add(DELETE_COLUMN_STATISTICS_FOR_PARTITION)
+                            .add(GET_COLUMN_STATISTICS_FOR_PARTITION)
+                            .add(BATCH_UPDATE_PARTITION)
+                            .addCopies(GET_PARTITIONS, 2)
+                            .add(GET_TABLE)
+                            .build(),
+                    // We can't disable partition cache in glue v2, see GlueMetastoreModule#createGlueCache
+                    // there is maybe 1 time additional call for the GET_PARTITION
+                    ImmutableMultiset.<GlueMetastoreMethod>builder()
+                            .add(GET_PARTITION)
+                            .build());
+            assertQuery("SELECT * FROM " + tableName, "VALUES (3, 1)");
+        }
+        finally {
+            getQueryRunner().execute("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    void testSyncPartitionMetadataProcedure()
+            throws IOException
+    {
+        String tableName = "test_sync_partition_metadata_" + randomNameSuffix();
+        try {
+            assertUpdate("CREATE TABLE " + tableName + " (id INT, part INT) WITH (partitioned_by = ARRAY['part'])");
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, 1)", 1);
+            Location tableLocation = Location.of("%s/%s".formatted(schemaLocation, tableName));
+            Location sourcePartitionLocation = tableLocation.appendPath("part=1");
+            TrinoFileSystem fileSystem = getConnectorService(getQueryRunner(), TrinoFileSystemFactory.class)
+                    .create(ConnectorIdentity.ofUser("test"));
+            FileIterator files = fileSystem.listFiles(sourcePartitionLocation);
+            ImmutableList.Builder<Location> sourceFiles = ImmutableList.builder();
+            while (files.hasNext()) {
+                sourceFiles.add(files.next().location());
+            }
+            Location sourceFile = getOnlyElement(sourceFiles.build());
+
+            // prepare partition to sync
+            TrinoInputFile sourceInput = fileSystem.newInputFile(sourceFile);
+            byte[] data;
+            try (TrinoInput input = sourceInput.newInput()) {
+                data = input.readFully(0, toIntExact(sourceInput.length())).byteArray();
+            }
+            fileSystem.newOutputFile(tableLocation.appendPath("part=2").appendPath("data"))
+                    .createOrOverwrite(data);
+
+            // the sync_partition_metadata doesn't call UPDATE_COLUMN_STATISTICS_FOR_PARTITION
+            assertInvocations("CALL system.sync_partition_metadata('%s', '%s', 'FULL')".formatted(testSchema, tableName),
+                    ImmutableMultiset.<GlueMetastoreMethod>builder()
+                            .add(GET_TABLE)
+                            .add(CREATE_PARTITIONS)
+                            .addCopies(GET_PARTITION_NAMES, 5)
+                            .build());
+
+            // the partition is successfully synced
+            assertQuery("SELECT * FROM " + tableName + " WHERE part = 2", "VALUES (1, 2)");
+        }
+        finally {
+            getQueryRunner().execute("DROP TABLE IF EXISTS " + tableName);
+        }
     }
 
     @Test
@@ -178,10 +280,10 @@ public class TestHiveGlueMetastoreAccessOperations
         try {
             assertUpdate(
                     """
-                            CREATE TABLE test_select_from_partitioned_where WITH (partitioned_by = ARRAY['regionkey']) AS
-                            SELECT nationkey, name, regionkey FROM tpch.tiny.nation
-                            UNION ALL SELECT nationkey, name, regionkey + 10 AS regionkey FROM tpch.tiny.nation
-                            """,
+                    CREATE TABLE test_select_from_partitioned_where WITH (partitioned_by = ARRAY['regionkey']) AS
+                    SELECT nationkey, name, regionkey FROM tpch.tiny.nation
+                    UNION ALL SELECT nationkey, name, regionkey + 10 AS regionkey FROM tpch.tiny.nation
+                    """,
                     50);
 
             assertInvocations("SELECT * FROM test_select_from_partitioned_where WHERE regionkey IN (2, 3)",
@@ -321,10 +423,10 @@ public class TestHiveGlueMetastoreAccessOperations
         try {
             assertUpdate(
                     """
-                            CREATE TABLE test_select_system_table WITH (partitioned_by = ARRAY['regionkey']) AS
-                            SELECT nationkey, name, regionkey FROM tpch.tiny.nation
-                            UNION ALL SELECT nationkey, name, regionkey + 10 AS regionkey FROM tpch.tiny.nation
-                            """,
+                    CREATE TABLE test_select_system_table WITH (partitioned_by = ARRAY['regionkey']) AS
+                    SELECT nationkey, name, regionkey FROM tpch.tiny.nation
+                    UNION ALL SELECT nationkey, name, regionkey + 10 AS regionkey FROM tpch.tiny.nation
+                    """,
                     50);
 
             // select from $partitions
@@ -492,6 +594,27 @@ public class TestHiveGlueMetastoreAccessOperations
 
     private void assertInvocations(Session session, @Language("SQL") String query, Multiset<GlueMetastoreMethod> expectedGlueInvocations)
     {
+        assertMultisetsEqual(getActualInvocations(session, query), expectedGlueInvocations);
+    }
+
+    private void assertInvocations(
+            Session session,
+            @Language("SQL") String query,
+            Multiset<GlueMetastoreMethod> determinedExpectedGlueInvocations,
+            Multiset<GlueMetastoreMethod> possibleExpectedGlueInvocations)
+    {
+        Multiset<GlueMetastoreMethod> actualInvocations = getActualInvocations(session, query);
+        if (!mismatchMultisets(determinedExpectedGlueInvocations, actualInvocations).isEmpty()) {
+            Multiset<GlueMetastoreMethod> expectedGlueInvocations = ImmutableMultiset.<GlueMetastoreMethod>builder()
+                    .addAll(determinedExpectedGlueInvocations)
+                    .addAll(possibleExpectedGlueInvocations)
+                    .build();
+            assertMultisetsEqual(expectedGlueInvocations, actualInvocations);
+        }
+    }
+
+    private Multiset<GlueMetastoreMethod> getActualInvocations(Session session, @Language("SQL") String query)
+    {
         Map<GlueMetastoreMethod, Integer> countsBefore = Arrays.stream(GlueMetastoreMethod.values())
                 .collect(toImmutableMap(Function.identity(), method -> method.getInvocationCount(glueStats)));
 
@@ -500,9 +623,29 @@ public class TestHiveGlueMetastoreAccessOperations
         Map<GlueMetastoreMethod, Integer> countsAfter = Arrays.stream(GlueMetastoreMethod.values())
                 .collect(toImmutableMap(Function.identity(), method -> method.getInvocationCount(glueStats)));
 
-        Multiset<GlueMetastoreMethod> actualGlueInvocations = Arrays.stream(GlueMetastoreMethod.values())
+        return Arrays.stream(GlueMetastoreMethod.values())
                 .collect(toImmutableMultiset(Function.identity(), method -> requireNonNull(countsAfter.get(method)) - requireNonNull(countsBefore.get(method))));
+    }
 
-        assertMultisetsEqual(actualGlueInvocations, expectedGlueInvocations);
+    private static List<String> mismatchMultisets(Multiset<?> actual, Multiset<?> expected)
+    {
+        if (expected.equals(actual)) {
+            return ImmutableList.of();
+        }
+
+        return Sets.union(expected.elementSet(), actual.elementSet()).stream()
+                .filter(key -> expected.count(key) != actual.count(key))
+                .flatMap(key -> {
+                    int expectedCount = expected.count(key);
+                    int actualCount = actual.count(key);
+                    if (actualCount < expectedCount) {
+                        return Stream.of(format("%s more occurrences of %s", expectedCount - actualCount, key));
+                    }
+                    if (actualCount > expectedCount) {
+                        return Stream.of(format("%s fewer occurrences of %s", actualCount - expectedCount, key));
+                    }
+                    return Stream.of();
+                })
+                .collect(toImmutableList());
     }
 }

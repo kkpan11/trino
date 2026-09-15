@@ -56,6 +56,7 @@ import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static io.trino.testing.TestingNames.randomNameSuffix;
+import static io.trino.type.JsonType.JSON;
 import static java.lang.String.format;
 import static java.time.ZoneOffset.UTC;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -69,7 +70,7 @@ public abstract class BaseSqlServerTypeMapping
         extends AbstractTestQueryFramework
 {
     private final ZoneId jvmZone = ZoneId.systemDefault();
-    private final LocalDateTime timeGapInJvmZone1 = LocalDateTime.of(1970, 1, 1, 0, 13, 42);
+    private final LocalDateTime timeGapInJvmZone1 = LocalDateTime.of(1932, 4, 1, 0, 13, 42);
     private final LocalDateTime timeGapInJvmZone2 = LocalDateTime.of(2018, 4, 1, 2, 13, 55, 123_000_000);
     private final LocalDateTime timeDoubledInJvmZone = LocalDateTime.of(2018, 10, 28, 1, 33, 17, 456_000_000);
 
@@ -88,7 +89,7 @@ public abstract class BaseSqlServerTypeMapping
     public void setUp()
     {
         checkState(jvmZone.getId().equals("America/Bahia_Banderas"), "This test assumes certain JVM time zone");
-        LocalDate dateOfLocalTimeChangeForwardAtMidnightInJvmZone = LocalDate.of(1970, 1, 1);
+        LocalDate dateOfLocalTimeChangeForwardAtMidnightInJvmZone = LocalDate.of(1932, 4, 1);
         checkIsGap(jvmZone, dateOfLocalTimeChangeForwardAtMidnightInJvmZone.atStartOfDay());
         checkIsGap(jvmZone, timeGapInJvmZone1);
         checkIsGap(jvmZone, timeGapInJvmZone2);
@@ -900,84 +901,124 @@ public abstract class BaseSqlServerTypeMapping
                     .isFullyPushedDown();
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 <= TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00')
+                            """)
                     .isNotFullyPushedDown(tableScan(table.getName()));
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 >= TIMESTAMP '1583-01-01 00:00:00+00:00'"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1583-01-01 00:00:00+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1583-01-01 00:00:00+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')
+                            """)
                     .isFullyPushedDown();
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 IN (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00', TIMESTAMP '1583-01-01 00:00:00+00:00')"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00+00:00')
+                            """)
                     .isNotFullyPushedDown(tableScan(table.getName()));
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 IN (TIMESTAMP '1583-01-01 00:00:00+00:00', TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1583-01-01 00:00:00+00:00'),
-                                    (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1583-01-01 00:00:00+00:00'),
+                                   (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')
+                            """)
                     .isFullyPushedDown();
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 NOT IN (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00', TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')
+                            """)
                     .isNotFullyPushedDown(tableScan(table.getName()));
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 NOT IN (TIMESTAMP '1583-01-01 00:00:00+00:00', TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')
+                            """)
                     .isNotFullyPushedDown(tableScan(table.getName()));
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 BETWEEN TIMESTAMP '1582-12-31 23:59:59.9999999+00:00' AND TIMESTAMP '1600-01-01 00:00:00.1234567+00:00'"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')
+                            """)
                     .isNotFullyPushedDown(tableScan(table.getName()));
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 BETWEEN TIMESTAMP '1583-01-01 00:00:00+00:00' AND TIMESTAMP '1600-01-01 00:00:00.1234567+00:00'"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1583-01-01 00:00:00+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1583-01-01 00:00:00+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00')
+                            """)
                     .isFullyPushedDown();
 
             assertThat(query("SELECT * FROM " + table.getName() + " WHERE col0 <= TIMESTAMP '1990-01-01 00:00:00+00:00'"))
-                    .matches("""
-                             VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00+00:00'),
-                                    (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
-                                    (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')""")
+                    .matches(
+                            """
+                            VALUES (TIMESTAMP '1400-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1500-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1582-12-31 23:59:59.9999999+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00+00:00'),
+                                   (TIMESTAMP '1583-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1600-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1700-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1800-01-01 00:00:00.1234567+00:00'),
+                                   (TIMESTAMP '1900-01-01 00:00:00.1234567+00:00')
+                            """)
                     .isNotFullyPushedDown(tableScan(table.getName()));
         }
+    }
+
+    @Test
+    public void testJson()
+    {
+        // Conforms to RFC 4627, so not scalar values, but only objects and arrays.
+        SqlDataTypeTest.create()
+                .addRoundTrip("json", "NULL", JSON, "CAST(NULL AS JSON)")
+                .addRoundTrip("json", "JSON '{}'", JSON, "JSON '{}'")
+                .addRoundTrip("json", "JSON '{\"a\":1,\"b\":2}'", JSON, "JSON '{\"a\":1,\"b\":2}'")
+                .addRoundTrip("json", "JSON '{\"a\":[1,2,3],\"b\":{\"aa\":11,\"bb\":[{\"a\":1,\"b\":2},{\"a\":0}]}}'", JSON, "JSON '{\"a\":[1,2,3],\"b\":{\"aa\":11,\"bb\":[{\"a\":1,\"b\":2},{\"a\":0}]}}'")
+                .addRoundTrip("json", "JSON '[]'", JSON, "JSON '[]'")
+                .execute(getQueryRunner(), sqlServerCreateAndTrinoInsert("test_json"));
+
+        SqlDataTypeTest.create()
+                .addRoundTrip("json", "NULL", JSON, "CAST(NULL AS JSON)")
+                .addRoundTrip("json", "JSON '{}'", JSON, "JSON '{}'")
+                .addRoundTrip("json", "JSON '{\"a\":1,\"b\":2}'", JSON, "JSON '{\"a\":1,\"b\":2}'")
+                .addRoundTrip("json", "JSON '{\"a\":[1,2,3],\"b\":{\"aa\":11,\"bb\":[{\"a\":1,\"b\":2},{\"a\":0}]}}'", JSON, "JSON '{\"a\":[1,2,3],\"b\":{\"aa\":11,\"bb\":[{\"a\":1,\"b\":2},{\"a\":0}]}}'")
+                .addRoundTrip("json", "JSON '[]'", JSON, "JSON '[]'")
+                .execute(getQueryRunner(), trinoCreateAsSelect("test_json"))
+                .execute(getQueryRunner(), trinoCreateAndInsert("test_json"));
     }
 
     protected DataSetup trinoCreateAsSelect(String tableNamePrefix)

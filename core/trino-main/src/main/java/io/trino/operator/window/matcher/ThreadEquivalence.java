@@ -228,24 +228,19 @@ public class ThreadEquivalence
         Set<Integer> reachableLabels = new HashSet<>();
         Instruction instruction = program.at(instructionIndex);
         switch (instruction.type()) {
-            case MATCH_LABEL:
+            case MATCH_LABEL -> {
                 reachableLabels.addAll(reachableLabels(program, instructionIndex + 1, visited));
                 reachableLabels.add(((MatchLabel) instruction).getLabel());
-                break;
-            case JUMP:
-                reachableLabels.addAll(reachableLabels(program, ((Jump) instruction).getTarget(), visited));
-                break;
-            case SPLIT:
+            }
+            case JUMP -> reachableLabels.addAll(reachableLabels(program, ((Jump) instruction).getTarget(), visited));
+            case SPLIT -> {
                 reachableLabels.addAll(reachableLabels(program, ((Split) instruction).getFirst(), visited));
                 reachableLabels.addAll(reachableLabels(program, ((Split) instruction).getSecond(), visited));
-                break;
-            case MATCH_START:
-            case MATCH_END:
-            case SAVE:
-                reachableLabels.addAll(reachableLabels(program, instructionIndex + 1, visited));
-                break;
-            case DONE:
+            }
+            case MATCH_START, MATCH_END, SAVE -> reachableLabels.addAll(reachableLabels(program, instructionIndex + 1, visited));
+            case DONE -> {
                 // no reachable labels
+            }
         }
 
         return reachableLabels;
@@ -290,8 +285,8 @@ public class ThreadEquivalence
             ImmutableList.Builder<Integer> noClassifierAggregationIndexes = ImmutableList.builder();
             ImmutableList.Builder<Integer> classifierAggregationIndexes = ImmutableList.builder();
             for (PhysicalValueAccessor pointer : pointerList) {
-                if (pointer instanceof MatchAggregationPointer) {
-                    int aggregationIndex = ((MatchAggregationPointer) pointer).getIndex();
+                if (pointer instanceof MatchAggregationPointer matchAggregationPointer) {
+                    int aggregationIndex = matchAggregationPointer.getIndex();
                     MatchAggregationLabelDependency labelDependency = labelDependencies.get(aggregationIndex);
                     if (!labelDependency.isClassifierInvolved() || labelDependency.getLabels().size() == 1) {
                         foundNoClassifierAggregations = true;

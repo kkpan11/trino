@@ -14,7 +14,7 @@
 package io.trino.execution.scheduler;
 
 import com.google.common.collect.SetMultimap;
-import io.trino.metadata.InternalNode;
+import io.trino.node.InternalNode;
 import io.trino.spi.HostAddress;
 
 import java.net.InetAddress;
@@ -27,7 +27,8 @@ public class NodeMap
     private final SetMultimap<NetworkLocation, InternalNode> workersByNetworkPath;
     private final Set<String> coordinatorNodeIds;
 
-    public NodeMap(SetMultimap<HostAddress, InternalNode> nodesByHostAndPort,
+    public NodeMap(
+            SetMultimap<HostAddress, InternalNode> nodesByHostAndPort,
             SetMultimap<InetAddress, InternalNode> nodesByHost,
             SetMultimap<NetworkLocation, InternalNode> workersByNetworkPath,
             Set<String> coordinatorNodeIds)

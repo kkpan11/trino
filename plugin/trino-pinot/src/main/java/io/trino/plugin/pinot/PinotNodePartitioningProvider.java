@@ -44,9 +44,10 @@ public class PinotNodePartitioningProvider
     public ToIntFunction<ConnectorSplit> getSplitBucketFunction(
             ConnectorTransactionHandle transactionHandle,
             ConnectorSession session,
-            ConnectorPartitioningHandle partitioningHandle)
+            ConnectorPartitioningHandle partitioningHandle,
+            int bucketCount)
     {
-        return value -> 0;
+        return _ -> 0;
     }
 
     @Override

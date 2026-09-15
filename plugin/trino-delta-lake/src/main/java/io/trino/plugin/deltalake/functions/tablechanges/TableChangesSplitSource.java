@@ -16,7 +16,8 @@ package io.trino.plugin.deltalake.functions.tablechanges;
 import com.google.common.collect.ImmutableList;
 import io.trino.filesystem.Locations;
 import io.trino.filesystem.TrinoFileSystem;
-import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.deltalake.DeltaLakeFileSystemFactory;
+import io.trino.plugin.deltalake.DeltaLakeTableCredentials;
 import io.trino.plugin.deltalake.transactionlog.AddFileEntry;
 import io.trino.plugin.deltalake.transactionlog.CdcEntry;
 import io.trino.plugin.deltalake.transactionlog.CommitInfoEntry;
@@ -25,6 +26,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
+import io.trino.spi.connector.DynamicFilterSnapshot;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -39,11 +41,13 @@ import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.plugin.deltalake.DeltaLakeConfig.DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_BAD_DATA;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_FILESYSTEM_ERROR;
 import static io.trino.plugin.deltalake.functions.tablechanges.TableChangesFileType.CDF_FILE;
 import static io.trino.plugin.deltalake.functions.tablechanges.TableChangesFileType.DATA_FILE;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogDir;
+import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogJsonEntryPath;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.TransactionLogTail.getEntriesFromJson;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static java.lang.String.format;
@@ -56,15 +60,16 @@ public class TableChangesSplitSource
 
     public TableChangesSplitSource(
             ConnectorSession session,
-            TrinoFileSystemFactory fileSystemFactory,
-            TableChangesTableFunctionHandle functionHandle)
+            DeltaLakeFileSystemFactory fileSystemFactory,
+            TableChangesTableFunctionHandle functionHandle,
+            Optional<DeltaLakeTableCredentials> tableCredentials)
     {
         tableLocation = functionHandle.tableLocation();
         splits = prepareSplits(
                 functionHandle.firstReadVersion(),
                 functionHandle.tableReadVersion(),
                 getTransactionLogDir(functionHandle.tableLocation()),
-                fileSystemFactory.create(session))
+                fileSystemFactory.create(session, tableCredentials))
                 .iterator();
     }
 
@@ -74,11 +79,9 @@ public class TableChangesSplitSource
                 .boxed()
                 .flatMap(version -> {
                     try {
-                        List<DeltaLakeTransactionLogEntry> entries = getEntriesFromJson(version, transactionLogDir, fileSystem)
-                                .orElseThrow(() -> new TrinoException(DELTA_LAKE_BAD_DATA, "Delta Lake log entries are missing for version " + version));
-                        if (entries.isEmpty()) {
-                            return ImmutableList.<ConnectorSplit>of().stream();
-                        }
+                        List<DeltaLakeTransactionLogEntry> entries = getEntriesFromJson(version, fileSystem.newInputFile(getTransactionLogJsonEntryPath(transactionLogDir, version)), DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE)
+                                .orElseThrow(() -> new TrinoException(DELTA_LAKE_BAD_DATA, "Delta Lake log entries are missing for version " + version))
+                                .getEntriesList(fileSystem);
                         List<CommitInfoEntry> commitInfoEntries = entries.stream()
                                 .map(DeltaLakeTransactionLogEntry::getCommitInfo)
                                 .filter(Objects::nonNull)
@@ -132,7 +135,7 @@ public class TableChangesSplitSource
     }
 
     @Override
-    public CompletableFuture<ConnectorSplitBatch> getNextBatch(int maxSize)
+    public CompletableFuture<List<ConnectorSplit>> getNextBatch(int maxSize, DynamicFilterSnapshot dynamicFilterSnapshot)
     {
         ImmutableList.Builder<ConnectorSplit> result = ImmutableList.builder();
         int i = 0;
@@ -140,7 +143,7 @@ public class TableChangesSplitSource
             result.add(splits.next());
             i++;
         }
-        return CompletableFuture.completedFuture(new ConnectorSplitBatch(result.build(), isFinished()));
+        return CompletableFuture.completedFuture(result.build());
     }
 
     private TableChangesSplit mapToDeltaLakeTableChangesSplit(

@@ -68,13 +68,14 @@ public class TestIcebergNessieCatalogWithBearerAuth
         return IcebergQueryRunner.builder()
                 .setBaseDataDir(Optional.of(tempDir))
                 .setIcebergProperties(properties)
+                .addIcebergProperty("fs.hadoop.enabled", "true")
                 .build();
     }
 
     @Test
     public void testWithValidAccessToken()
     {
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_valid_access_token", "(a INT, b VARCHAR)", ImmutableList.of("(1, 'a')"))) {
+        try (TestTable table = newTrinoTable("test_valid_access_token", "(a INT, b VARCHAR)", ImmutableList.of("(1, 'a')"))) {
             assertQuery("SELECT * FROM " + table.getName(), "VALUES(1, 'a')");
         }
     }

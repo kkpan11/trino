@@ -13,17 +13,19 @@
  */
 package io.trino.plugin.deltalake.transactionlog.checkpoint;
 
-import io.trino.filesystem.TrinoFileSystem;
-import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
+import io.trino.plugin.deltalake.DefaultDeltaLakeFileSystemFactory;
+import io.trino.plugin.deltalake.NoOpTableCredentialsProvider;
 import io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry;
+import io.trino.plugin.deltalake.transactionlog.reader.FileSystemTransactionLogReader;
+import io.trino.plugin.deltalake.transactionlog.reader.TransactionLogReader;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
 
+import static io.trino.hdfs.HdfsTestUtils.HDFS_FILE_SYSTEM_FACTORY;
+import static io.trino.plugin.deltalake.DeltaLakeConfig.DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE;
 import static io.trino.plugin.deltalake.DeltaTestingConnectorSession.SESSION;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_ENVIRONMENT;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_FILE_SYSTEM_STATS;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -41,25 +43,27 @@ public class TestTransactionLogTail
             throws Exception
     {
         String tableLocation = getClass().getClassLoader().getResource(format("%s/person", dataSource)).toURI().toString();
-        assertThat(readJsonTransactionLogTails(tableLocation).size()).isEqualTo(7);
-        assertThat(updateJsonTransactionLogTails(tableLocation).size()).isEqualTo(7);
+        assertThat(readJsonTransactionLogTails(tableLocation)).hasSize(7);
+        assertThat(updateJsonTransactionLogTails(tableLocation)).hasSize(7);
     }
 
     private List<DeltaLakeTransactionLogEntry> updateJsonTransactionLogTails(String tableLocation)
             throws Exception
     {
-        TrinoFileSystem fileSystem = new HdfsFileSystemFactory(HDFS_ENVIRONMENT, HDFS_FILE_SYSTEM_STATS).create(SESSION);
-        TransactionLogTail transactionLogTail = TransactionLogTail.loadNewTail(fileSystem, tableLocation, Optional.of(10L), Optional.of(12L));
-        Optional<TransactionLogTail> updatedLogTail = transactionLogTail.getUpdatedTail(fileSystem, tableLocation, Optional.empty());
-        assertThat(updatedLogTail.isPresent()).isTrue();
-        return updatedLogTail.get().getFileEntries();
+        DefaultDeltaLakeFileSystemFactory fileSystemFactory = new DefaultDeltaLakeFileSystemFactory(HDFS_FILE_SYSTEM_FACTORY, new NoOpTableCredentialsProvider());
+        TransactionLogReader transactionLogReader = new FileSystemTransactionLogReader(tableLocation, Optional.empty(), fileSystemFactory);
+        TransactionLogTail transactionLogTail = transactionLogReader.loadNewTail(SESSION, Optional.of(10L), Optional.of(12L), DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE);
+        Optional<TransactionLogTail> updatedLogTail = transactionLogReader.getUpdatedTail(SESSION, transactionLogTail, Optional.empty(), DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE);
+        assertThat(updatedLogTail).isPresent();
+        return updatedLogTail.get().getFileEntries(fileSystemFactory.create(SESSION, Optional.empty()));
     }
 
     private List<DeltaLakeTransactionLogEntry> readJsonTransactionLogTails(String tableLocation)
             throws Exception
     {
-        TrinoFileSystem fileSystem = new HdfsFileSystemFactory(HDFS_ENVIRONMENT, HDFS_FILE_SYSTEM_STATS).create(SESSION);
-        TransactionLogTail transactionLogTail = TransactionLogTail.loadNewTail(fileSystem, tableLocation, Optional.of(10L), Optional.empty());
-        return transactionLogTail.getFileEntries();
+        DefaultDeltaLakeFileSystemFactory fileSystemFactory = new DefaultDeltaLakeFileSystemFactory(HDFS_FILE_SYSTEM_FACTORY, new NoOpTableCredentialsProvider());
+        TransactionLogReader transactionLogReader = new FileSystemTransactionLogReader(tableLocation, Optional.empty(), fileSystemFactory);
+        TransactionLogTail transactionLogTail = transactionLogReader.loadNewTail(SESSION, Optional.of(10L), Optional.empty(), DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE);
+        return transactionLogTail.getFileEntries(fileSystemFactory.create(SESSION, Optional.empty()));
     }
 }

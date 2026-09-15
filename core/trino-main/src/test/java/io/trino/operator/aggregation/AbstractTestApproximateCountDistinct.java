@@ -33,9 +33,8 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.airlift.testing.Assertions.assertLessThan;
 import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public abstract class AbstractTestApproximateCountDistinct
@@ -117,8 +116,8 @@ public abstract class AbstractTestApproximateCountDistinct
             stats.addValue(error);
         }
 
-        assertLessThan(stats.getMean(), 1.0e-2);
-        assertLessThan(stats.getStandardDeviation(), 1.0e-2 + maxStandardError);
+        assertThat(stats.getMean()).isLessThan(1.0e-2);
+        assertThat(stats.getStandardDeviation()).isLessThan(1.0e-2 + maxStandardError);
     }
 
     @Test
@@ -174,7 +173,8 @@ public abstract class AbstractTestApproximateCountDistinct
         if (values.isEmpty()) {
             return new Page(0);
         }
-        return new Page(values.size(),
+        return new Page(
+                values.size(),
                 createBlock(getValueType(), values),
                 createBlock(DOUBLE, ImmutableList.copyOf(Collections.nCopies(values.size(), maxStandardError))));
     }

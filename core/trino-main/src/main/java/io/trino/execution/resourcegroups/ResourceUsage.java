@@ -13,67 +13,26 @@
  */
 package io.trino.execution.resourcegroups;
 
-import com.google.errorprone.annotations.Immutable;
-
-import java.util.Objects;
-
 import static com.google.common.math.LongMath.saturatedAdd;
 import static com.google.common.math.LongMath.saturatedSubtract;
 
-@Immutable
-final class ResourceUsage
+record ResourceUsage(long cpuUsageMillis, long memoryUsageBytes, long physicalInputDataUsageBytes)
 {
-    private final long cpuUsageMillis;
-    private final long memoryUsageBytes;
-
-    public ResourceUsage(long cpuUsageMillis, long memoryUsageBytes)
-    {
-        this.cpuUsageMillis = cpuUsageMillis;
-        this.memoryUsageBytes = memoryUsageBytes;
-    }
+    public static final ResourceUsage ZERO = new ResourceUsage(0, 0, 0);
 
     public ResourceUsage add(ResourceUsage other)
     {
         long newCpuUsageMillis = saturatedAdd(this.cpuUsageMillis, other.cpuUsageMillis);
         long newMemoryUsageBytes = saturatedAdd(this.memoryUsageBytes, other.memoryUsageBytes);
-        return new ResourceUsage(newCpuUsageMillis, newMemoryUsageBytes);
+        long newPhysicalInputDataUsageBytes = saturatedAdd(this.physicalInputDataUsageBytes, other.physicalInputDataUsageBytes);
+        return new ResourceUsage(newCpuUsageMillis, newMemoryUsageBytes, newPhysicalInputDataUsageBytes);
     }
 
     public ResourceUsage subtract(ResourceUsage other)
     {
         long newCpuUsageMillis = saturatedSubtract(this.cpuUsageMillis, other.cpuUsageMillis);
         long newMemoryUsageBytes = saturatedSubtract(this.memoryUsageBytes, other.memoryUsageBytes);
-        return new ResourceUsage(newCpuUsageMillis, newMemoryUsageBytes);
-    }
-
-    public long getCpuUsageMillis()
-    {
-        return cpuUsageMillis;
-    }
-
-    public long getMemoryUsageBytes()
-    {
-        return memoryUsageBytes;
-    }
-
-    @Override
-    public boolean equals(Object other)
-    {
-        if (this == other) {
-            return true;
-        }
-        if ((other == null) || (getClass() != other.getClass())) {
-            return false;
-        }
-
-        ResourceUsage otherUsage = (ResourceUsage) other;
-        return cpuUsageMillis == otherUsage.cpuUsageMillis
-                && memoryUsageBytes == otherUsage.memoryUsageBytes;
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(cpuUsageMillis, memoryUsageBytes);
+        long newPhysicalInputDataUsageBytes = saturatedSubtract(this.physicalInputDataUsageBytes, other.physicalInputDataUsageBytes);
+        return new ResourceUsage(newCpuUsageMillis, newMemoryUsageBytes, newPhysicalInputDataUsageBytes);
     }
 }

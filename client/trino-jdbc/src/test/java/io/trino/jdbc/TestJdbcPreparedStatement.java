@@ -30,7 +30,6 @@ import org.junit.jupiter.api.parallel.Execution;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.sql.Array;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.DriverManager;
@@ -44,17 +43,18 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.Calendar;
 import java.util.TimeZone;
 import java.util.stream.LongStream;
 
-import static com.google.common.base.Strings.repeat;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.primitives.Ints.asList;
 import static io.trino.client.ClientTypeSignature.VARCHAR_UNBOUNDED_LENGTH;
@@ -249,7 +249,7 @@ public class TestJdbcPreparedStatement
                 ParameterMetaData parameterMetaData = statement.getParameterMetaData();
                 assertThat(parameterMetaData.getParameterCount()).isEqualTo(15);
 
-                assertThat(parameterMetaData.getParameterClassName(1)).isEqualTo("unknown");
+                assertThat(parameterMetaData.getParameterClassName(1)).isEqualTo("java.lang.Object");
                 assertThat(parameterMetaData.getParameterType(1)).isEqualTo(Types.NULL);
                 assertThat(parameterMetaData.getParameterTypeName(1)).isEqualTo("unknown");
                 assertThat(parameterMetaData.isNullable(1)).isEqualTo(parameterNullableUnknown);
@@ -294,21 +294,21 @@ public class TestJdbcPreparedStatement
                 assertThat(parameterMetaData.isSigned(6)).isFalse();
                 assertThat(parameterMetaData.getParameterMode(6)).isEqualTo(parameterModeUnknown);
 
-                assertThat(parameterMetaData.getParameterClassName(7)).isEqualTo(String.class.getName());
+                assertThat(parameterMetaData.getParameterClassName(7)).isEqualTo("io.trino.jdbc.Row");
                 assertThat(parameterMetaData.getParameterType(7)).isEqualTo(Types.JAVA_OBJECT);
                 assertThat(parameterMetaData.getParameterTypeName(7)).isEqualTo("row");
                 assertThat(parameterMetaData.isNullable(7)).isEqualTo(parameterNullableUnknown);
                 assertThat(parameterMetaData.isSigned(7)).isFalse();
                 assertThat(parameterMetaData.getParameterMode(7)).isEqualTo(parameterModeUnknown);
 
-                assertThat(parameterMetaData.getParameterClassName(8)).isEqualTo(Array.class.getName());
+                assertThat(parameterMetaData.getParameterClassName(8)).isEqualTo("java.sql.Array");
                 assertThat(parameterMetaData.getParameterType(8)).isEqualTo(Types.ARRAY);
                 assertThat(parameterMetaData.getParameterTypeName(8)).isEqualTo("array");
                 assertThat(parameterMetaData.isNullable(8)).isEqualTo(parameterNullableUnknown);
                 assertThat(parameterMetaData.isSigned(8)).isFalse();
                 assertThat(parameterMetaData.getParameterMode(8)).isEqualTo(parameterModeUnknown);
 
-                assertThat(parameterMetaData.getParameterClassName(9)).isEqualTo(String.class.getName());
+                assertThat(parameterMetaData.getParameterClassName(9)).isEqualTo("java.util.Map");
                 assertThat(parameterMetaData.getParameterType(9)).isEqualTo(Types.JAVA_OBJECT);
                 assertThat(parameterMetaData.getParameterTypeName(9)).isEqualTo("map");
                 assertThat(parameterMetaData.isNullable(9)).isEqualTo(parameterNullableUnknown);
@@ -420,7 +420,7 @@ public class TestJdbcPreparedStatement
         try (Connection connection = createConnection(explicitPrepare)) {
             for (int i = 0; i < 200; i++) {
                 try {
-                    connection.prepareStatement("SELECT '" + repeat("a", 300) + "'").close();
+                    connection.prepareStatement("SELECT '" + "a".repeat(300) + "'").close();
                 }
                 catch (Exception e) {
                     throw new RuntimeException("Failed at " + i, e);
@@ -460,7 +460,7 @@ public class TestJdbcPreparedStatement
     {
         int elements = HEADER_SIZE_LIMIT + 1;
         try (Connection connection = createConnection(explicitPrepare);
-                PreparedStatement statement = connection.prepareStatement("VALUES ?" + repeat(", ?", elements - 1))) {
+                PreparedStatement statement = connection.prepareStatement("VALUES ?" + ", ?".repeat(elements - 1))) {
             for (int i = 0; i < elements; i++) {
                 statement.setLong(i + 1, i);
             }
@@ -655,7 +655,7 @@ public class TestJdbcPreparedStatement
     private void testPrepareLarge(boolean explicitPrepare)
             throws Exception
     {
-        String sql = format("SELECT '%s' = '%s'", repeat("x", 100_000), repeat("y", 100_000));
+        String sql = format("SELECT '%s' = '%s'", "x".repeat(100_000), "y".repeat(100_000));
         try (Connection connection = createConnection(explicitPrepare);
                 PreparedStatement statement = connection.prepareStatement(sql);
                 ResultSet rs = statement.executeQuery()) {
@@ -934,6 +934,11 @@ public class TestJdbcPreparedStatement
     {
         assertBind((ps, i) -> ps.setBigDecimal(i, BigDecimal.valueOf(123)), explicitPrepare).roundTripsAs(Types.DECIMAL, BigDecimal.valueOf(123));
         assertBind((ps, i) -> ps.setObject(i, BigDecimal.valueOf(123)), explicitPrepare).roundTripsAs(Types.DECIMAL, BigDecimal.valueOf(123));
+        // BigDecimal values such that BigDecimal.toString() produces scientific notation (e.g. "0E-10") which currently isn't valid Trino decimal literal
+        assertThat(new BigDecimal("0E-10").toString()).contains("E-10");
+        assertThat(new BigDecimal("1E+2").toString()).contains("E+2");
+        assertBind((ps, i) -> ps.setBigDecimal(i, new BigDecimal("0E-10")), explicitPrepare).roundTripsAs(Types.DECIMAL, new BigDecimal("0.0000000000"));
+        assertBind((ps, i) -> ps.setBigDecimal(i, new BigDecimal("1E+2")), explicitPrepare).roundTripsAs(Types.DECIMAL, new BigDecimal("100"));
 
         for (int type : asList(Types.DECIMAL, Types.NUMERIC)) {
             assertBind((ps, i) -> ps.setObject(i, (byte) 123, type), explicitPrepare).roundTripsAs(Types.DECIMAL, BigDecimal.valueOf(123));
@@ -948,6 +953,9 @@ public class TestJdbcPreparedStatement
             assertBind((ps, i) -> ps.setObject(i, "123", type), explicitPrepare).roundTripsAs(Types.DECIMAL, BigDecimal.valueOf(123));
             assertBind((ps, i) -> ps.setObject(i, true, type), explicitPrepare).roundTripsAs(Types.DECIMAL, BigDecimal.valueOf(1));
             assertBind((ps, i) -> ps.setObject(i, false, type), explicitPrepare).roundTripsAs(Types.DECIMAL, BigDecimal.valueOf(0));
+            // BigDecimal values such that BigDecimal.toString() produces scientific notation (e.g. "0E-10") which currently isn't valid Trino decimal literal
+            assertBind((ps, i) -> ps.setObject(i, new BigDecimal("0E-10"), type), explicitPrepare).roundTripsAs(Types.DECIMAL, new BigDecimal("0.0000000000"));
+            assertBind((ps, i) -> ps.setObject(i, new BigDecimal("1E+2"), type), explicitPrepare).roundTripsAs(Types.DECIMAL, new BigDecimal("100"));
         }
     }
 
@@ -1091,15 +1099,100 @@ public class TestJdbcPreparedStatement
         assertBind((ps, i) -> ps.setObject(i, date, Types.TIMESTAMP_WITH_TIMEZONE), explicitPrepare)
                 .isInvalid("Cannot convert instance of java.time.LocalDate to timestamp with time zone");
 
-        LocalDate jvmGapDate = LocalDate.of(1970, 1, 1);
+        LocalDate jvmGapDate = LocalDate.of(1932, 4, 1);
         checkIsGap(ZoneId.systemDefault(), jvmGapDate.atTime(LocalTime.MIDNIGHT));
 
         assertBind((ps, i) -> ps.setObject(i, jvmGapDate), explicitPrepare)
-                .resultsIn("date", "DATE '1970-01-01'")
+                .resultsIn("date", "DATE '1932-04-01'")
                 .roundTripsAs(Types.DATE, Date.valueOf(jvmGapDate));
 
         assertBind((ps, i) -> ps.setObject(i, jvmGapDate, Types.DATE), explicitPrepare)
                 .roundTripsAs(Types.DATE, Date.valueOf(jvmGapDate));
+    }
+
+    @Test
+    public void testConvertInstant()
+            throws SQLException
+    {
+        testConvertInstant(true);
+        testConvertInstant(false);
+    }
+
+    private void testConvertInstant(boolean explicitPrepare)
+            throws SQLException
+    {
+        LocalDateTime dateTime = LocalDateTime.of(2001, 5, 6, 12, 34, 56);
+        Instant instant = dateTime.toInstant(ZoneOffset.UTC);
+
+        assertBind((ps, i) -> ps.setObject(i, instant, Types.TIMESTAMP_WITH_TIMEZONE), explicitPrepare)
+                .resultsIn("timestamp(0) with time zone", "TIMESTAMP '2001-05-06 12:34:56 +00:00'")
+                .roundTripsAs(Types.TIMESTAMP_WITH_TIMEZONE, Instant.class, instant);
+
+        Instant instantWithDeciSecond = instant.plus(100, ChronoUnit.MILLIS);
+
+        assertBind((ps, i) -> ps.setObject(i, instantWithDeciSecond), explicitPrepare)
+                .resultsIn("timestamp(1) with time zone", "TIMESTAMP '2001-05-06 12:34:56.1 +00:00'")
+                .roundTripsAs(Types.TIMESTAMP_WITH_TIMEZONE, Instant.class, instantWithDeciSecond);
+
+        assertBind((ps, i) -> ps.setObject(i, instantWithDeciSecond, Types.TIMESTAMP_WITH_TIMEZONE), explicitPrepare)
+                .resultsIn("timestamp(1) with time zone", "TIMESTAMP '2001-05-06 12:34:56.1 +00:00'")
+                .roundTripsAs(Types.TIMESTAMP_WITH_TIMEZONE, Instant.class, instantWithDeciSecond);
+
+        Instant instantWithMilliSecond = instant.plus(123, ChronoUnit.MILLIS);
+
+        assertBind((ps, i) -> ps.setObject(i, instantWithMilliSecond), explicitPrepare)
+                .resultsIn("timestamp(3) with time zone", "TIMESTAMP '2001-05-06 12:34:56.123 +00:00'")
+                .roundTripsAs(Types.TIMESTAMP_WITH_TIMEZONE, Instant.class, instantWithMilliSecond);
+
+        assertBind((ps, i) -> ps.setObject(i, instantWithMilliSecond, Types.TIMESTAMP_WITH_TIMEZONE), explicitPrepare)
+                .resultsIn("timestamp(3) with time zone", "TIMESTAMP '2001-05-06 12:34:56.123 +00:00'")
+                .roundTripsAs(Types.TIMESTAMP_WITH_TIMEZONE, Instant.class, instantWithMilliSecond);
+    }
+
+    @Test
+    public void testConvertLocalDateTime()
+            throws SQLException
+    {
+        testConvertLocalDateTime(true);
+        testConvertLocalDateTime(false);
+    }
+
+    private void testConvertLocalDateTime(boolean explicitPrepare)
+            throws SQLException
+    {
+        LocalDateTime dateTime = LocalDateTime.of(2001, 5, 6, 12, 34, 56);
+        Timestamp sqlTimestamp = Timestamp.valueOf(dateTime);
+
+        assertBind((ps, i) -> ps.setObject(i, dateTime, Types.TIMESTAMP), explicitPrepare)
+                .resultsIn("timestamp(0)", "TIMESTAMP '2001-05-06 12:34:56'")
+                .roundTripsAs(Types.TIMESTAMP, sqlTimestamp)
+                .roundTripsAs(Types.TIMESTAMP, LocalDateTime.class, dateTime);
+
+        LocalDateTime dateTimeWithDeciSecond = dateTime.plus(100, ChronoUnit.MILLIS);
+        Timestamp timestampWithWithDecisecond = new Timestamp(sqlTimestamp.getTime() + 100);
+
+        assertBind((ps, i) -> ps.setObject(i, dateTimeWithDeciSecond), explicitPrepare)
+                .resultsIn("timestamp(1)", "TIMESTAMP '2001-05-06 12:34:56.1'")
+                .roundTripsAs(Types.TIMESTAMP, timestampWithWithDecisecond)
+                .roundTripsAs(Types.TIMESTAMP, LocalDateTime.class, dateTimeWithDeciSecond);
+
+        assertBind((ps, i) -> ps.setObject(i, dateTimeWithDeciSecond, Types.TIMESTAMP), explicitPrepare)
+                .resultsIn("timestamp(1)", "TIMESTAMP '2001-05-06 12:34:56.1'")
+                .roundTripsAs(Types.TIMESTAMP, timestampWithWithDecisecond)
+                .roundTripsAs(Types.TIMESTAMP, LocalDateTime.class, dateTimeWithDeciSecond);
+
+        LocalDateTime dateTimeWithMilliSecond = dateTime.plus(123, ChronoUnit.MILLIS);
+        Timestamp timestampWithMillisecond = new Timestamp(sqlTimestamp.getTime() + 123);
+
+        assertBind((ps, i) -> ps.setObject(i, dateTimeWithMilliSecond), explicitPrepare)
+                .resultsIn("timestamp(3)", "TIMESTAMP '2001-05-06 12:34:56.123'")
+                .roundTripsAs(Types.TIMESTAMP, timestampWithMillisecond)
+                .roundTripsAs(Types.TIMESTAMP, LocalDateTime.class, dateTimeWithMilliSecond);
+
+        assertBind((ps, i) -> ps.setObject(i, dateTimeWithMilliSecond, Types.TIMESTAMP), explicitPrepare)
+                .resultsIn("timestamp(3)", "TIMESTAMP '2001-05-06 12:34:56.123'")
+                .roundTripsAs(Types.TIMESTAMP, timestampWithMillisecond)
+                .roundTripsAs(Types.TIMESTAMP, LocalDateTime.class, dateTimeWithMilliSecond);
     }
 
     @Test
@@ -1389,7 +1482,8 @@ public class TestJdbcPreparedStatement
     public void testExplicitPrepare()
             throws Exception
     {
-        testExplicitPrepareSetting(true,
+        testExplicitPrepareSetting(
+                true,
                 "EXECUTE %statement% USING %values%");
     }
 
@@ -1397,7 +1491,8 @@ public class TestJdbcPreparedStatement
     public void testExecuteImmediate()
             throws Exception
     {
-        testExplicitPrepareSetting(false,
+        testExplicitPrepareSetting(
+                false,
                 "EXECUTE IMMEDIATE '%query%' USING %values%");
     }
 
@@ -1409,14 +1504,14 @@ public class TestJdbcPreparedStatement
     private Connection createConnection(boolean explicitPrepare)
             throws SQLException
     {
-        String url = format("jdbc:trino://%s?explicitPrepare=" + explicitPrepare, server.getAddress());
+        String url = format("jdbc:trino://%s?explicitPrepare=%s", server.getAddress(), explicitPrepare);
         return DriverManager.getConnection(url, "test", null);
     }
 
     private Connection createConnection(String catalog, String schema, boolean explicitPrepare)
             throws SQLException
     {
-        String url = format("jdbc:trino://%s/%s/%s?explicitPrepare=" + explicitPrepare, server.getAddress(), catalog, schema);
+        String url = format("jdbc:trino://%s/%s/%s?explicitPrepare=%s", server.getAddress(), catalog, schema, explicitPrepare);
         return DriverManager.getConnection(url, "test", null);
     }
 
@@ -1539,6 +1634,25 @@ public class TestJdbcPreparedStatement
                 try (ResultSet rs = statement.executeQuery()) {
                     verify(rs.next(), "no row returned");
                     assertThat(rs.getObject(1)).isEqualTo(expectedValue);
+                    verify(!rs.next(), "unexpected second row");
+
+                    assertThat(rs.getMetaData().getColumnType(1)).isEqualTo(expectedSqlType);
+                }
+            }
+
+            return this;
+        }
+
+        public BindAssertion roundTripsAs(int expectedSqlType, Class expectedClass, Object expectedValue)
+                throws SQLException
+        {
+            try (Connection connection = connectionFactory.createConnection();
+                    PreparedStatement statement = connection.prepareStatement("SELECT ?")) {
+                binder.bind(statement, 1);
+
+                try (ResultSet rs = statement.executeQuery()) {
+                    verify(rs.next(), "no row returned");
+                    assertThat(rs.getObject(1, expectedClass)).isEqualTo(expectedValue);
                     verify(!rs.next(), "unexpected second row");
 
                     assertThat(rs.getMetaData().getColumnType(1)).isEqualTo(expectedSqlType);

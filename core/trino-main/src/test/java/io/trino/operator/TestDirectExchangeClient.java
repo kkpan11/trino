@@ -16,7 +16,6 @@ package io.trino.operator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.ListMultimap;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.configuration.secrets.SecretsResolver;
@@ -34,12 +33,13 @@ import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.trino.FeaturesConfig.DataIntegrityVerification;
 import io.trino.block.BlockAssertions;
+import io.trino.exchange.ExchangeManagerConfig;
 import io.trino.exchange.ExchangeManagerRegistry;
+import io.trino.exchange.ExchangeMetricsCollector;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.buffer.PageDeserializer;
 import io.trino.execution.buffer.PagesSerdeFactory;
-import io.trino.execution.buffer.TestingPagesSerdeFactory;
 import io.trino.memory.context.SimpleLocalMemoryContext;
 import io.trino.spi.Page;
 import io.trino.spi.QueryId;
@@ -58,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -67,18 +68,17 @@ import java.util.concurrent.TimeoutException;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
-import static com.google.common.collect.ImmutableListMultimap.toImmutableListMultimap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Maps.uniqueIndex;
-import static com.google.common.collect.Sets.newConcurrentHashSet;
-import static com.google.common.io.ByteStreams.toByteArray;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
 import static io.airlift.concurrent.MoreFutures.tryGetFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.airlift.testing.Assertions.assertLessThan;
 import static io.trino.execution.TestSqlTaskExecution.TASK_ID;
+import static io.trino.execution.buffer.CompressionCodec.LZ4;
 import static io.trino.execution.buffer.PagesSerdeUtil.getSerializedPagePositionCount;
+import static io.trino.execution.buffer.TestingPagesSerdes.createTestingPagesSerdeFactory;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.exchange.ExchangeId.createRandomExchangeId;
@@ -105,7 +105,7 @@ public class TestDirectExchangeClient
     {
         scheduler = newScheduledThreadPool(4, daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
         pageBufferClientCallbackExecutor = Executors.newSingleThreadExecutor();
-        serdeFactory = new TestingPagesSerdeFactory();
+        serdeFactory = createTestingPagesSerdeFactory(LZ4);
     }
 
     @AfterAll
@@ -150,7 +150,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         assertThat(buffer.getAllTasks()).isEmpty();
         assertThat(buffer.getPages().asMap()).isEmpty();
@@ -177,12 +177,12 @@ public class TestDirectExchangeClient
         assertThat(status.getBufferedPages()).isEqualTo(0);
 
         // client should have sent only 3 requests: one to get all pages, one to acknowledge and one to get the done signal
-        assertStatus(status.getPageBufferClientStatuses().get(0), location, "closed", 3, 3, 3, "not scheduled");
+        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 3, 3, 3, "not scheduled");
         assertThat(status.getRequestDuration().getDigest().getCount()).isEqualTo(2.0);
 
         exchangeClient.close();
 
-        assertEventually(() -> assertThat(exchangeClient.getStatus().getPageBufferClientStatuses().get(0).getHttpRequestState())
+        assertEventually(() -> assertThat(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()).getHttpRequestState())
                 .describedAs("httpRequestState")
                 .isEqualTo("not scheduled"));
 
@@ -216,7 +216,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         exchangeClient.addLocation(new TaskId(new StageId("query", 1), 0, 0), location);
         exchangeClient.noMoreLocations();
@@ -234,7 +234,7 @@ public class TestDirectExchangeClient
         assertThat(status.getBufferedPages()).isEqualTo(0);
 
         // client should have sent only 3 requests: one to get all pages, one to acknowledge and one to get the done signal
-        assertStatus(status.getPageBufferClientStatuses().get(0), location, "closed", 3, 3, 3, "not scheduled");
+        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 3, 3, 3, "not scheduled");
 
         exchangeClient.close();
     }
@@ -272,7 +272,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         assertThat(buffer.getAllTasks()).isEmpty();
         assertThat(buffer.getPages().asMap()).isEmpty();
@@ -296,7 +296,7 @@ public class TestDirectExchangeClient
         processor.setComplete(location2);
         buffer.whenTaskFinished(task2).get(10, SECONDS);
         assertThat(buffer.getFinishedTasks()).containsExactlyInAnyOrder(task1, task2);
-        assertThat(buffer.getPages().get(task2)).hasSize(0);
+        assertThat(buffer.getPages().get(task2)).isEmpty();
 
         exchangeClient.addLocation(task3, location3);
         assertThat(buffer.getAllTasks()).containsExactlyInAnyOrder(task1, task2, task3);
@@ -347,7 +347,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         URI location1 = URI.create("http://localhost:8081/foo");
         processor.addPage(location1, createPage(1));
@@ -365,24 +365,24 @@ public class TestDirectExchangeClient
 
         assertThat(exchangeClient.pollPage()).isNull();
         ListenableFuture<Void> firstBlocked = exchangeClient.isBlocked();
-        assertThat(tryGetFutureValue(firstBlocked, 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(firstBlocked, 10, MILLISECONDS)).isEmpty();
         assertThat(firstBlocked.isDone()).isFalse();
 
         assertThat(exchangeClient.pollPage()).isNull();
         ListenableFuture<Void> secondBlocked = exchangeClient.isBlocked();
-        assertThat(tryGetFutureValue(secondBlocked, 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(secondBlocked, 10, MILLISECONDS)).isEmpty();
         assertThat(secondBlocked.isDone()).isFalse();
 
         assertThat(exchangeClient.pollPage()).isNull();
         ListenableFuture<Void> thirdBlocked = exchangeClient.isBlocked();
-        assertThat(tryGetFutureValue(thirdBlocked, 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(thirdBlocked, 10, MILLISECONDS)).isEmpty();
         assertThat(thirdBlocked.isDone()).isFalse();
 
         thirdBlocked.cancel(true);
         assertThat(thirdBlocked.isDone()).isTrue();
-        assertThat(tryGetFutureValue(firstBlocked, 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(firstBlocked, 10, MILLISECONDS)).isEmpty();
         assertThat(firstBlocked.isDone()).isFalse();
-        assertThat(tryGetFutureValue(secondBlocked, 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(secondBlocked, 10, MILLISECONDS)).isEmpty();
         assertThat(secondBlocked.isDone()).isFalse();
 
         assertThat(exchangeClient.isFinished()).isFalse();
@@ -406,7 +406,7 @@ public class TestDirectExchangeClient
         assertThat(exchangeClient.isFinished()).isFalse();
         assertPageEquals(getNextPage(exchangeClient), createPage(6));
 
-        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS)).isEmpty();
         assertThat(exchangeClient.isFinished()).isFalse();
 
         exchangeClient.noMoreLocations();
@@ -417,7 +417,7 @@ public class TestDirectExchangeClient
         }
         exchangeClient.close();
 
-        ImmutableMap<URI, PageBufferClientStatus> statuses = uniqueIndex(exchangeClient.getStatus().getPageBufferClientStatuses(), PageBufferClientStatus::getUri);
+        Map<URI, PageBufferClientStatus> statuses = uniqueIndex(exchangeClient.getStatus().getPageBufferClientStatuses(), PageBufferClientStatus::getUri);
         assertStatus(statuses.get(location1), location1, "closed", 3, 3, 3, "not scheduled");
         assertStatus(statuses.get(location2), location2, "closed", 3, 3, 3, "not scheduled");
     }
@@ -450,7 +450,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         exchangeClient.addLocation(task1, location1);
         exchangeClient.addLocation(task2, location2);
@@ -459,7 +459,7 @@ public class TestDirectExchangeClient
 
         processor.setComplete(location1);
 
-        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS)).isEmpty();
 
         RuntimeException randomException = new RuntimeException("randomfailure");
         processor.setFailed(location2, randomException);
@@ -493,7 +493,8 @@ public class TestDirectExchangeClient
                 scheduler,
                 DataSize.of(1, Unit.MEGABYTE),
                 RetryPolicy.QUERY,
-                new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of())),
+                new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of()), new ExchangeManagerConfig()),
+                Optional.of(new ExchangeMetricsCollector(ImmutableList::of, java.time.Duration.ofMillis(1))),
                 new QueryId("query"),
                 Span.getInvalid(),
                 createRandomExchangeId());
@@ -510,14 +511,14 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         exchangeClient.addLocation(attempt0Task1, attempt0Task1Location);
-        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS)).isEmpty();
 
         exchangeClient.addLocation(attempt1Task1, attempt1Task1Location);
         exchangeClient.addLocation(attempt1Task2, attempt1Task2Location);
-        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS).isPresent()).isFalse();
+        assertThat(tryGetFutureValue(exchangeClient.isBlocked(), 10, MILLISECONDS)).isEmpty();
 
         exchangeClient.noMoreLocations();
         exchangeClient.isBlocked().get(10, SECONDS);
@@ -554,7 +555,8 @@ public class TestDirectExchangeClient
                         scheduler,
                         DataSize.of(1, Unit.KILOBYTE),
                         RetryPolicy.QUERY,
-                        new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of())),
+                        new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of()), new ExchangeManagerConfig()),
+                        Optional.of(new ExchangeMetricsCollector(ImmutableList::of, java.time.Duration.ofMillis(1))),
                         new QueryId("query"),
                         Span.getInvalid(),
                         createRandomExchangeId()),
@@ -566,7 +568,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         exchangeClient.addLocation(taskP0A0, locationP0A0);
         exchangeClient.addLocation(taskP1A0, locationP1A0);
@@ -636,7 +638,7 @@ public class TestDirectExchangeClient
 
         TestingDirectExchangeBuffer buffer = new TestingDirectExchangeBuffer(DataSize.of(1, Unit.MEGABYTE));
 
-        Set<TaskId> failedTasks = newConcurrentHashSet();
+        Set<TaskId> failedTasks = ConcurrentHashMap.newKeySet();
         CountDownLatch latch = new CountDownLatch(2);
 
         @SuppressWarnings("resource")
@@ -652,7 +654,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {
+                (taskId, _) -> {
                     failedTasks.add(taskId);
                     latch.countDown();
                 });
@@ -682,7 +684,7 @@ public class TestDirectExchangeClient
 
         assertThat(buffer.getFinishedTasks()).containsExactly(task1);
         assertThat(buffer.getFailedTasks().keySet()).containsExactly(task2);
-        assertThat(buffer.getPages().get(task2)).hasSize(0);
+        assertThat(buffer.getPages().get(task2)).isEmpty();
 
         exchangeClient.addLocation(task3, location3);
         assertThat(buffer.getAllTasks()).containsExactlyInAnyOrder(task1, task2, task3);
@@ -695,8 +697,8 @@ public class TestDirectExchangeClient
 
         assertThat(buffer.getFinishedTasks()).containsExactly(task1);
         assertThat(buffer.getFailedTasks().keySet()).containsExactlyInAnyOrder(task2, task3);
-        assertThat(buffer.getPages().get(task2)).hasSize(0);
-        assertThat(buffer.getPages().get(task3)).hasSize(0);
+        assertThat(buffer.getPages().get(task2)).isEmpty();
+        assertThat(buffer.getPages().get(task3)).isEmpty();
 
         assertThat(latch.await(10, SECONDS)).isTrue();
         assertThat(failedTasks).isEqualTo(ImmutableSet.of(task2, task3));
@@ -772,7 +774,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         exchangeClient.addLocation(new TaskId(new StageId("query", 1), 0, 0), location);
         exchangeClient.noMoreLocations();
@@ -783,7 +785,7 @@ public class TestDirectExchangeClient
         // wait for a page to be fetched
         do {
             // there is no thread coordination here, so sleep is the best we can do
-            assertLessThan(Duration.nanosSince(start), new Duration(5, TimeUnit.SECONDS));
+            assertThat(Duration.nanosSince(start)).isLessThan(new Duration(5, TimeUnit.SECONDS));
             sleepUninterruptibly(100, MILLISECONDS);
         }
         while (exchangeClient.getStatus().getBufferedPages() == 0);
@@ -791,31 +793,31 @@ public class TestDirectExchangeClient
         // client should have sent a single request for a single page
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(1);
         assertThat(exchangeClient.getStatus().getBufferedBytes() > 0).isTrue();
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "queued", 1, 1, 1, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "queued", 1, 1, 1, "not scheduled");
 
         // remove the page and wait for the client to fetch another page
         assertPageEquals(exchangeClient.pollPage(), createPage(1));
         do {
-            assertLessThan(Duration.nanosSince(start), new Duration(5, TimeUnit.SECONDS));
+            assertThat(Duration.nanosSince(start)).isLessThan(new Duration(5, TimeUnit.SECONDS));
             sleepUninterruptibly(100, MILLISECONDS);
         }
         while (exchangeClient.getStatus().getBufferedPages() == 0);
 
         // client should have sent a single request for a single page
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "queued", 2, 2, 2, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "queued", 2, 2, 2, "not scheduled");
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(1);
         assertThat(exchangeClient.getStatus().getBufferedBytes() > 0).isTrue();
 
         // remove the page and wait for the client to fetch another page
         assertPageEquals(exchangeClient.pollPage(), createPage(2));
         do {
-            assertLessThan(Duration.nanosSince(start), new Duration(5, TimeUnit.SECONDS));
+            assertThat(Duration.nanosSince(start)).isLessThan(new Duration(5, TimeUnit.SECONDS));
             sleepUninterruptibly(100, MILLISECONDS);
         }
         while (exchangeClient.getStatus().getBufferedPages() == 0);
 
         // client should have sent a single request for a single page
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "queued", 3, 3, 3, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "queued", 3, 3, 3, "not scheduled");
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(1);
         assertThat(exchangeClient.getStatus().getBufferedBytes() > 0).isTrue();
 
@@ -827,7 +829,7 @@ public class TestDirectExchangeClient
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(0);
         assertThat(exchangeClient.isFinished()).isTrue();
         exchangeClient.close();
-        assertStatus(exchangeClient.getStatus().getPageBufferClientStatuses().get(0), location, "closed", 3, 5, 5, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 3, 5, 5, "not scheduled");
     }
 
     @Test
@@ -838,7 +840,7 @@ public class TestDirectExchangeClient
 
         assertThatThrownBy(() -> getNextPage(exchangeClient))
                 .isInstanceOf(TrinoException.class)
-                .hasMessageMatching("Checksum verification failure on localhost when reading from http://localhost:8080/0: Data corruption, read checksum: 0x3f7c49fcdc6f98ea, calculated checksum: 0xcb4f99c2d19a4b04");
+                .hasMessageMatching("Checksum verification failure on localhost when reading from http://localhost:8080/0: Data corruption, read checksum: 0x7d7292e0ba4ce122, calculated checksum: 0x251e82faf1acd745");
 
         exchangeClient.close();
     }
@@ -861,7 +863,7 @@ public class TestDirectExchangeClient
         assertThat(status.getBufferedPages()).isEqualTo(0);
         assertThat(status.getBufferedBytes()).isEqualTo(0);
 
-        assertStatus(status.getPageBufferClientStatuses().get(0), location, "closed", 2, 4, 4, "not scheduled");
+        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 2, 4, 4, "not scheduled");
     }
 
     private DirectExchangeClient setUpDataCorruption(DataIntegrityVerification dataIntegrityVerification, URI location)
@@ -886,15 +888,13 @@ public class TestDirectExchangeClient
                     verify(savedResponse == null);
                     TestingResponse response = (TestingResponse) delegate.handle(request);
                     checkState(response.getStatusCode() == HttpStatus.OK.code(), "Unexpected status code: %s", response.getStatusCode());
-                    ListMultimap<String, String> headers = response.getHeaders().entries().stream()
-                            .collect(toImmutableListMultimap(entry -> entry.getKey().toString(), Map.Entry::getValue));
-                    byte[] bytes = toByteArray(response.getInputStream());
+                    byte[] bytes = response.getInputStream().readAllBytes();
                     checkState(bytes.length > 42, "too short");
-                    savedResponse = new TestingResponse(HttpStatus.OK, headers, bytes.clone());
+                    savedResponse = new TestingResponse(HttpStatus.OK, response.getHeaders(), bytes.clone());
                     // corrupt
                     bytes[42]++;
                     completedRequests++;
-                    return new TestingResponse(HttpStatus.OK, headers, bytes);
+                    return new TestingResponse(HttpStatus.OK, response.getHeaders(), bytes);
                 }
 
                 if (completedRequests == 1) {
@@ -922,7 +922,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
 
         exchangeClient.addLocation(new TaskId(new StageId("query", 1), 0, 0), location);
         exchangeClient.noMoreLocations();
@@ -955,7 +955,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
         exchangeClient.addLocation(new TaskId(new StageId("query", 1), 0, 0), location);
         exchangeClient.noMoreLocations();
 
@@ -972,7 +972,7 @@ public class TestDirectExchangeClient
         assertThat(exchangeClient.pollPage()).isNull();
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(0);
 
-        PageBufferClientStatus clientStatus = exchangeClient.getStatus().getPageBufferClientStatuses().get(0);
+        PageBufferClientStatus clientStatus = getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses());
         assertThat(clientStatus.getUri()).isEqualTo(location);
         assertThat(clientStatus.getState())
                 .describedAs("status")
@@ -1009,14 +1009,14 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
         exchangeClient.getAllClients().putAll(Map.of(locationOne, clientToBeUsed, locationTwo, clientToBeSkipped));
         exchangeClient.getQueuedClients().addAll(ImmutableList.of(clientToBeUsed, clientToBeSkipped));
 
         int clientCount = exchangeClient.scheduleRequestIfNecessary();
         // The first client filled the buffer. There is no place for the another one
         assertThat(clientCount).isEqualTo(1);
-        assertThat(exchangeClient.getRunningClients().size()).isEqualTo(1);
+        assertThat(exchangeClient.getRunningClients()).hasSize(1);
     }
 
     @Test
@@ -1044,13 +1044,13 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
         exchangeClient.getAllClients().putAll(Map.of(locationOne, firstClient, locationTwo, secondClient));
         exchangeClient.getQueuedClients().addAll(ImmutableList.of(firstClient, secondClient));
 
         int clientCount = exchangeClient.scheduleRequestIfNecessary();
         assertThat(clientCount).isEqualTo(2);
-        assertThat(exchangeClient.getRunningClients().size()).isEqualTo(2);
+        assertThat(exchangeClient.getRunningClients()).hasSize(2);
     }
 
     @Test
@@ -1081,7 +1081,7 @@ public class TestDirectExchangeClient
                 scheduler,
                 new SimpleLocalMemoryContext(newSimpleAggregatedMemoryContext(), "test"),
                 pageBufferClientCallbackExecutor,
-                (taskId, failure) -> {});
+                (_, _) -> {});
         exchangeClient.getAllClients().putAll(Map.of(locationOne, pendingClient, locationTwo, clientToBeSkipped));
         exchangeClient.getRunningClients().add(pendingClient);
         exchangeClient.getQueuedClients().add(clientToBeSkipped);
@@ -1089,7 +1089,7 @@ public class TestDirectExchangeClient
         int clientCount = exchangeClient.scheduleRequestIfNecessary();
         // The first client is pending and it reserved the space in the buffer. There is no place for the another one
         assertThat(clientCount).isEqualTo(0);
-        assertThat(exchangeClient.getRunningClients().size()).isEqualTo(1);
+        assertThat(exchangeClient.getRunningClients()).hasSize(1);
     }
 
     private HttpPageBufferClient createHttpPageBufferClient(TestingHttpClient.Processor processor, DataSize expectedMaxSize, URI location, HttpPageBufferClient.ClientCallback callback)
@@ -1168,18 +1168,12 @@ public class TestDirectExchangeClient
         }
 
         @Override
-        public void requestComplete(HttpPageBufferClient client)
-        {
-        }
+        public void requestComplete(HttpPageBufferClient client) {}
 
         @Override
-        public void clientFinished(HttpPageBufferClient client)
-        {
-        }
+        public void clientFinished(HttpPageBufferClient client) {}
 
         @Override
-        public void clientFailed(HttpPageBufferClient client, Throwable cause)
-        {
-        }
+        public void clientFailed(HttpPageBufferClient client, Throwable cause) {}
     }
 }

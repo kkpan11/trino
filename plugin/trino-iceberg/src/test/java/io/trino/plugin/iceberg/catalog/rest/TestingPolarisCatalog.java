@@ -13,93 +13,139 @@
  */
 package io.trino.plugin.iceberg.catalog.rest;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import io.airlift.http.client.HeaderName;
 import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.Request;
+import io.airlift.http.client.StatusResponseHandler;
+import io.airlift.http.client.StringResponseHandler.StringResponse;
 import io.airlift.http.client.jetty.JettyHttpClient;
+import io.airlift.json.JsonMapperProvider;
+import io.trino.plugin.base.util.AutoCloseableCloser;
+import io.trino.testing.containers.Floci;
 import org.intellij.lang.annotations.Language;
-import org.testcontainers.containers.BindMode;
 import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
 
-import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
-import static com.google.common.collect.MoreCollectors.onlyElement;
+import static com.google.common.base.Preconditions.checkState;
+import static io.airlift.http.client.HeaderNames.AUTHORIZATION;
+import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerator;
 import static io.airlift.http.client.StatusResponseHandler.createStatusResponseHandler;
-import static io.trino.testing.TestingProperties.getDockerImagesVersion;
+import static io.airlift.http.client.StringResponseHandler.createStringResponseHandler;
+import static io.trino.testing.containers.Floci.FLOCI_ACCESS_KEY;
+import static io.trino.testing.containers.Floci.FLOCI_PORT;
+import static io.trino.testing.containers.Floci.FLOCI_REGION;
+import static io.trino.testing.containers.Floci.FLOCI_SECRET_KEY;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 
 public final class TestingPolarisCatalog
-        implements Closeable
+        implements AutoCloseable
 {
     public static final String WAREHOUSE = "polaris";
     private static final int POLARIS_PORT = 8181;
-    private static final Pattern PATTERN = Pattern.compile("realm: default-realm root principal credentials: (?<id>[a-f0-9]+):(?<secret>[a-f0-9]+)");
+    public static final String CREDENTIAL = "root:s3cr3t";
 
+    private static final JsonMapper JSON_MAPPER = new JsonMapperProvider().get();
     private static final HttpClient HTTP_CLIENT = new JettyHttpClient();
+    public static final HeaderName POLARIS_REALM_HEADER = HeaderName.of("Polaris-Realm");
+    public static final String POLARIS_REALM_NAME = "default-realm";
 
+    private final AutoCloseableCloser closer = AutoCloseableCloser.create();
+    private final Floci floci;
     private final GenericContainer<?> polarisCatalog;
-    private final String clientId;
-    private final String clientSecret;
+    private final String token;
     private final String warehouseLocation;
 
-    public TestingPolarisCatalog(String warehouseLocation)
+    public TestingPolarisCatalog(String warehouseLocation, String bucketName)
     {
-        this.warehouseLocation = requireNonNull(warehouseLocation, "warehouseLocation is null");
+        requireNonNull(warehouseLocation, "warehouseLocation is null");
+        requireNonNull(bucketName, "bucketName is null");
 
-        // TODO: Use the official docker image once Polaris community provides it
-        polarisCatalog = new GenericContainer<>("ghcr.io/trinodb/testing/polaris-catalog:" + getDockerImagesVersion());
+        Network network = closer.register(Network.newNetwork());
+        floci = closer.register(new Floci().withNetwork(network).withNetworkAliases("floci"));
+        floci.start();
+        floci.createBucket(bucketName);
+
+        this.warehouseLocation = requireNonNull(warehouseLocation, "warehouseLocation is null");
+        polarisCatalog = closer.register(new GenericContainer<>("apache/polaris:1.5.0"));
         polarisCatalog.addExposedPort(POLARIS_PORT);
-        polarisCatalog.withFileSystemBind(warehouseLocation, warehouseLocation, BindMode.READ_WRITE);
-        polarisCatalog.waitingFor(new LogMessageWaitStrategy().withRegEx(".*o.eclipse.jetty.server.Server: Started.*"));
+        polarisCatalog.withNetwork(network);
+        polarisCatalog.waitingFor(new LogMessageWaitStrategy().withRegEx(".*polaris-server.* started in.*"));
+        polarisCatalog.withEnv("POLARIS_BOOTSTRAP_CREDENTIALS", POLARIS_REALM_NAME.concat(",root,s3cr3t"));
+        polarisCatalog.withEnv("polaris.realm-context.realms", POLARIS_REALM_NAME);
+        polarisCatalog.withEnv("polaris.realm-context.header-name", POLARIS_REALM_HEADER.toString());
+        polarisCatalog.withEnv("polaris.realm-context.require-header", "true");
+        polarisCatalog.withEnv("polaris.readiness.ignore-severe-issues", "true");
+        polarisCatalog.withEnv("polaris.features.\"SUPPORTED_CATALOG_STORAGE_TYPES\"", "[\"S3\"]");
+        polarisCatalog.withEnv("polaris.features.\"ALLOW_INSECURE_STORAGE_TYPES\"", "true");
+        polarisCatalog.withEnv("polaris.features.\"DROP_WITH_PURGE_ENABLED\"", "true");
+        polarisCatalog.withEnv("AWS_ACCESS_KEY_ID", FLOCI_ACCESS_KEY);
+        polarisCatalog.withEnv("AWS_SECRET_ACCESS_KEY", FLOCI_SECRET_KEY);
+        polarisCatalog.withEnv("AWS_REGION", FLOCI_REGION);
+
         polarisCatalog.start();
 
-        clientId = findClientId();
-        clientSecret = findClientSecret();
+        token = getToken();
         createCatalog();
         grantPrivilege();
     }
 
-    private String findClientId()
+    private String getToken()
     {
-        return Stream.of(polarisCatalog.getLogs().split("\n"))
-                .map(PATTERN::matcher)
-                .filter(Matcher::find)
-                .map(matcher -> matcher.group("id"))
-                .collect(onlyElement());
-    }
-
-    private String findClientSecret()
-    {
-        return Stream.of(polarisCatalog.getLogs().split("\n"))
-                .map(PATTERN::matcher)
-                .filter(Matcher::find)
-                .map(matcher -> matcher.group("secret"))
-                .collect(onlyElement());
+        String body = "grant_type=client_credentials&client_id=root&client_secret=s3cr3t&scope=PRINCIPAL_ROLE:ALL";
+        Request request = Request.Builder.preparePost()
+                .setUri(URI.create(restUri() + "/api/catalog/v1/oauth/tokens"))
+                .setHeader(POLARIS_REALM_HEADER, POLARIS_REALM_NAME)
+                .setHeader(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .setBodyGenerator(createStaticBodyGenerator(body, UTF_8))
+                .build();
+        StringResponse response = HTTP_CLIENT.execute(request, createStringResponseHandler());
+        try {
+            return JSON_MAPPER.readTree(response.getBody()).get("access_token").asText();
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     private void createCatalog()
     {
-        @Language("JSON")
-        String body = "{" +
-                "\"name\": \"polaris\"," +
-                "\"id\": 1," +
-                "\"type\": \"INTERNAL\"," +
-                "\"readOnly\": false, " +
-                "\"storageConfigInfo\": {\"storageType\": \"FILE\"}, \"properties\": {\"default-base-location\": \"file://" + warehouseLocation + "\"}" +
-                "}";
+        String flociInternalAddress = "http://floci:%s".formatted(FLOCI_PORT);
+        String body =
+                """
+                {
+                    "catalog": {
+                        "name": "polaris",
+                        "type": "INTERNAL",
+                        "readOnly": false,
+                        "storageConfigInfo": {
+                            "storageType": "S3",
+                            "roleArn": "arn:aws:iam::000000000000:role/test",
+                            "endpoint": "%s",
+                            "pathStyleAccess": true,
+                            "region": "%s"
+                        },
+                        "properties": {
+                            "default-base-location": "%s"
+                        }
+                    }
+                }""".formatted(flociInternalAddress, FLOCI_REGION, warehouseLocation);
         Request request = Request.Builder.preparePost()
                 .setUri(URI.create(restUri() + "/api/management/v1/catalogs"))
-                .setHeader("Authorization", "Bearer " + oauth2Token())
-                .setHeader("Content-Type", "application/json")
+                .setHeader(AUTHORIZATION, "Bearer " + token)
+                .setHeader(CONTENT_TYPE, "application/json")
+                .setHeader(POLARIS_REALM_HEADER, POLARIS_REALM_NAME)
                 .setBodyGenerator(createStaticBodyGenerator(body, UTF_8))
                 .build();
-        HTTP_CLIENT.execute(request, createStatusResponseHandler());
+        StatusResponseHandler.StatusResponse response = HTTP_CLIENT.execute(request, createStatusResponseHandler());
+        checkState(response.getStatusCode() == 201, "Failed to create polaris catalog, status code: %s", response.getStatusCode());
     }
 
     private void grantPrivilege()
@@ -108,8 +154,9 @@ public final class TestingPolarisCatalog
         String body = "{\"grant\": {\"type\": \"catalog\", \"privilege\": \"TABLE_WRITE_DATA\"}}";
         Request request = Request.Builder.preparePut()
                 .setUri(URI.create(restUri() + "/api/management/v1/catalogs/polaris/catalog-roles/catalog_admin/grants"))
-                .setHeader("Authorization", "Bearer " + oauth2Token())
-                .setHeader("Content-Type", "application/json")
+                .setHeader(AUTHORIZATION, "Bearer " + token)
+                .setHeader(CONTENT_TYPE, "application/json")
+                .setHeader(POLARIS_REALM_HEADER, POLARIS_REALM_NAME)
                 .setBodyGenerator(createStaticBodyGenerator(body, UTF_8))
                 .build();
         HTTP_CLIENT.execute(request, createStatusResponseHandler());
@@ -119,8 +166,9 @@ public final class TestingPolarisCatalog
     {
         Request request = Request.Builder.prepareDelete()
                 .setUri(URI.create(restUri() + "/api/catalog/v1/polaris/namespaces/" + schema + "/tables/" + table))
-                .setHeader("Authorization", "Bearer " + oauth2Token())
-                .setHeader("Content-Type", "application/json")
+                .setHeader(AUTHORIZATION, "Bearer " + token)
+                .setHeader(CONTENT_TYPE, "application/json")
+                .setHeader(POLARIS_REALM_HEADER, POLARIS_REALM_NAME)
                 .build();
         HTTP_CLIENT.execute(request, createStatusResponseHandler());
     }
@@ -130,19 +178,15 @@ public final class TestingPolarisCatalog
         return "http://%s:%s".formatted(polarisCatalog.getHost(), polarisCatalog.getMappedPort(POLARIS_PORT));
     }
 
-    public String oauth2Token()
+    public Floci floci()
     {
-        return "principal:root;password:%s;realm:default-realm;role:ALL".formatted(clientSecret);
-    }
-
-    public String oauth2Credentials()
-    {
-        return "%s:%s".formatted(clientId, clientSecret);
+        return floci;
     }
 
     @Override
     public void close()
+            throws Exception
     {
-        polarisCatalog.close();
+        closer.close();
     }
 }

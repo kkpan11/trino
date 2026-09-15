@@ -26,9 +26,6 @@ public class ColumnarArray
     {
         requireNonNull(block, "block is null");
 
-        if (block instanceof LazyBlock lazyBlock) {
-            block = lazyBlock.getBlock();
-        }
         if (block instanceof DictionaryBlock dictionaryBlock) {
             return toColumnarArray(dictionaryBlock);
         }
@@ -41,7 +38,7 @@ public class ColumnarArray
         }
 
         Block elementsBlock = arrayBlock.getRawElementBlock();
-        int[] offsets = arrayBlock.getOffsets();
+        int[] offsets = arrayBlock.getRawOffsets();
         int arrayOffset = arrayBlock.getOffsetBase();
 
         // trim elements to just visible region

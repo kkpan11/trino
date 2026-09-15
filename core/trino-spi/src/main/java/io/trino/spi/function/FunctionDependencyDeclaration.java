@@ -16,9 +16,10 @@ package io.trino.spi.function;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.errorprone.annotations.DoNotCall;
-import io.trino.spi.Experimental;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
+import io.trino.spi.type.TypeTemplate;
+import io.trino.spi.type.TypeTemplates;
 
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -29,12 +30,11 @@ import java.util.stream.Collectors;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
-@Experimental(eta = "2022-10-31")
 public class FunctionDependencyDeclaration
 {
     public static final FunctionDependencyDeclaration NO_DEPENDENCIES = builder().build();
 
-    private final Set<TypeSignature> typeDependencies;
+    private final Set<TypeTemplate> typeDependencies;
     private final Set<FunctionDependency> functionDependencies;
     private final Set<OperatorDependency> operatorDependencies;
     private final Set<CastDependency> castDependencies;
@@ -45,7 +45,7 @@ public class FunctionDependencyDeclaration
     }
 
     private FunctionDependencyDeclaration(
-            Set<TypeSignature> typeDependencies,
+            Set<TypeTemplate> typeDependencies,
             Set<FunctionDependency> functionDependencies,
             Set<OperatorDependency> operatorDependencies,
             Set<CastDependency> castDependencies)
@@ -57,7 +57,7 @@ public class FunctionDependencyDeclaration
     }
 
     @JsonProperty
-    public Set<TypeSignature> getTypeDependencies()
+    public Set<TypeTemplate> getTypeDependencies()
     {
         return typeDependencies;
     }
@@ -83,7 +83,7 @@ public class FunctionDependencyDeclaration
     @JsonCreator
     @DoNotCall // For JSON deserialization only
     public static FunctionDependencyDeclaration fromJson(
-            @JsonProperty Set<TypeSignature> typeDependencies,
+            @JsonProperty Set<TypeTemplate> typeDependencies,
             @JsonProperty Set<FunctionDependency> functionDependencies,
             @JsonProperty Set<OperatorDependency> operatorDependencies,
             @JsonProperty Set<CastDependency> castDependencies)
@@ -93,28 +93,34 @@ public class FunctionDependencyDeclaration
 
     public static final class FunctionDependencyDeclarationBuilder
     {
-        private final Set<TypeSignature> typeDependencies = new LinkedHashSet<>();
+        private final Set<TypeTemplate> typeDependencies = new LinkedHashSet<>();
         private final Set<FunctionDependency> functionDependencies = new LinkedHashSet<>();
         private final Set<OperatorDependency> operatorDependencies = new LinkedHashSet<>();
         private final Set<CastDependency> castDependencies = new LinkedHashSet<>();
 
         private FunctionDependencyDeclarationBuilder() {}
 
-        public FunctionDependencyDeclarationBuilder addType(TypeSignature typeSignature)
+        public FunctionDependencyDeclarationBuilder addType(TypeDescriptor typeDescriptor)
         {
-            typeDependencies.add(typeSignature);
+            typeDependencies.add(TypeTemplates.fromTypeDescriptor(typeDescriptor));
+            return this;
+        }
+
+        public FunctionDependencyDeclarationBuilder addType(TypeTemplate typeTemplate)
+        {
+            typeDependencies.add(typeTemplate);
             return this;
         }
 
         public FunctionDependencyDeclarationBuilder addFunction(CatalogSchemaFunctionName name, List<Type> parameterTypes)
         {
             functionDependencies.add(new FunctionDependency(name, parameterTypes.stream()
-                    .map(Type::getTypeSignature)
+                    .map(FunctionDependencyDeclarationBuilder::toTemplate)
                     .toList(), false));
             return this;
         }
 
-        public FunctionDependencyDeclarationBuilder addFunctionSignature(CatalogSchemaFunctionName name, List<TypeSignature> parameterTypes)
+        public FunctionDependencyDeclarationBuilder addFunctionSignature(CatalogSchemaFunctionName name, List<TypeTemplate> parameterTypes)
         {
             functionDependencies.add(new FunctionDependency(name, parameterTypes, false));
             return this;
@@ -125,13 +131,13 @@ public class FunctionDependencyDeclaration
             functionDependencies.add(new FunctionDependency(
                     name,
                     parameterTypes.stream()
-                            .map(Type::getTypeSignature)
+                            .map(FunctionDependencyDeclarationBuilder::toTemplate)
                             .toList(),
                     true));
             return this;
         }
 
-        public FunctionDependencyDeclarationBuilder addOptionalFunctionSignature(CatalogSchemaFunctionName name, List<TypeSignature> parameterTypes)
+        public FunctionDependencyDeclarationBuilder addOptionalFunctionSignature(CatalogSchemaFunctionName name, List<TypeTemplate> parameterTypes)
         {
             functionDependencies.add(new FunctionDependency(name, parameterTypes, true));
             return this;
@@ -140,12 +146,12 @@ public class FunctionDependencyDeclaration
         public FunctionDependencyDeclarationBuilder addOperator(OperatorType operatorType, List<Type> parameterTypes)
         {
             operatorDependencies.add(new OperatorDependency(operatorType, parameterTypes.stream()
-                    .map(Type::getTypeSignature)
+                    .map(FunctionDependencyDeclarationBuilder::toTemplate)
                     .toList(), false));
             return this;
         }
 
-        public FunctionDependencyDeclarationBuilder addOperatorSignature(OperatorType operatorType, List<TypeSignature> parameterTypes)
+        public FunctionDependencyDeclarationBuilder addOperatorSignature(OperatorType operatorType, List<TypeTemplate> parameterTypes)
         {
             operatorDependencies.add(new OperatorDependency(operatorType, parameterTypes, false));
             return this;
@@ -156,13 +162,13 @@ public class FunctionDependencyDeclaration
             operatorDependencies.add(new OperatorDependency(
                     operatorType,
                     parameterTypes.stream()
-                            .map(Type::getTypeSignature)
+                            .map(FunctionDependencyDeclarationBuilder::toTemplate)
                             .toList(),
                     true));
             return this;
         }
 
-        public FunctionDependencyDeclarationBuilder addOptionalOperatorSignature(OperatorType operatorType, List<TypeSignature> parameterTypes)
+        public FunctionDependencyDeclarationBuilder addOptionalOperatorSignature(OperatorType operatorType, List<TypeTemplate> parameterTypes)
         {
             operatorDependencies.add(new OperatorDependency(operatorType, parameterTypes, true));
             return this;
@@ -170,11 +176,11 @@ public class FunctionDependencyDeclaration
 
         public FunctionDependencyDeclarationBuilder addCast(Type fromType, Type toType)
         {
-            castDependencies.add(new CastDependency(fromType.getTypeSignature(), toType.getTypeSignature(), false));
+            castDependencies.add(new CastDependency(toTemplate(fromType), toTemplate(toType), false));
             return this;
         }
 
-        public FunctionDependencyDeclarationBuilder addCastSignature(TypeSignature fromType, TypeSignature toType)
+        public FunctionDependencyDeclarationBuilder addCastSignature(TypeTemplate fromType, TypeTemplate toType)
         {
             castDependencies.add(new CastDependency(fromType, toType, false));
             return this;
@@ -182,11 +188,11 @@ public class FunctionDependencyDeclaration
 
         public FunctionDependencyDeclarationBuilder addOptionalCast(Type fromType, Type toType)
         {
-            castDependencies.add(new CastDependency(fromType.getTypeSignature(), toType.getTypeSignature(), true));
+            castDependencies.add(new CastDependency(toTemplate(fromType), toTemplate(toType), true));
             return this;
         }
 
-        public FunctionDependencyDeclarationBuilder addOptionalCastSignature(TypeSignature fromType, TypeSignature toType)
+        public FunctionDependencyDeclarationBuilder addOptionalCastSignature(TypeTemplate fromType, TypeTemplate toType)
         {
             castDependencies.add(new CastDependency(fromType, toType, true));
             return this;
@@ -200,15 +206,20 @@ public class FunctionDependencyDeclaration
                     operatorDependencies,
                     castDependencies);
         }
+
+        private static TypeTemplate toTemplate(Type type)
+        {
+            return TypeTemplates.fromTypeDescriptor(type.getTypeDescriptor());
+        }
     }
 
     public static final class FunctionDependency
     {
         private final CatalogSchemaFunctionName name;
-        private final List<TypeSignature> argumentTypes;
+        private final List<TypeTemplate> argumentTypes;
         private final boolean optional;
 
-        private FunctionDependency(CatalogSchemaFunctionName name, List<TypeSignature> argumentTypes, boolean optional)
+        private FunctionDependency(CatalogSchemaFunctionName name, List<TypeTemplate> argumentTypes, boolean optional)
         {
             this.name = requireNonNull(name, "name is null");
             this.argumentTypes = List.copyOf(requireNonNull(argumentTypes, "argumentTypes is null"));
@@ -222,7 +233,7 @@ public class FunctionDependencyDeclaration
         }
 
         @JsonProperty
-        public List<TypeSignature> getArgumentTypes()
+        public List<TypeTemplate> getArgumentTypes()
         {
             return argumentTypes;
         }
@@ -236,7 +247,7 @@ public class FunctionDependencyDeclaration
         @JsonCreator
         public static FunctionDependency fromJson(
                 @JsonProperty CatalogSchemaFunctionName name,
-                @JsonProperty List<TypeSignature> argumentTypes,
+                @JsonProperty List<TypeTemplate> argumentTypes,
                 @JsonProperty boolean optional)
         {
             return new FunctionDependency(name, argumentTypes, optional);
@@ -266,7 +277,7 @@ public class FunctionDependencyDeclaration
         public String toString()
         {
             return name + argumentTypes.stream()
-                    .map(TypeSignature::toString)
+                    .map(TypeTemplate::render)
                     .collect(Collectors.joining(", ", "(", ")"));
         }
     }
@@ -274,10 +285,10 @@ public class FunctionDependencyDeclaration
     public static final class OperatorDependency
     {
         private final OperatorType operatorType;
-        private final List<TypeSignature> argumentTypes;
+        private final List<TypeTemplate> argumentTypes;
         private final boolean optional;
 
-        private OperatorDependency(OperatorType operatorType, List<TypeSignature> argumentTypes, boolean optional)
+        private OperatorDependency(OperatorType operatorType, List<TypeTemplate> argumentTypes, boolean optional)
         {
             this.operatorType = requireNonNull(operatorType, "operatorType is null");
             this.argumentTypes = List.copyOf(requireNonNull(argumentTypes, "argumentTypes is null"));
@@ -291,7 +302,7 @@ public class FunctionDependencyDeclaration
         }
 
         @JsonProperty
-        public List<TypeSignature> getArgumentTypes()
+        public List<TypeTemplate> getArgumentTypes()
         {
             return argumentTypes;
         }
@@ -305,7 +316,7 @@ public class FunctionDependencyDeclaration
         @JsonCreator
         public static OperatorDependency fromJson(
                 @JsonProperty OperatorType operatorType,
-                @JsonProperty List<TypeSignature> argumentTypes,
+                @JsonProperty List<TypeTemplate> argumentTypes,
                 @JsonProperty boolean optional)
         {
             return new OperatorDependency(operatorType, argumentTypes, optional);
@@ -335,18 +346,18 @@ public class FunctionDependencyDeclaration
         public String toString()
         {
             return operatorType + argumentTypes.stream()
-                    .map(TypeSignature::toString)
+                    .map(TypeTemplate::render)
                     .collect(Collectors.joining(", ", "(", ")"));
         }
     }
 
     public static final class CastDependency
     {
-        private final TypeSignature fromType;
-        private final TypeSignature toType;
+        private final TypeTemplate fromType;
+        private final TypeTemplate toType;
         private final boolean optional;
 
-        private CastDependency(TypeSignature fromType, TypeSignature toType, boolean optional)
+        private CastDependency(TypeTemplate fromType, TypeTemplate toType, boolean optional)
         {
             this.fromType = fromType;
             this.toType = toType;
@@ -354,13 +365,13 @@ public class FunctionDependencyDeclaration
         }
 
         @JsonProperty
-        public TypeSignature getFromType()
+        public TypeTemplate getFromType()
         {
             return fromType;
         }
 
         @JsonProperty
-        public TypeSignature getToType()
+        public TypeTemplate getToType()
         {
             return toType;
         }
@@ -373,8 +384,8 @@ public class FunctionDependencyDeclaration
 
         @JsonCreator
         public static CastDependency fromJson(
-                @JsonProperty TypeSignature fromType,
-                @JsonProperty TypeSignature toType,
+                @JsonProperty TypeTemplate fromType,
+                @JsonProperty TypeTemplate toType,
                 @JsonProperty boolean optional)
         {
             return new CastDependency(fromType, toType, optional);
@@ -403,7 +414,7 @@ public class FunctionDependencyDeclaration
         @Override
         public String toString()
         {
-            return format("cast(%s, %s)", fromType, toType);
+            return format("cast(%s, %s)", fromType.render(), toType.render());
         }
     }
 }

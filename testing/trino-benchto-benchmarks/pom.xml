@@ -4,11 +4,12 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>459-SNAPSHOT</version>
+        <version>484-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>trino-benchto-benchmarks</artifactId>
+    <name>${project.artifactId}</name>
     <description>Trino - Benchto benchmarks</description>
 
     <properties>
@@ -16,13 +17,6 @@
     </properties>
 
     <dependencies>
-        <dependency>
-            <!-- TODO document why we have explicit dependency on Guava -->
-            <groupId>com.google.guava</groupId>
-            <artifactId>guava</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-
         <dependency>
             <!-- benchmark queries referenced from benchmark definition files -->
             <groupId>io.trino</groupId>
@@ -53,6 +47,12 @@
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

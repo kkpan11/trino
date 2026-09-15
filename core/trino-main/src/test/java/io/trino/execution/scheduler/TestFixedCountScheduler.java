@@ -14,13 +14,13 @@
 package io.trino.execution.scheduler;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.client.NodeVersion;
 import io.trino.execution.MockRemoteTaskFactory;
 import io.trino.execution.NodeTaskMap.PartitionedSplitCountTracker;
 import io.trino.execution.RemoteTask;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
-import io.trino.metadata.InternalNode;
+import io.trino.node.InternalNode;
+import io.trino.spi.NodeVersion;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -68,34 +68,36 @@ public class TestFixedCountScheduler
     public void testSingleNode()
     {
         FixedCountScheduler nodeScheduler = new FixedCountScheduler(
-                (node, partition) -> Optional.of(taskFactory.createTableScanTask(
+                (node, _) -> Optional.of(taskFactory.createTableScanTask(
                         new TaskId(new StageId("test", 1), 1, 0),
-                        node, ImmutableList.of(),
-                        new PartitionedSplitCountTracker(delta -> {}))),
+                        node,
+                        ImmutableList.of(),
+                        new PartitionedSplitCountTracker(_ -> {}))),
                 generateRandomNodes(1));
 
         ScheduleResult result = nodeScheduler.schedule();
         assertThat(result.isFinished()).isTrue();
         assertThat(result.getBlocked().isDone()).isTrue();
-        assertThat(result.getNewTasks().size()).isEqualTo(1);
-        assertThat(result.getNewTasks().iterator().next().getNodeId().equals("other 0")).isTrue();
+        assertThat(result.getNewTasks()).hasSize(1);
+        assertThat(result.getNewTasks().iterator().next().getNodeId()).isEqualTo("other 0");
     }
 
     @Test
     public void testMultipleNodes()
     {
         FixedCountScheduler nodeScheduler = new FixedCountScheduler(
-                (node, partition) -> Optional.of(taskFactory.createTableScanTask(
+                (node, _) -> Optional.of(taskFactory.createTableScanTask(
                         new TaskId(new StageId("test", 1), 1, 0),
-                        node, ImmutableList.of(),
-                        new PartitionedSplitCountTracker(delta -> {}))),
+                        node,
+                        ImmutableList.of(),
+                        new PartitionedSplitCountTracker(_ -> {}))),
                 generateRandomNodes(5));
 
         ScheduleResult result = nodeScheduler.schedule();
         assertThat(result.isFinished()).isTrue();
         assertThat(result.getBlocked().isDone()).isTrue();
-        assertThat(result.getNewTasks().size()).isEqualTo(5);
-        assertThat(result.getNewTasks().stream().map(RemoteTask::getNodeId).collect(toImmutableSet()).size()).isEqualTo(5);
+        assertThat(result.getNewTasks()).hasSize(5);
+        assertThat(result.getNewTasks().stream().map(RemoteTask::getNodeId).collect(toImmutableSet())).hasSize(5);
     }
 
     private static List<InternalNode> generateRandomNodes(int count)

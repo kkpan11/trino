@@ -17,12 +17,16 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
+import io.trino.orc.OrcReaderOptions;
 import io.trino.orc.metadata.PostScript.HiveWriterVersion;
 import io.trino.orc.metadata.statistics.StringStatistics;
 import org.apache.orc.OrcProto;
 import org.apache.orc.protobuf.ByteString;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.Arrays;
 import java.util.List;
 
@@ -41,6 +45,7 @@ import static java.lang.Character.MIN_CODE_POINT;
 import static java.lang.Character.MIN_SUPPLEMENTARY_CODE_POINT;
 import static java.lang.Character.MIN_SURROGATE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestOrcMetadataReader
 {
@@ -114,6 +119,54 @@ public class TestOrcMetadataReader
             else {
                 assertThat(maxStringTruncateToValidRange(value, ORIGINAL)).isEqualTo(maxSlice);
             }
+        }
+    }
+
+    @Test
+    void testToStripeInformationLargeRowCount()
+            throws IOException
+    {
+        OrcProto.StripeInformation stripe = OrcProto.StripeInformation.newBuilder()
+                .setNumberOfRows(2 * (long) Integer.MAX_VALUE)
+                .setOffset(0)
+                .setIndexLength(100)
+                .setDataLength(200)
+                .setFooterLength(50)
+                .build();
+
+        OrcProto.Type.Builder typeBigInt = OrcProto.Type.newBuilder()
+                .setKind(OrcProto.Type.Kind.LONG);
+
+        OrcProto.Footer footer = OrcProto.Footer.newBuilder()
+                .addTypes(OrcProto.Type.newBuilder().setKind(OrcProto.Type.Kind.STRUCT))
+                .addTypes(typeBigInt)
+                .addTypes(typeBigInt)
+                .addAllStripes(List.of(stripe))
+                .build();
+        InputStream input = new ByteArrayInputStream(footer.toByteArray());
+
+        OrcMetadataReader orcMetadataReader = new OrcMetadataReader(new OrcReaderOptions());
+        Footer actualFooter = orcMetadataReader.readFooter(ORIGINAL, input);
+        assertThat(actualFooter.getStripes().getFirst().getNumberOfRows()).isEqualTo(stripe.getNumberOfRows());
+    }
+
+    @Test
+    void testGeospatialTypesAreNotSupported()
+    {
+        OrcMetadataReader orcMetadataReader = new OrcMetadataReader(new OrcReaderOptions());
+
+        for (OrcProto.Type.Kind kind : List.of(OrcProto.Type.Kind.GEOMETRY, OrcProto.Type.Kind.GEOGRAPHY)) {
+            OrcProto.Footer footer = OrcProto.Footer.newBuilder()
+                    .addTypes(OrcProto.Type.newBuilder()
+                            .setKind(OrcProto.Type.Kind.STRUCT)
+                            .addSubtypes(1)
+                            .addFieldNames("geom"))
+                    .addTypes(OrcProto.Type.newBuilder().setKind(kind))
+                    .build();
+
+            assertThatThrownBy(() -> orcMetadataReader.readFooter(ORIGINAL, new ByteArrayInputStream(footer.toByteArray())))
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessage("ORC type " + kind + " is not supported");
         }
     }
 

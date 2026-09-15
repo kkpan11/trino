@@ -23,12 +23,11 @@ import org.junit.jupiter.api.Test;
 
 import static io.trino.plugin.hive.HiveStorageFormat.ORC;
 import static io.trino.plugin.hive.HiveStorageFormat.PARQUET;
-import static io.trino.plugin.hive.HiveStorageFormat.RCTEXT;
 import static io.trino.plugin.hive.HiveTimestampPrecision.DEFAULT_PRECISION;
 import static io.trino.plugin.hive.coercions.CoercionUtils.createCoercer;
 import static io.trino.plugin.hive.util.HiveTypeTranslator.toHiveType;
-import static io.trino.spi.predicate.Utils.blockToNativeValue;
-import static io.trino.spi.predicate.Utils.nativeValueToBlock;
+import static io.trino.spi.type.TypeUtils.blockToNativeValue;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
@@ -45,35 +44,6 @@ public class TestVarbinaryToVarcharCoercer
 
     @Test
     public void testVarbinaryToVarcharCoercion()
-    {
-        assertVarbinaryToVarcharCoercion(Slices.utf8Slice("abc"), VARBINARY, Slices.utf8Slice("abc"), VARCHAR);
-        assertVarbinaryToVarcharCoercion(Slices.utf8Slice("abc"), VARBINARY, Slices.utf8Slice("ab"), createVarcharType(2));
-        // Invalid UTF-8 encoding
-        assertVarbinaryToVarcharCoercion(Slices.wrappedBuffer(X_CHAR, CONTINUATION_BYTE), VARBINARY, Slices.wrappedBuffer(X_CHAR, CONTINUATION_BYTE), VARCHAR);
-        assertVarbinaryToVarcharCoercion(
-                Slices.wrappedBuffer(X_CHAR, START_4_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE),
-                VARBINARY,
-                Slices.wrappedBuffer(X_CHAR, START_4_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE),
-                VARCHAR);
-        assertVarbinaryToVarcharCoercion(
-                Slices.wrappedBuffer(X_CHAR, START_4_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE, X_CHAR),
-                VARBINARY,
-                Slices.wrappedBuffer(X_CHAR, START_4_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE, CONTINUATION_BYTE, X_CHAR),
-                VARCHAR);
-        assertVarbinaryToVarcharCoercion(
-                Slices.wrappedBuffer(X_CHAR, (byte) 0b11101101, (byte) 0xA0, (byte) 0x80),
-                VARBINARY,
-                Slices.wrappedBuffer(X_CHAR, (byte) 0b11101101, (byte) 0xA0, (byte) 0x80),
-                VARCHAR);
-        assertVarbinaryToVarcharCoercion(
-                Slices.wrappedBuffer(X_CHAR, (byte) 0b11101101, (byte) 0xBF, (byte) 0xBF),
-                VARBINARY,
-                Slices.wrappedBuffer(X_CHAR, (byte) 0b11101101, (byte) 0xBF, (byte) 0xBF),
-                VARCHAR);
-    }
-
-    @Test
-    public void testVarbinaryToVarcharCoercionForParquet()
     {
         assertVarbinaryToVarcharCoercionForParquet(Slices.utf8Slice("abc"), VARBINARY, "abc", VARCHAR);
         assertVarbinaryToVarcharCoercionForParquet(Slices.utf8Slice("abc"), VARBINARY, "ab", createVarcharType(2));
@@ -98,11 +68,6 @@ public class TestVarbinaryToVarcharCoercer
         assertVarbinaryToVarcharCoercionForOrc(Slices.wrappedBuffer(X_CHAR, (byte) 0b11101101, (byte) 0xBF, (byte) 0xBF), VARBINARY, "58 ed bf bf", VARCHAR);
     }
 
-    private static void assertVarbinaryToVarcharCoercion(Slice actualValue, Type fromType, Slice expectedValue, Type toType)
-    {
-        assertVarbinaryToVarcharCoercion(actualValue, fromType, expectedValue, toType, RCTEXT);
-    }
-
     private static void assertVarbinaryToVarcharCoercionForOrc(Slice actualValue, Type fromType, String expectedValue, Type toType)
     {
         assertVarbinaryToVarcharCoercion(actualValue, fromType, Slices.utf8Slice(expectedValue), toType, ORC);
@@ -116,7 +81,7 @@ public class TestVarbinaryToVarcharCoercer
     private static void assertVarbinaryToVarcharCoercion(Slice actualValue, Type fromType, Slice expectedValue, Type toType, HiveStorageFormat storageFormat)
     {
         Block coercedBlock = createCoercer(TESTING_TYPE_MANAGER, toHiveType(fromType), toHiveType(toType), new CoercionContext(DEFAULT_PRECISION, storageFormat)).orElseThrow()
-                .apply(nativeValueToBlock(fromType, actualValue));
+                .apply(writeNativeValue(fromType, actualValue));
         assertThat(blockToNativeValue(toType, coercedBlock))
                 .isEqualTo(expectedValue);
     }

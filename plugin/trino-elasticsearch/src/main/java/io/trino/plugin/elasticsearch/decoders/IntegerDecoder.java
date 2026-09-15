@@ -16,10 +16,11 @@ package io.trino.plugin.elasticsearch.decoders;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.plugin.elasticsearch.DecoderDescriptor;
+import io.trino.plugin.elasticsearch.client.SearchDocument;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
-import org.elasticsearch.search.SearchHit;
 
+import java.util.Objects;
 import java.util.function.Supplier;
 
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
@@ -38,7 +39,7 @@ public class IntegerDecoder
     }
 
     @Override
-    public void decode(SearchHit hit, Supplier<Object> getter, BlockBuilder output)
+    public void decode(SearchDocument document, Supplier<Object> getter, BlockBuilder output)
     {
         Object value = getter.get();
 
@@ -95,6 +96,25 @@ public class IntegerDecoder
         public Decoder createDecoder()
         {
             return new IntegerDecoder(path);
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            Descriptor that = (Descriptor) o;
+            return Objects.equals(this.path, that.path);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return path.hashCode();
         }
     }
 }

@@ -29,6 +29,7 @@ import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.SystemPartitioningHandle;
 import io.trino.sql.planner.optimizations.StreamPropertyDerivations.StreamProperties;
 import io.trino.sql.planner.plan.AggregationNode;
@@ -60,6 +61,7 @@ import io.trino.sql.planner.plan.TableFinishNode;
 import io.trino.sql.planner.plan.TableFunctionNode;
 import io.trino.sql.planner.plan.TableFunctionProcessorNode;
 import io.trino.sql.planner.plan.TableWriterNode;
+import io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.UnionNode;
@@ -103,7 +105,6 @@ import static io.trino.sql.planner.plan.ExchangeNode.Type.REPARTITION;
 import static io.trino.sql.planner.plan.ExchangeNode.gatheringExchange;
 import static io.trino.sql.planner.plan.ExchangeNode.mergingExchange;
 import static io.trino.sql.planner.plan.ExchangeNode.partitionedExchange;
-import static io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -121,7 +122,7 @@ public class AddLocalExchanges
     @Override
     public PlanNode optimize(PlanNode plan, Context context)
     {
-        PlanWithProperties result = plan.accept(new Rewriter(context.idAllocator(), context.session()), any());
+        PlanWithProperties result = plan.accept(new Rewriter(context.idAllocator(), context.symbolAllocator(), context.session()), any());
         return result.getNode();
     }
 
@@ -129,11 +130,13 @@ public class AddLocalExchanges
             extends PlanVisitor<PlanWithProperties, StreamPreferredProperties>
     {
         private final PlanNodeIdAllocator idAllocator;
+        private final SymbolAllocator symbolAllocator;
         private final Session session;
 
-        public Rewriter(PlanNodeIdAllocator idAllocator, Session session)
+        public Rewriter(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
         {
             this.idAllocator = idAllocator;
+            this.symbolAllocator = requireNonNull(symbolAllocator, "symbolAllocator is null");
             this.session = session;
         }
 
@@ -183,7 +186,7 @@ public class AddLocalExchanges
         {
             // Special handling for trivial projections. Applies to identity and renaming projections, and constants
             // It might be extended to handle other low-cost projections.
-            if (node.getAssignments().getExpressions().stream().allMatch(expression -> expression instanceof Reference || expression instanceof Constant constant && constant.value() != null)) {
+            if (node.getAssignments().expressions().stream().allMatch(expression -> expression instanceof Reference || expression instanceof Constant constant && constant.value() != null)) {
                 if (parentPreferences.isSingleStreamPreferred()) {
                     // Do not enforce gathering exchange below project:
                     // - if project's source is single stream, no exchanges will be added around project,
@@ -353,8 +356,7 @@ public class AddLocalExchanges
                                 idAllocator.getNextId(),
                                 LOCAL,
                                 child.getNode(),
-                                groupingKeys,
-                                Optional.empty()),
+                                groupingKeys),
                         child.getProperties());
                 return rebaseAndDeriveProperties(node, ImmutableList.of(exchange));
             }
@@ -418,7 +420,6 @@ public class AddLocalExchanges
                     child.getNode(),
                     node.getSpecification(),
                     node.getWindowFunctions(),
-                    node.getHashSymbol(),
                     prePartitionedInputs,
                     preSortedOrderPrefix);
 
@@ -462,7 +463,6 @@ public class AddLocalExchanges
                     node.getId(),
                     child.getNode(),
                     node.getSpecification(),
-                    node.getHashSymbol(),
                     prePartitionedInputs,
                     preSortedOrderPrefix,
                     node.getWindowFunctions(),
@@ -548,7 +548,6 @@ public class AddLocalExchanges
                     node.getSpecification(),
                     prePartitionedInputs,
                     preSortedOrderPrefix,
-                    node.getHashSymbol(),
                     node.getHandle());
 
             return deriveProperties(result, child.getProperties());
@@ -569,8 +568,7 @@ public class AddLocalExchanges
                     node.getId(),
                     child.getNode(),
                     node.getMarkerSymbol(),
-                    pruneMarkDistinctSymbols(node, child.getProperties().getLocalProperties()),
-                    node.getHashSymbol());
+                    pruneMarkDistinctSymbols(node, child.getProperties().getLocalProperties()));
 
             return deriveProperties(result, child.getProperties());
         }
@@ -748,8 +746,7 @@ public class AddLocalExchanges
 
             // connector provided hash function
             verify(!(partitioningScheme.getPartitioning().getHandle().getConnectorHandle() instanceof SystemPartitioningHandle));
-            verify(
-                    partitioningScheme.getPartitioning().getArguments().stream().noneMatch(Partitioning.ArgumentBinding::isConstant),
+            verify(partitioningScheme.getPartitioning().getArguments().stream().noneMatch(Partitioning.ArgumentBinding::isConstant),
                     "Table writer partitioning has constant arguments");
             PlanWithProperties newSource = source.accept(this, parentPreferences);
             PlanWithProperties exchange = deriveProperties(
@@ -784,8 +781,7 @@ public class AddLocalExchanges
 
             // connector provided hash function
             verify(!(partitioningScheme.getPartitioning().getHandle().getConnectorHandle() instanceof SystemPartitioningHandle));
-            verify(
-                    partitioningScheme.getPartitioning().getArguments().stream().noneMatch(Partitioning.ArgumentBinding::isConstant),
+            verify(partitioningScheme.getPartitioning().getArguments().stream().noneMatch(Partitioning.ArgumentBinding::isConstant),
                     "Table writer partitioning has constant arguments");
 
             PlanWithProperties newSource = source.accept(this, defaultParallelism(session));
@@ -876,8 +872,7 @@ public class AddLocalExchanges
                         LOCAL,
                         new PartitioningScheme(
                                 Partitioning.create(FIXED_HASH_DISTRIBUTION, preferredPartitionColumns.get()),
-                                node.getOutputSymbols(),
-                                Optional.empty()),
+                                node.getOutputSymbols()),
                         sources,
                         inputLayouts,
                         Optional.empty());
@@ -972,7 +967,7 @@ public class AddLocalExchanges
                     parentPreferences.constrainTo(node.getProbeSource().getOutputSymbols()).withDefaultParallelism(session));
 
             // index source does not support local parallel and must produce a single stream
-            StreamProperties indexStreamProperties = derivePropertiesRecursively(node.getIndexSource(), plannerContext, session);
+            StreamProperties indexStreamProperties = derivePropertiesRecursively(node.getIndexSource(), plannerContext, session, symbolAllocator);
             checkArgument(indexStreamProperties.getDistribution() == SINGLE, "index source must be single stream");
             PlanWithProperties index = new PlanWithProperties(node.getIndexSource(), indexStreamProperties);
 
@@ -1043,8 +1038,7 @@ public class AddLocalExchanges
                         idAllocator.getNextId(),
                         LOCAL,
                         planWithProperties.getNode(),
-                        requiredPartitionColumns.get(),
-                        Optional.empty());
+                        requiredPartitionColumns.get());
                 return deriveProperties(exchangeNode, planWithProperties.getProperties());
             }
 
@@ -1073,12 +1067,12 @@ public class AddLocalExchanges
 
         private PlanWithProperties deriveProperties(PlanNode result, StreamProperties inputProperties)
         {
-            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session));
+            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session, symbolAllocator));
         }
 
         private PlanWithProperties deriveProperties(PlanNode result, List<StreamProperties> inputProperties)
         {
-            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session));
+            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session, symbolAllocator));
         }
     }
 

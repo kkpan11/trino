@@ -82,12 +82,13 @@ public final class RowDataType
 
         public Field(NodeLocation location, Optional<Identifier> name, DataType type)
         {
-            super(Optional.of(location));
+            super(location);
 
             this.name = requireNonNull(name, "name is null");
             this.type = requireNonNull(type, "type is null");
         }
 
+        @Deprecated
         public Field(Optional<NodeLocation> location, Optional<Identifier> name, DataType type)
         {
             super(location);
@@ -119,7 +120,7 @@ public final class RowDataType
         @Override
         protected <R, C> R accept(AstVisitor<R, C> visitor, C context)
         {
-            return visitor.visitRowField(this, context);
+            return visitor.visitRowDataTypeField(this, context);
         }
 
         @Override

@@ -14,16 +14,18 @@
 package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.trino.jmh.Benchmarks;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.MapType;
-import io.trino.sql.relational.CallExpression;
-import io.trino.sql.relational.RowExpression;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
+import io.trino.sql.planner.Symbol;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -42,10 +44,11 @@ import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.sql.relational.Expressions.field;
+import static io.trino.sql.ir.IrExpressions.call;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.util.StructuralTestUtil.mapType;
 
@@ -68,9 +71,8 @@ public class BenchmarkMapToMapCast
         return ImmutableList.copyOf(
                 data.getPageProcessor().process(
                         SESSION,
-                        new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPage()));
+                        SourcePage.create(data.getPage())));
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -85,12 +87,12 @@ public class BenchmarkMapToMapCast
         {
             TestingFunctionResolution functionResolution = new TestingFunctionResolution();
 
-            List<RowExpression> projections = ImmutableList.of(new CallExpression(
+            List<Expression> projections = ImmutableList.of(call(
                     functionResolution.getCoercion(mapType(DOUBLE, BIGINT), mapType(BIGINT, DOUBLE)),
-                    ImmutableList.of(field(0, mapType(DOUBLE, BIGINT)))));
+                    new Reference(mapType(DOUBLE, BIGINT), "$col_0")));
 
             pageProcessor = functionResolution.getExpressionCompiler()
-                    .compilePageProcessor(Optional.empty(), projections)
+                    .compilePageProcessor(TEST_SESSION, Optional.empty(), projections, ImmutableMap.of(new Symbol(mapType(DOUBLE, BIGINT), "$col_0"), 0))
                     .get();
 
             Block keyBlock = createKeyBlock(POSITION_COUNT, MAP_SIZE);
@@ -111,7 +113,7 @@ public class BenchmarkMapToMapCast
 
         private static Block createKeyBlock(int positionCount, int mapSize)
         {
-            BlockBuilder valueBlockBuilder = DOUBLE.createBlockBuilder(null, positionCount * mapSize);
+            BlockBuilder valueBlockBuilder = DOUBLE.createFixedSizeBlockBuilder(positionCount * mapSize);
             for (int i = 0; i < positionCount * mapSize; i++) {
                 DOUBLE.writeDouble(valueBlockBuilder, ThreadLocalRandom.current().nextLong());
             }
@@ -120,7 +122,7 @@ public class BenchmarkMapToMapCast
 
         private static Block createValueBlock(int positionCount, int mapSize)
         {
-            BlockBuilder valueBlockBuilder = BIGINT.createBlockBuilder(null, positionCount * mapSize);
+            BlockBuilder valueBlockBuilder = BIGINT.createFixedSizeBlockBuilder(positionCount * mapSize);
             for (int i = 0; i < positionCount * mapSize; i++) {
                 BIGINT.writeLong(valueBlockBuilder, ThreadLocalRandom.current().nextLong());
             }
@@ -138,7 +140,7 @@ public class BenchmarkMapToMapCast
         }
     }
 
-    public static void main(String[] args)
+    static void main()
             throws Exception
     {
         // assure the benchmarks are valid before running

@@ -16,15 +16,14 @@ package io.trino.plugin.redis.util;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.client.Column;
-import io.trino.client.QueryData;
 import io.trino.client.QueryStatusInfo;
+import io.trino.client.ResultRows;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import io.trino.testing.AbstractTestingTrinoClient;
 import io.trino.testing.ResultsSession;
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.RedisClient;
 
 import java.util.List;
 import java.util.Map;
@@ -43,7 +42,7 @@ import static java.util.Objects.requireNonNull;
 public class RedisLoader
         extends AbstractTestingTrinoClient<Void>
 {
-    private final JedisPool jedisPool;
+    private final RedisClient client;
     private final String tableName;
     private final String dataFormat;
     private final AtomicLong count = new AtomicLong();
@@ -52,12 +51,12 @@ public class RedisLoader
     public RedisLoader(
             TestingTrinoServer trinoServer,
             Session defaultSession,
-            JedisPool jedisPool,
+            RedisClient client,
             String tableName,
             String dataFormat)
     {
         super(trinoServer, defaultSession);
-        this.jedisPool = jedisPool;
+        this.client = requireNonNull(client, "client is null");
         this.tableName = tableName;
         this.dataFormat = dataFormat;
         jsonEncoder = new JsonEncoder();
@@ -76,44 +75,44 @@ public class RedisLoader
         private final AtomicReference<List<Type>> types = new AtomicReference<>();
 
         @Override
-        public void addResults(QueryStatusInfo statusInfo, QueryData data)
+        public void addResults(QueryStatusInfo statusInfo, ResultRows rows)
         {
             if (types.get() == null && statusInfo.getColumns() != null) {
                 types.set(getTypes(statusInfo.getColumns()));
             }
 
-            if (data.getData() != null) {
-                checkState(types.get() != null, "Data without types received!");
-                List<Column> columns = statusInfo.getColumns();
-                for (List<Object> fields : data.getData()) {
-                    String redisKey = tableName + ":" + count.getAndIncrement();
+            if (rows.isNull()) {
+                return;
+            }
 
-                    try (Jedis jedis = jedisPool.getResource()) {
-                        switch (dataFormat) {
-                            case "string":
-                                ImmutableMap.Builder<String, Object> builder = ImmutableMap.builder();
-                                for (int i = 0; i < fields.size(); i++) {
-                                    Type type = types.get().get(i);
-                                    Object value = convertValue(fields.get(i), type);
-                                    if (value != null) {
-                                        builder.put(columns.get(i).getName(), value);
-                                    }
-                                }
-                                jedis.set(redisKey, jsonEncoder.toString(builder.buildOrThrow()));
-                                break;
-                            case "hash":
-                                // add keys to zset
-                                String redisZset = "keyset:" + tableName;
-                                jedis.zadd(redisZset, count.get(), redisKey);
-                                // add values to Hash
-                                for (int i = 0; i < fields.size(); i++) {
-                                    jedis.hset(redisKey, columns.get(i).getName(), fields.get(i).toString());
-                                }
-                                break;
-                            default:
-                                throw new AssertionError("unhandled value type: " + dataFormat);
+            checkState(types.get() != null, "Data without types received!");
+            List<Column> columns = statusInfo.getColumns();
+            for (List<Object> fields : rows) {
+                String redisKey = tableName + ":" + count.getAndIncrement();
+
+                switch (dataFormat) {
+                    case "string" -> {
+                        ImmutableMap.Builder<String, Object> builder = ImmutableMap.builder();
+                        for (int i = 0; i < fields.size(); i++) {
+                            Type type = types.get().get(i);
+                            Object value = convertValue(fields.get(i), type);
+                            if (value != null) {
+                                builder.put(columns.get(i).getName(), value);
+                            }
+                        }
+                        client.set(redisKey, jsonEncoder.toString(builder.buildOrThrow()));
+                    }
+                    case "hash" -> {
+                        // add keys to zset
+                        String redisZset = "keyset:" + tableName;
+                        client.zadd(redisZset, count.get(), redisKey);
+
+                        // add values to Hash
+                        for (int i = 0; i < fields.size(); i++) {
+                            client.hset(redisKey, columns.get(i).getName(), fields.get(i).toString());
                         }
                     }
+                    default -> throw new AssertionError("unhandled value type: " + dataFormat);
                 }
             }
         }

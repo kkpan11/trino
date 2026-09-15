@@ -13,27 +13,24 @@
  */
 package io.trino.plugin.opensearch;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.net.HostAndPort;
 import io.trino.Session;
 import io.trino.spi.type.VarcharType;
-import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.testing.AbstractTestQueries;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
-import org.apache.http.HttpHost;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.opensearch.client.Request;
-import org.opensearch.client.RestClient;
 import org.opensearch.client.RestHighLevelClient;
 
 import java.io.IOException;
@@ -43,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import static io.trino.plugin.opensearch.RestClientUtils.createClient;
 import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_REFERENCE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -60,6 +58,7 @@ public abstract class BaseOpenSearchConnectorTest
         extends BaseConnectorTest
 {
     private final String image;
+    private String jmxBaseName;
     private OpenSearchServer opensearch;
     protected RestHighLevelClient client;
 
@@ -74,10 +73,13 @@ public abstract class BaseOpenSearchConnectorTest
     {
         opensearch = new OpenSearchServer(image, false, ImmutableMap.of());
         HostAndPort address = opensearch.getAddress();
-        client = new RestHighLevelClient(RestClient.builder(new HttpHost(address.getHost(), address.getPort())));
+
+        client = createClient(address);
+        jmxBaseName = randomNameSuffix();
 
         return OpenSearchQueryRunner.builder(opensearch.getAddress())
                 .setInitialTables(REQUIRED_TPCH_TABLES)
+                .addConnectorProperties(Map.of("jmx.base-name", jmxBaseName))
                 .build();
     }
 
@@ -140,8 +142,8 @@ public abstract class BaseOpenSearchConnectorTest
         String catalogName = getSession().getCatalog().orElseThrow();
         assertQuerySucceeds("SELECT * FROM orders");
         // Check that JMX stats show no sign of backpressure
-        assertQueryReturnsEmptyResult(format("SELECT 1 FROM jmx.current.\"trino.plugin.opensearch.client:*name=%s*\" WHERE \"backpressurestats.alltime.count\" > 0", catalogName));
-        assertQueryReturnsEmptyResult(format("SELECT 1 FROM jmx.current.\"trino.plugin.opensearch.client:*name=%s*\" WHERE \"backpressurestats.alltime.max\" > 0", catalogName));
+        assertQueryReturnsEmptyResult(format("SELECT 1 FROM jmx.current.\"%s.client:*name=%s*\" WHERE \"backpressurestats.alltime.count\" > 0", jmxBaseName, catalogName));
+        assertQueryReturnsEmptyResult(format("SELECT 1 FROM jmx.current.\"%s.client:*name=%s*\" WHERE \"backpressurestats.alltime.max\" > 0", jmxBaseName, catalogName));
     }
 
     @Test
@@ -149,7 +151,7 @@ public abstract class BaseOpenSearchConnectorTest
     public void testSelectAll()
     {
         // List columns explicitly, as there's no defined order in OpenSearch
-        assertQuery("SELECT orderkey, custkey, orderstatus, totalprice, orderdate, orderpriority, clerk, shippriority, comment  FROM orders");
+        assertQuery("SELECT orderkey, custkey, orderstatus, totalprice, orderdate, orderpriority, clerk, shippriority, comment FROM orders");
     }
 
     @Override
@@ -179,7 +181,8 @@ public abstract class BaseOpenSearchConnectorTest
 
         assertExplain(
                 "EXPLAIN SELECT name FROM nation WHERE nationkey = 42",
-                "nationkey::bigint", "::\\s\\[\\[42\\]\\]");
+                "nationkey::bigint",
+                "::\\s\\[\\[42\\]\\]");
     }
 
     @Test
@@ -241,16 +244,21 @@ public abstract class BaseOpenSearchConnectorTest
         assertQueryReturnsEmptyResult("SELECT * FROM null_predicate1 WHERE null_keyword IS NULL");
         assertQueryReturnsEmptyResult("SELECT * FROM null_predicate1 WHERE null_keyword = '10' OR null_keyword IS NULL");
 
-        assertQuery("SELECT custkey, null_keyword FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NULL", "VALUES (1301, 32)");
-        assertQuery("SELECT custkey FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NULL", "VALUES (1301)");
+        assertThat(query("SELECT custkey, null_keyword FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NULL"))
+                .matches("VALUES (VARCHAR '1301', VARCHAR '32')");
+        assertThat(query("SELECT custkey FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NULL"))
+                .matches("VALUES (VARCHAR '1301')");
 
         // not null filter
         // filtered column is selected
-        assertQuery("SELECT custkey, null_keyword FROM null_predicate1 WHERE null_keyword IS NOT NULL", "VALUES (1301, 32)");
-        assertQuery("SELECT custkey, null_keyword FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NOT NULL", "VALUES (1301, 32)");
+        assertThat(query("SELECT custkey, null_keyword FROM null_predicate1 WHERE null_keyword IS NOT NULL"))
+                .matches("VALUES (VARCHAR '1301', VARCHAR '32')");
+        assertThat(query("SELECT custkey, null_keyword FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NOT NULL"))
+                .matches("VALUES (VARCHAR '1301', VARCHAR '32')");
 
         // filtered column is not selected
-        assertQuery("SELECT custkey FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NOT NULL", "VALUES (1301)");
+        assertThat(query("SELECT custkey FROM null_predicate1 WHERE null_keyword = '32' OR null_keyword IS NOT NULL"))
+                .matches("VALUES (VARCHAR '1301')");
 
         indexName = "null_predicate2";
         properties = "" +
@@ -268,19 +276,24 @@ public abstract class BaseOpenSearchConnectorTest
         assertQueryReturnsEmptyResult("SELECT * FROM null_predicate2 WHERE null_keyword = '10' OR null_keyword IS NOT NULL");
 
         // filtered column is selected
-        assertQuery("SELECT custkey, null_keyword FROM null_predicate2 WHERE null_keyword IS NULL", "VALUES (1301, NULL)");
-        assertQuery("SELECT custkey, null_keyword FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL", "VALUES (1301, NULL)");
+        assertThat(query("SELECT custkey, null_keyword FROM null_predicate2 WHERE null_keyword IS NULL"))
+                .matches("VALUES (VARCHAR '1301', CAST(NULL AS VARCHAR))");
+        assertThat(query("SELECT custkey, null_keyword FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL"))
+                .matches("VALUES (VARCHAR '1301', CAST(NULL AS VARCHAR))");
 
         // filtered column is not selected
-        assertQuery("SELECT custkey FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL", "VALUES (1301)");
+        assertThat(query("SELECT custkey FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL"))
+                .matches("VALUES (VARCHAR '1301')");
 
         index(indexName, ImmutableMap.<String, Object>builder()
                 .put("null_keyword", 32)
                 .put("custkey", 1302)
                 .buildOrThrow());
 
-        assertQuery("SELECT custkey, null_keyword FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL", "VALUES (1301, NULL), (1302, 32)");
-        assertQuery("SELECT custkey FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL", "VALUES (1301), (1302)");
+        assertThat(query("SELECT custkey, null_keyword FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL"))
+                .matches("VALUES (VARCHAR '1301', CAST(NULL AS VARCHAR)), (VARCHAR '1302', VARCHAR '32')");
+        assertThat(query("SELECT custkey FROM null_predicate2 WHERE null_keyword = '32' OR null_keyword IS NULL"))
+                .matches("VALUES (VARCHAR '1301'), (VARCHAR '1302')");
     }
 
     @Test
@@ -294,9 +307,8 @@ public abstract class BaseOpenSearchConnectorTest
                 .put("fields.fieldb", "valueb")
                 .buildOrThrow());
 
-        assertQuery(
-                "SELECT name, fields.fielda, fields.fieldb FROM data",
-                "VALUES ('nestfield', 32, 'valueb')");
+        assertThat(query("SELECT name, fields.fielda, fields.fieldb FROM data"))
+                .matches("VALUES (VARCHAR 'nestfield', BIGINT '32', VARCHAR 'valueb')");
     }
 
     @Test
@@ -327,9 +339,8 @@ public abstract class BaseOpenSearchConnectorTest
                 .put("conflict", "conflict2")
                 .buildOrThrow());
 
-        assertQuery(
-                "SELECT * FROM name_conflict",
-                "VALUES ('value')");
+        assertThat(query("SELECT * FROM name_conflict"))
+                .matches("VALUES (VARCHAR 'value')");
     }
 
     @Test
@@ -455,9 +466,8 @@ public abstract class BaseOpenSearchConnectorTest
                         .build())
                 .buildOrThrow());
 
-        assertQuery(
-                "SELECT a.b.y[1], c.f[1].g[2], c.f[2].g[1], j[2], k[1] FROM test_arrays",
-                "VALUES ('hello', 20, 30, 60, NULL)");
+        assertThat(query("SELECT a.b.y[1], c.f[1].g[2], c.f[2].g[1], j[2], k[1] FROM test_arrays"))
+                .matches("VALUES (VARCHAR 'hello', 20, 30, BIGINT '60', CAST(NULL AS BIGINT))");
     }
 
     @Test
@@ -944,9 +954,8 @@ public abstract class BaseOpenSearchConnectorTest
 
         index(indexName, ImmutableMap.of("a", ImmutableList.of("foo", "bar")));
 
-        assertQuery(
-                "SELECT a FROM test_mixed_arrays",
-                "VALUES NULL, ARRAY['hello'], ARRAY['foo', 'bar']");
+        assertThat(query("SELECT a FROM test_mixed_arrays"))
+                .matches("VALUES NULL, ARRAY[VARCHAR 'hello'], ARRAY[VARCHAR 'foo', VARCHAR 'bar']");
     }
 
     @Test
@@ -980,9 +989,8 @@ public abstract class BaseOpenSearchConnectorTest
                 .put("double_column", "")
                 .buildOrThrow());
 
-        assertQuery(
-                "SELECT byte_column, short_column, integer_column, long_column, float_column, scaled_float_column, double_column FROM emptynumeric",
-                "VALUES (NULL, NULL, NULL, NULL, NULL, NULL, NULL)");
+        assertThat(query("SELECT byte_column, short_column, integer_column, long_column, float_column, scaled_float_column, double_column FROM emptynumeric"))
+                .matches("VALUES (CAST(NULL AS TINYINT), CAST(NULL AS SMALLINT), CAST(NULL AS INTEGER), CAST(NULL AS BIGINT), CAST(NULL AS REAL), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))");
 
         deleteIndex(indexName);
     }
@@ -999,9 +1007,8 @@ public abstract class BaseOpenSearchConnectorTest
                 .put("fields.fieldb", ImmutableMap.of())
                 .buildOrThrow());
 
-        assertQuery(
-                "SELECT name, fields.fielda FROM emptyobject",
-                "VALUES ('stringfield', 32)");
+        assertThat(query("SELECT name, fields.fielda FROM emptyobject"))
+                .matches("VALUES (VARCHAR 'stringfield', BIGINT '32')");
     }
 
     @Test
@@ -1029,25 +1036,24 @@ public abstract class BaseOpenSearchConnectorTest
         index(indexName,
                 ImmutableMap.of("a",
                         ImmutableMap.of("b",
-                                ImmutableMap.of("c",
-                                        "value1"))));
+                                ImmutableMap.of(
+                                        "c", "value1"))));
 
         index(indexName,
                 ImmutableMap.of("a.b",
-                        ImmutableMap.of("c",
-                                "value2")));
+                        ImmutableMap.of(
+                                "c", "value2")));
 
         index(indexName,
                 ImmutableMap.of("a",
-                        ImmutableMap.of("b.c",
-                                "value3")));
+                        ImmutableMap.of(
+                                "b.c", "value3")));
 
         index(indexName,
                 ImmutableMap.of("a.b.c", "value4"));
 
-        assertQuery(
-                "SELECT a.b.c FROM nested_variants",
-                "VALUES 'value1', 'value2', 'value3', 'value4'");
+        assertThat(query("SELECT a.b.c FROM nested_variants"))
+                .matches("VALUES VARCHAR 'value1', VARCHAR 'value2', VARCHAR 'value3', VARCHAR 'value4'");
 
         assertTrinoExceptionThrownBy(() -> computeActual("SELECT a.\"b.c\" FROM nested_variants"))
                 .hasErrorCode(INVALID_COLUMN_REFERENCE)
@@ -1120,11 +1126,12 @@ public abstract class BaseOpenSearchConnectorTest
                 .matches("VALUES VARCHAR 'so.me tex\\t'")
                 .isFullyPushedDown();
 
-        assertThat(query("" +
-                 "SELECT " +
-                 "text_column " +
-                 "FROM " + indexName + " " +
-                 "WHERE text_column LIKE 's_.m%ex\\t'"))
+        assertThat(query(
+                """
+                SELECT text_column
+                FROM like_test WHERE text_column
+                LIKE 's_.m%ex\\t'
+                """))
                 .matches("VALUES VARCHAR 'so.me tex\\t'");
 
         assertThat(query("" +
@@ -1415,7 +1422,8 @@ public abstract class BaseOpenSearchConnectorTest
                 .buildOrThrow());
 
         // Trino query filters in the engine, so the rounding (dependent on scaling factor) does not impact results
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT text_column, scaled_float_column
                 FROM scaled_float_type
                 WHERE scaled_float_column = 123.46
@@ -1509,78 +1517,130 @@ public abstract class BaseOpenSearchConnectorTest
                 .buildOrThrow());
 
         // boolean
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE boolean_column = true", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE boolean_column = false", "VALUES 0");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE boolean_column = true"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE boolean_column = false"))
+                .matches("VALUES BIGINT '0'");
 
         // tinyint
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE byte_column = 1", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE byte_column = 0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE byte_column > 1", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE byte_column < 1", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE byte_column > 0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE byte_column < 10", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE byte_column = 1"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE byte_column = 0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE byte_column > 1"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE byte_column < 1"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE byte_column > 0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE byte_column < 10"))
+                .matches("VALUES BIGINT '1'");
 
         // smallint
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE short_column = 2", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE short_column > 2", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE short_column < 2", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE short_column = 0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE short_column > 0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE short_column < 10", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE short_column = 2"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE short_column > 2"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE short_column < 2"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE short_column = 0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE short_column > 0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE short_column < 10"))
+                .matches("VALUES BIGINT '1'");
 
         // integer
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE integer_column = 3", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE integer_column > 3", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE integer_column < 3", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE integer_column = 0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE integer_column > 0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE integer_column < 10", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE integer_column = 3"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE integer_column > 3"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE integer_column < 3"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE integer_column = 0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE integer_column > 0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE integer_column < 10"))
+                .matches("VALUES BIGINT '1'");
 
         // bigint
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE long_column = 4", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE long_column > 4", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE long_column < 4", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE long_column = 0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE long_column > 0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE long_column < 10", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE long_column = 4"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE long_column > 4"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE long_column < 4"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE long_column = 0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE long_column > 0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE long_column < 10"))
+                .matches("VALUES BIGINT '1'");
 
         // real
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE float_column = 1.0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE float_column > 1.0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE float_column < 1.0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE float_column = 0.0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE float_column > 0.0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE float_column < 10.0", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE float_column = 1.0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE float_column > 1.0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE float_column < 1.0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE float_column = 0.0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE float_column > 0.0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE float_column < 10.0"))
+                .matches("VALUES BIGINT '1'");
 
         // double
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE double_column = 1.0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE double_column > 1.0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE double_column < 1.0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE double_column = 0.0", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE double_column > 0.0", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE double_column < 10.0", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE double_column = 1.0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE double_column > 1.0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE double_column < 1.0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE double_column = 0.0"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE double_column > 0.0"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE double_column < 10.0"))
+                .matches("VALUES BIGINT '1'");
 
         // varchar
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE keyword_column = 'cool'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE keyword_column = 'bar'", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE text_column = 'some text'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE text_column = 'some'", "VALUES 0");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE keyword_column = 'cool'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE keyword_column = 'bar'"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE text_column = 'some text'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE text_column = 'some'"))
+                .matches("VALUES BIGINT '0'");
 
         // binary
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE binary_column = x'CAFE'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE binary_column = x'ABCD'", "VALUES 0");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE binary_column = x'CAFE'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE binary_column = x'ABCD'"))
+                .matches("VALUES BIGINT '0'");
 
         // timestamp
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE timestamp_column = TIMESTAMP '2019-10-01 00:00:00'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE timestamp_column > TIMESTAMP '2019-10-01 00:00:00'", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE timestamp_column < TIMESTAMP '2019-10-01 00:00:00'", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE timestamp_column = TIMESTAMP '2019-10-02 00:00:00'", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE timestamp_column > TIMESTAMP '2001-01-01 00:00:00'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE timestamp_column < TIMESTAMP '2030-01-01 00:00:00'", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE timestamp_column = TIMESTAMP '2019-10-01 00:00:00'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE timestamp_column > TIMESTAMP '2019-10-01 00:00:00'"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE timestamp_column < TIMESTAMP '2019-10-01 00:00:00'"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE timestamp_column = TIMESTAMP '2019-10-02 00:00:00'"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE timestamp_column > TIMESTAMP '2001-01-01 00:00:00'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE timestamp_column < TIMESTAMP '2030-01-01 00:00:00'"))
+                .matches("VALUES BIGINT '1'");
 
         // ipaddress
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE ipv4_column = IPADDRESS '1.2.3.4'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_pushdown WHERE ipv6_column = IPADDRESS '2001:db8::1:0:0:1'", "VALUES 1");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE ipv4_column = IPADDRESS '1.2.3.4'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_pushdown WHERE ipv6_column = IPADDRESS '2001:db8::1:0:0:1'"))
+                .matches("VALUES BIGINT '1'");
     }
 
     @Test
@@ -1590,7 +1650,8 @@ public abstract class BaseOpenSearchConnectorTest
         String indexName = "filter_charset_pushdown";
 
         @Language("JSON")
-        String mappings = """
+        String mappings =
+                """
                 {
                   "properties": {
                     "keyword_column":   { "type": "keyword" },
@@ -1606,20 +1667,19 @@ public abstract class BaseOpenSearchConnectorTest
                 .put("text_column", "Türkiye")
                 .buildOrThrow());
 
-        assertQuery("SELECT count(*) FROM filter_charset_pushdown WHERE keyword_column = 'Türkiye'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_charset_pushdown WHERE keyword_column = 'bar'", "VALUES 0");
-        assertQuery("SELECT count(*) FROM filter_charset_pushdown WHERE text_column = 'Türkiye'", "VALUES 1");
-        assertQuery("SELECT count(*) FROM filter_charset_pushdown WHERE text_column = 'some'", "VALUES 0");
+        assertThat(query("SELECT count(*) FROM filter_charset_pushdown WHERE keyword_column = 'Türkiye'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_charset_pushdown WHERE keyword_column = 'bar'"))
+                .matches("VALUES BIGINT '0'");
+        assertThat(query("SELECT count(*) FROM filter_charset_pushdown WHERE text_column = 'Türkiye'"))
+                .matches("VALUES BIGINT '1'");
+        assertThat(query("SELECT count(*) FROM filter_charset_pushdown WHERE text_column = 'some'"))
+                .matches("VALUES BIGINT '0'");
 
-        assertQuery("SELECT keyword_column FROM filter_charset_pushdown WHERE keyword_column = 'Türkiye'", "VALUES ('Türkiye')");
-        assertQuery("SELECT text_column FROM filter_charset_pushdown WHERE text_column = 'Türkiye'", "VALUES ('Türkiye')");
-    }
-
-    @Test
-    public void testLimitPushdown()
-            throws IOException
-    {
-        assertThat(query("SELECT name FROM nation LIMIT 30")).isNotFullyPushedDown(LimitNode.class); // Use high limit for result determinism
+        assertThat(query("SELECT keyword_column FROM filter_charset_pushdown WHERE keyword_column = 'Türkiye'"))
+                .matches("VALUES (VARCHAR 'Türkiye')");
+        assertThat(query("SELECT text_column FROM filter_charset_pushdown WHERE text_column = 'Türkiye'"))
+                .matches("VALUES (VARCHAR 'Türkiye')");
     }
 
     @Test
@@ -1653,8 +1713,7 @@ public abstract class BaseOpenSearchConnectorTest
         createIndex(indexName, properties);
 
         index(indexName, ImmutableMap.of(
-                "field",
-                ImmutableMap.<String, Object>builder()
+                "field", ImmutableMap.<String, Object>builder()
                         .put("boolean_column", true)
                         .put("float_column", 1.0f)
                         .put("double_column", 1.0d)
@@ -1684,8 +1743,17 @@ public abstract class BaseOpenSearchConnectorTest
                 "FROM types_nested");
 
         MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
-                .row(true, 1.0f, 1.0d, 1, 1L, "cool", "some text", new byte[] {(byte) 0xCA, (byte) 0xFE},
-                        LocalDateTime.of(1970, 1, 1, 0, 0), "1.2.3.4", "2001:db8::1:0:0:1")
+                .row(true,
+                        1.0f,
+                        1.0d,
+                        1,
+                        1L,
+                        "cool",
+                        "some text",
+                        new byte[] {(byte) 0xCA, (byte) 0xFE},
+                        LocalDateTime.of(1970, 1, 1, 0, 0),
+                        "1.2.3.4",
+                        "2001:db8::1:0:0:1")
                 .build();
 
         assertThat(rows.getMaterializedRows()).isEqualTo(expected.getMaterializedRows());
@@ -1723,8 +1791,7 @@ public abstract class BaseOpenSearchConnectorTest
         createIndex(indexName, mappings);
 
         index(indexName, ImmutableMap.of(
-                "nested_field",
-                ImmutableMap.<String, Object>builder()
+                "nested_field", ImmutableMap.<String, Object>builder()
                         .put("boolean_column", true)
                         .put("float_column", 1.0f)
                         .put("double_column", 1.0d)
@@ -1754,8 +1821,17 @@ public abstract class BaseOpenSearchConnectorTest
                 "FROM nested_type_nested");
 
         MaterializedResult expected = resultBuilder(getSession(), rows.getTypes())
-                .row(true, 1.0f, 1.0d, 1, 1L, "cool", "some text", new byte[] {(byte) 0xCA, (byte) 0xFE},
-                        LocalDateTime.of(1970, 1, 1, 0, 0), "1.2.3.4", "2001:db8::1:0:0:1")
+                .row(true,
+                        1.0f,
+                        1.0d,
+                        1,
+                        1L,
+                        "cool",
+                        "some text",
+                        new byte[] {(byte) 0xCA, (byte) 0xFE},
+                        LocalDateTime.of(1970, 1, 1, 0, 0),
+                        "1.2.3.4",
+                        "2001:db8::1:0:0:1")
                 .build();
 
         assertThat(rows.getMaterializedRows()).isEqualTo(expected.getMaterializedRows());
@@ -1771,13 +1847,11 @@ public abstract class BaseOpenSearchConnectorTest
                 .put("AGE", 32)
                 .buildOrThrow());
 
-        assertQuery(
-                "SELECT name, age FROM mixed_case",
-                "VALUES ('john', 32)");
+        assertThat(query("SELECT name, age FROM mixed_case"))
+                .matches("VALUES (VARCHAR 'john', BIGINT '32')");
 
-        assertQuery(
-                "SELECT name, age FROM mixed_case WHERE name = 'john'",
-                "VALUES ('john', 32)");
+        assertThat(query("SELECT name, age FROM mixed_case WHERE name = 'john'"))
+                .matches("VALUES (VARCHAR 'john', BIGINT '32')");
     }
 
     @Test
@@ -1795,12 +1869,10 @@ public abstract class BaseOpenSearchConnectorTest
         createIndex(indexName, properties);
         index(indexName, ImmutableMap.of("numeric_keyword", 20));
 
-        assertQuery(
-                "SELECT numeric_keyword FROM numeric_keyword",
-                "VALUES 20");
-        assertQuery(
-                "SELECT numeric_keyword FROM numeric_keyword where numeric_keyword = '20'",
-                "VALUES 20");
+        assertThat(query("SELECT numeric_keyword FROM numeric_keyword"))
+                .matches("VALUES VARCHAR '20'");
+        assertThat(query("SELECT numeric_keyword FROM numeric_keyword where numeric_keyword = '20'"))
+                .matches("VALUES VARCHAR '20'");
     }
 
     @Test
@@ -1810,9 +1882,8 @@ public abstract class BaseOpenSearchConnectorTest
         String aliasName = format("alias_%s", randomNameSuffix());
         addAlias("orders", aliasName);
 
-        assertQuery(
-                "SELECT count(*) FROM " + aliasName,
-                "SELECT count(*) FROM orders");
+        assertThat(query("SELECT count(*) FROM " + aliasName))
+                .matches("SELECT count(*) FROM orders");
     }
 
     @Test
@@ -1835,9 +1906,8 @@ public abstract class BaseOpenSearchConnectorTest
         addAlias("nation", "multi_alias");
         addAlias("region", "multi_alias");
 
-        assertQuery(
-                "SELECT count(*) FROM multi_alias",
-                "SELECT (SELECT count(*) FROM region) + (SELECT count(*) FROM nation)");
+        assertThat(query("SELECT count(*) FROM multi_alias"))
+                .matches("SELECT (SELECT count(*) FROM region) + (SELECT count(*) FROM nation)");
     }
 
     @Test
@@ -1856,7 +1926,8 @@ public abstract class BaseOpenSearchConnectorTest
 
         createIndex(indexName, mappings);
 
-        assertQuery(format("SELECT column_name FROM information_schema.columns WHERE table_name = '%s'", indexName), "VALUES ('dummy_column')");
+        assertThat(query(format("SELECT column_name FROM information_schema.columns WHERE table_name = '%s'", indexName)))
+                .matches("VALUES (VARCHAR 'dummy_column')");
         assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).contains(indexName);
         assertQueryReturnsEmptyResult("SELECT * FROM " + indexName);
     }
@@ -1895,12 +1966,12 @@ public abstract class BaseOpenSearchConnectorTest
         String catalogName = getSession().getCatalog().orElseThrow();
 
         // select single record
-        assertQuery("SELECT json_query(result, 'lax $[0][0].hits.hits._source') " +
-                        format("FROM TABLE(%s.system.raw_query(", catalogName) +
-                        "schema => 'tpch', " +
-                        "index => 'nation', " +
-                        "query => '{\"query\": {\"match\": {\"name\": \"ALGERIA\"}}}')) t(result)",
-                "VALUES '{\"nationkey\":0,\"name\":\"ALGERIA\",\"regionkey\":0,\"comment\":\" haggle. carefully final deposits detect slyly agai\"}'");
+        assertThat(query("SELECT json_query(result, 'lax $[0][0].hits.hits._source') " +
+                format("FROM TABLE(%s.system.raw_query(", catalogName) +
+                "schema => 'tpch', " +
+                "index => 'nation', " +
+                "query => '{\"query\": {\"match\": {\"name\": \"ALGERIA\"}}}')) t(result)"))
+                .matches("VALUES VARCHAR '{\"nationkey\":0,\"name\":\"ALGERIA\",\"regionkey\":0,\"comment\":\" haggle. carefully final deposits detect slyly agai\"}'");
 
         // parameters
         Session session = Session.builder(getSession())
@@ -1908,18 +1979,16 @@ public abstract class BaseOpenSearchConnectorTest
                         "my_query",
                         format("SELECT json_query(result, 'lax $[0][0].hits.hits._source') FROM TABLE(%s.system.raw_query(schema => ?, index => ?, query => ?))", catalogName))
                 .build();
-        assertQuery(
-                session,
-                "EXECUTE my_query USING 'tpch', 'nation', '{\"query\": {\"match\": {\"name\": \"ALGERIA\"}}}'",
-                "VALUES '{\"nationkey\":0,\"name\":\"ALGERIA\",\"regionkey\":0,\"comment\":\" haggle. carefully final deposits detect slyly agai\"}'");
+        assertThat(query(session, "EXECUTE my_query USING 'tpch', 'nation', '{\"query\": {\"match\": {\"name\": \"ALGERIA\"}}}'"))
+                .matches("VALUES VARCHAR '{\"nationkey\":0,\"name\":\"ALGERIA\",\"regionkey\":0,\"comment\":\" haggle. carefully final deposits detect slyly agai\"}'");
 
         // select multiple records by range. Use array wrapper to wrap multiple results
-        assertQuery("SELECT array_sort(CAST(json_parse(json_query(result, 'lax $[0][0].hits.hits._source.name' WITH ARRAY WRAPPER)) AS array(varchar))) " +
-                        format("FROM TABLE(%s.system.raw_query(", catalogName) +
-                        "schema => 'tpch', " +
-                        "index => 'nation', " +
-                        "query => '{\"query\": {\"range\": {\"nationkey\": {\"gte\": 0,\"lte\": 3}}}}')) t(result)",
-                "VALUES ARRAY['ALGERIA', 'ARGENTINA', 'BRAZIL', 'CANADA']");
+        assertThat(query("SELECT array_sort(CAST(json_parse(json_query(result, 'lax $[0][0].hits.hits._source.name' WITH ARRAY WRAPPER)) AS array(varchar))) " +
+                format("FROM TABLE(%s.system.raw_query(", catalogName) +
+                "schema => 'tpch', " +
+                "index => 'nation', " +
+                "query => '{\"query\": {\"range\": {\"nationkey\": {\"gte\": 0,\"lte\": 3}}}}')) t(result)"))
+                .matches("VALUES CAST(ARRAY['ALGERIA', 'ARGENTINA', 'BRAZIL', 'CANADA'] AS ARRAY(VARCHAR))");
 
         // use aggregations
         @Language("JSON")
@@ -1931,24 +2000,23 @@ public abstract class BaseOpenSearchConnectorTest
                 "    }\n" +
                 "}";
 
-        assertQuery(
-                format("WITH data(r) AS (" +
-                        "   SELECT CAST(json_parse(result) AS ROW(aggregations ROW(max_orderkey ROW(value BIGINT), sum_orderkey ROW(value BIGINT)))) " +
-                        "   FROM TABLE(%s.system.raw_query(" +
-                        "                        schema => 'tpch', " +
-                        "                        index => 'orders', " +
-                        "                        query => '%s'))) " +
-                        "SELECT r.aggregations.max_orderkey.value, r.aggregations.sum_orderkey.value " +
-                        "FROM data", catalogName, query),
-                "VALUES (60000, 449872500)");
+        assertThat(query(format("WITH data(r) AS (" +
+                "   SELECT CAST(json_parse(result) AS ROW(aggregations ROW(max_orderkey ROW(value BIGINT), sum_orderkey ROW(value BIGINT)))) " +
+                "   FROM TABLE(%s.system.raw_query(" +
+                "                        schema => 'tpch', " +
+                "                        index => 'orders', " +
+                "                        query => '%s'))) " +
+                "SELECT r.aggregations.max_orderkey.value, r.aggregations.sum_orderkey.value " +
+                "FROM data", catalogName, query)))
+                .matches("VALUES (BIGINT '60000', BIGINT '449872500')");
 
         // no matches
-        assertQuery("SELECT json_query(result, 'lax $[0][0].hits.hits') " +
-                        format("FROM TABLE(%s.system.raw_query(", catalogName) +
-                        "schema => 'tpch', " +
-                        "index => 'nation', " +
-                        "query => '{\"query\": {\"match\": {\"name\": \"UTOPIA\"}}}')) t(result)",
-                "VALUES '[]'");
+        assertThat(query("SELECT json_query(result, 'lax $[0][0].hits.hits') " +
+                format("FROM TABLE(%s.system.raw_query(", catalogName) +
+                "schema => 'tpch', " +
+                "index => 'nation', " +
+                "query => '{\"query\": {\"match\": {\"name\": \"UTOPIA\"}}}')) t(result)"))
+                .matches("VALUES VARCHAR '[]'");
 
         // syntax error
         assertThat(query("SELECT * " +
@@ -1976,7 +2044,7 @@ public abstract class BaseOpenSearchConnectorTest
 
         Map<String, Object> record2 = new HashMap<>();
         record2.put("id", 2L);
-        record2.put( "root", null);
+        record2.put("root", null);
         index(tableName, record2);
 
         Map<String, Object> record32 = new HashMap<>();
@@ -2009,7 +2077,8 @@ public abstract class BaseOpenSearchConnectorTest
     public void testProjectionPushdownWithCaseSensitiveField()
             throws IOException
     {
-        String tableName = "test_projection_with_case_sensitive_field_" + randomNameSuffix();;
+        String tableName = "test_projection_with_case_sensitive_field_" + randomNameSuffix();
+
         @Language("JSON")
         String properties =
                 """
@@ -2251,25 +2320,25 @@ public abstract class BaseOpenSearchConnectorTest
         assertThat(query("SELECT id, row1_t.row2_t.row3_t.f2 FROM " + tableName)).matches("VALUES (BIGINT '1', BIGINT '7'), (BIGINT '11', BIGINT '17'), (BIGINT '21', BIGINT '27')");
         assertThat(query("SELECT id, row1_t.row2_t.row3_t.f2, CAST(row1_t AS JSON) FROM " + tableName))
                 .matches(
-                "VALUES (BIGINT '1', BIGINT '7', JSON '%s'), "
+                        "VALUES (BIGINT '1', BIGINT '7', JSON '%s'), "
                                 .formatted(
                                         """
-                                                {
-                                                    "f1": 2,
-                                                    "f2": 3,
-                                                    "row2_t": {
-                                                        "f1": 4,
-                                                        "f2": 5,
-                                                        "row3_t": {
-                                                            "f1": 6,
-                                                            "f2": 7
-                                                        }
-                                                    }
+                                        {
+                                            "f1": 2,
+                                            "f2": 3,
+                                            "row2_t": {
+                                                "f1": 4,
+                                                "f2": 5,
+                                                "row3_t": {
+                                                    "f1": 6,
+                                                    "f2": 7
                                                 }
-                                                """) +
-                        "(BIGINT '11', BIGINT '17', JSON '%s'), "
-                                .formatted(
-                                        """
+                                            }
+                                        }
+                                        """) +
+                                "(BIGINT '11', BIGINT '17', JSON '%s'), "
+                                        .formatted(
+                                                """
                                                 {
                                                     "f1": 12,
                                                     "f2": 13,
@@ -2283,9 +2352,9 @@ public abstract class BaseOpenSearchConnectorTest
                                                     }
                                                 }
                                                 """) +
-                        "(BIGINT '21', BIGINT '27', JSON '%s')"
-                                .formatted(
-                                        """
+                                "(BIGINT '21', BIGINT '27', JSON '%s')"
+                                        .formatted(
+                                                """
                                                 {
                                                     "f1": 22,
                                                     "f2": 23,
@@ -2305,54 +2374,54 @@ public abstract class BaseOpenSearchConnectorTest
                 .matches("VALUES (BIGINT '21', JSON '%s')"
                         .formatted(
                                 """
-                                        {
-                                            "f1": 26,
-                                            "f2": 27
-                                        }
-                                        """));
+                                {
+                                    "f1": 26,
+                                    "f2": 27
+                                }
+                                """));
         assertThat(query("SELECT id, CAST(row1_t.row2_t.row3_t AS JSON) FROM " + tableName + " WHERE row1_t.row2_t.row3_t.f2 > 20"))
                 .matches("VALUES (BIGINT '21', JSON '%s')"
                         .formatted(
                                 """
-                                        {
-                                            "f1": 26,
-                                            "f2": 27
-                                        }
-                                        """));
+                                {
+                                    "f1": 26,
+                                    "f2": 27
+                                }
+                                """));
         assertThat(query("SELECT id, CAST(row1_t AS JSON) FROM " + tableName + " WHERE row1_t.row2_t.row3_t.f2 = 27"))
                 .matches("VALUES (BIGINT '21', JSON '%s')"
                         .formatted(
                                 """
-                                        {
-                                            "f1": 22,
-                                            "f2": 23,
-                                            "row2_t": {
-                                                "f1": 24,
-                                                "f2": 25,
-                                                "row3_t": {
-                                                    "f1": 26,
-                                                    "f2": 27
-                                                }
-                                            }
+                                {
+                                    "f1": 22,
+                                    "f2": 23,
+                                    "row2_t": {
+                                        "f1": 24,
+                                        "f2": 25,
+                                        "row3_t": {
+                                            "f1": 26,
+                                            "f2": 27
                                         }
-                                        """));
+                                    }
+                                }
+                                """));
         assertThat(query("SELECT id, CAST(row1_t AS JSON) FROM " + tableName + " WHERE row1_t.row2_t.row3_t.f2 > 20"))
                 .matches("VALUES (BIGINT '21', JSON '%s')"
                         .formatted(
                                 """
-                                        {
-                                            "f1": 22,
-                                            "f2": 23,
-                                            "row2_t": {
-                                                "f1": 24,
-                                                "f2": 25,
-                                                "row3_t": {
-                                                    "f1": 26,
-                                                    "f2": 27
-                                                }
-                                            }
+                                {
+                                    "f1": 22,
+                                    "f2": 23,
+                                    "row2_t": {
+                                        "f1": 24,
+                                        "f2": 25,
+                                        "row3_t": {
+                                            "f1": 26,
+                                            "f2": 27
                                         }
-                                        """));
+                                    }
+                                }
+                                """));
 
         // Test predicates on parent columns
         assertThat(query("SELECT id, row1_t.row2_t.row3_t.f1 FROM " + tableName + " WHERE row1_t.row2_t.row3_t = ROW(16, 17)"))
@@ -2369,44 +2438,44 @@ public abstract class BaseOpenSearchConnectorTest
     {
         String tableName = "test_dereference_pushdown_" + randomNameSuffix();
         index(tableName, ImmutableMap.<String, Object>builder()
+                .put("array_string_field", ImmutableList.<String>builder()
+                        .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
+                        .build())
+                .put("object_field_outer", ImmutableMap.<String, Object>builder()
                         .put("array_string_field", ImmutableList.<String>builder()
                                 .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
                                 .build())
-                        .put("object_field_outer", ImmutableMap.<String, Object>builder()
+                        .put("string_field_outer", "sample")
+                        .put("int_field_outer", 44)
+                        .put("object_field_inner", ImmutableMap.<String, Object>builder()
+                                .put("int_field_inner", 432)
+                                .buildOrThrow())
+                        .buildOrThrow())
+                .put("long_field", 314159265359L)
+                .put("id_field", "564e6982-88ee-4498-aa98-df9e3f6b6109")
+                .put("timestamp_field", "1987-09-17T06:22:48.000Z")
+                .put("object_field", ImmutableMap.<String, Object>builder()
+                        .put("array_string_field", ImmutableList.<String>builder()
+                                .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
+                                .build())
+                        .put("string_field", "sample")
+                        .put("int_field", 2)
+                        .put("object_field_2", ImmutableMap.<String, Object>builder()
                                 .put("array_string_field", ImmutableList.<String>builder()
                                         .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
                                         .build())
-                                .put("string_field_outer", "sample")
-                                .put("int_field_outer", 44)
-                                .put("object_field_inner", ImmutableMap.<String, Object>builder()
-                                        .put("int_field_inner", 432)
+                                .put("string_field2", "sample")
+                                .put("int_field", 33)
+                                .put("object_field_3", ImmutableMap.<String, Object>builder()
+                                        .put("array_string_field", ImmutableList.<String>builder()
+                                                .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
+                                                .build())
+                                        .put("string_field3", "some value")
+                                        .put("int_field3", 55)
                                         .buildOrThrow())
                                 .buildOrThrow())
-                        .put("long_field", 314159265359L)
-                        .put("id_field", "564e6982-88ee-4498-aa98-df9e3f6b6109")
-                        .put("timestamp_field", "1987-09-17T06:22:48.000Z")
-                        .put("object_field", ImmutableMap.<String, Object>builder()
-                                        .put("array_string_field", ImmutableList.<String>builder()
-                                                        .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
-                                                        .build())
-                                        .put("string_field", "sample")
-                                        .put("int_field", 2)
-                                        .put("object_field_2", ImmutableMap.<String, Object>builder()
-                                                        .put("array_string_field", ImmutableList.<String>builder()
-                                                                .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
-                                                                .build())
-                                                        .put("string_field2", "sample")
-                                                        .put("int_field", 33)
-                                                        .put("object_field_3", ImmutableMap.<String, Object>builder()
-                                                                        .put("array_string_field", ImmutableList.<String>builder()
-                                                                                .addAll(Stream.of("trino", "the", "lean", "machine-ohs")::iterator)
-                                                                                .build())
-                                                                        .put("string_field3", "some value")
-                                                                        .put("int_field3", 55)
-                                                                .buildOrThrow())
-                                                .buildOrThrow())
-                                .buildOrThrow())
-                        .buildOrThrow());
+                        .buildOrThrow())
+                .buildOrThrow());
 
         HashMap<String, Object> innerRecord = new HashMap<>();
         innerRecord.put("object_field_inner", null);
@@ -2426,11 +2495,60 @@ public abstract class BaseOpenSearchConnectorTest
         deleteIndex(tableName);
     }
 
+    @Test
+    public void testWildcardTableSameSchema()
+            throws IOException
+    {
+        String suffix = randomNameSuffix();
+        String firstIndex = format("test_wildcard_%s_1", suffix);
+        String secondIndex = format("test_wildcard_%s_2", suffix);
+        String wildcardTable = format("test_wildcard_%s_*", suffix);
+
+        String mappings =
+                """
+                {
+                    "properties": {
+                      "long_column":      { "type": "long" },
+                      "text_column":      { "type": "text" }
+                    }
+                }
+                """;
+
+        createIndex(firstIndex, mappings);
+        index(firstIndex, ImmutableMap.<String, Object>builder()
+                .put("long_column", 1L)
+                .put("text_column", "Trino")
+                .buildOrThrow());
+        createIndex(secondIndex, mappings);
+        index(secondIndex, ImmutableMap.<String, Object>builder()
+                .put("long_column", 2L)
+                .put("text_column", "rocks")
+                .buildOrThrow());
+
+        try {
+            assertThat(query("DESCRIBE \"" + wildcardTable + "\""))
+                    .skippingTypesCheck()
+                    .matches("VALUES ('long_column', 'bigint', '', ''), ('text_column', 'varchar', '', '')");
+            assertThat(query("SELECT * FROM \"" + wildcardTable + "\""))
+                    .matches("VALUES (BIGINT '1', VARCHAR 'Trino'), (BIGINT '2', VARCHAR 'rocks')");
+
+            // Unsupported operations
+            assertQueryFails("DROP TABLE \"" + wildcardTable + "\"", "This connector does not support dropping tables");
+            assertQueryFails("INSERT INTO \"" + wildcardTable + "\" VALUES (3, 'SQL')", "This connector does not support inserts");
+            assertQueryFails("ALTER TABLE \"" + wildcardTable + "\" ADD COLUMN new_column INT", "This connector does not support adding columns");
+            assertQueryFails("ALTER TABLE \"" + wildcardTable + "\" RENAME TO new_wildcard_table", "This connector does not support renaming tables");
+        }
+        finally {
+            deleteIndex(firstIndex);
+            deleteIndex(secondIndex);
+        }
+    }
+
     protected void assertTableDoesNotExist(String name)
     {
         String catalogName = getSession().getCatalog().orElseThrow();
         assertQueryReturnsEmptyResult(format("SELECT * FROM information_schema.columns WHERE table_name = '%s'", name));
-        assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet().contains(name)).isFalse();
+        assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).doesNotContain(name);
         assertQueryFails("SELECT * FROM " + name, ".*Table '" + catalogName + ".tpch." + name + "' does not exist");
     }
 
@@ -2442,7 +2560,7 @@ public abstract class BaseOpenSearchConnectorTest
     private void index(String index, Map<String, Object> document)
             throws IOException
     {
-        String json = new ObjectMapper().writeValueAsString(document);
+        String json = new JsonMapper().writeValueAsString(document);
         String endpoint = format("%s?refresh", indexEndpoint(index, String.valueOf(System.nanoTime())));
 
         Request request = new Request("PUT", endpoint);
@@ -2490,7 +2608,7 @@ public abstract class BaseOpenSearchConnectorTest
     private void deleteIndex(String indexName)
             throws IOException
     {
-        Request request = new Request("DELETE",  "/" + indexName);
+        Request request = new Request("DELETE", "/" + indexName);
         client.getLowLevelClient().performRequest(request);
     }
 }

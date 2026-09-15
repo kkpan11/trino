@@ -45,7 +45,8 @@ public final class VectorIntBitUnpackers
             new Unpacker17(),
             new Unpacker18(),
             new Unpacker19(),
-            new Unpacker20()};
+            new Unpacker20(),
+    };
 
     public static IntBitUnpacker getVectorIntBitUnpacker(int bitWidth)
     {
@@ -59,15 +60,16 @@ public final class VectorIntBitUnpackers
         return UNPACKERS[bitWidth];
     }
 
-    private VectorIntBitUnpackers()
-    {
-    }
+    private VectorIntBitUnpackers() {}
 
     private static final class Unpacker0
             implements IntBitUnpacker
     {
         @Override
-        public void unpack(int[] output, int outputOffset, SimpleSliceInputStream input,
+        public void unpack(
+                int[] output,
+                int outputOffset,
+                SimpleSliceInputStream input,
                 int length)
         {
             // Do nothing
@@ -527,7 +529,10 @@ public final class VectorIntBitUnpackers
         }
 
         @Override
-        public void unpack(int[] output, int outputOffset, SimpleSliceInputStream input,
+        public void unpack(
+                int[] output,
+                int outputOffset,
+                SimpleSliceInputStream input,
                 int length)
         {
             byte[] inputArray = input.getByteArray();

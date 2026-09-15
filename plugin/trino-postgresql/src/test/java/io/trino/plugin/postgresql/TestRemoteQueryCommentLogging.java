@@ -51,7 +51,7 @@ public class TestRemoteQueryCommentLogging
                 .streamQueriesContaining("\"tpch\".\"tpch\".\"tmp_trino_"))
                 .allMatch(query -> query.endsWith("/*query executed by user*/"))
                 .size()
-                .isGreaterThanOrEqualTo(3); //Depending on whether fault tolerancy is enabled or not, this might vary and we don't want to over-specify
+                .isGreaterThanOrEqualTo(3); // Depending on whether fault tolerancy is enabled or not, this might vary and we don't want to over-specify
 
         assertThat(postgreSqlServer.recordEventsForOperations(() -> getQueryRunner().execute("SELECT * FROM postgresql.tpch.log_nation_test_table"))
                 .stopEventsRecording()
@@ -62,7 +62,8 @@ public class TestRemoteQueryCommentLogging
 
         assertThat(postgreSqlServer.recordEventsForOperations(() -> getQueryRunner().execute("DELETE FROM postgresql.tpch.log_nation_test_table"))
                 .stopEventsRecording()
-                .streamQueriesContaining("log_nation_test_table"))
+                // Filter that the identifier not the variable
+                .streamQueriesContaining("\"log_nation_test_table\""))
                 .allMatch(query -> query.endsWith("/*query executed by user*/"))
                 .size()
                 .isEqualTo(1);
@@ -72,7 +73,7 @@ public class TestRemoteQueryCommentLogging
                 .streamQueriesContaining("log_nation_test_table", "\"tpch\".\"tpch\".\"tmp_trino_"))
                 .allMatch(query -> query.endsWith("/*query executed by user*/"))
                 .size()
-                .isGreaterThanOrEqualTo(1); //Depending on whether fault tolerancy is enabled or not, this might vary and we don't want to over-specify
+                .isGreaterThanOrEqualTo(1); // Depending on whether fault tolerancy is enabled or not, this might vary and we don't want to over-specify
 
         assertThat(postgreSqlServer.recordEventsForOperations(() -> getQueryRunner().execute("DROP TABLE postgresql.tpch.log_nation_test_table"))
                 .stopEventsRecording()

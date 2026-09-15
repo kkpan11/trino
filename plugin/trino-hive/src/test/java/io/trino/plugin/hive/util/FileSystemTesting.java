@@ -114,10 +114,10 @@ public class FileSystemTesting
         @Override
         public boolean equals(Object obj)
         {
-            if (!(obj instanceof MockFile)) {
+            if (!(obj instanceof MockFile that)) {
                 return false;
             }
-            return ((MockFile) obj).path.equals(path) && ((MockFile) obj).length == length;
+            return that.path.equals(path) && that.length == length;
         }
 
         @Override
@@ -176,7 +176,7 @@ public class FileSystemTesting
                 throws IOException
         {
             if (offset < file.length) {
-                int i = file.content[offset] & 0xff;
+                int i = file.content[offset] & 0xFF;
                 offset++;
                 return i;
             }

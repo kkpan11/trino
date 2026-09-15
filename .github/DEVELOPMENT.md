@@ -1,59 +1,41 @@
 # Development
 
-Developers should read [the development section of the website](https://trino.io/development),
-which covers thing like development philosophy and contribution process.
+In this document you can find information about developing Trino.
 
-More information about the writing and building the documentation can
-be found in the [docs module](../docs).
-
-* [Commits and pull requests](#commits-and-pull-requests)
+* [Trino organization](#trino-organization)
+* [Trino developer guide](#trino-developer-guide)
 * [Code style](#code-style)
+* [Building](#building)
+* [Branch-scoped local repository](#branch-scoped-local-repository)
 * [Additional IDE configuration](#additional-ide-configuration)
+* [Building docs](#building-docs)
 * [Building the Web UI](#building-the-web-ui)
-* [CI pipeline](#ci-pipeline)
+* [Releases](#releases)
 
-## Commits and pull requests
+## Trino organization
 
-### Format Git commit messages
+Learn about development for all Trino organization projects:
 
-When writing a Git commit message, follow these [guidelines](https://chris.beams.io/posts/git-commit/).
+* [Vision](https://trino.io/development/vision)
+* [Contribution process](https://trino.io/development/process#contribution-process)
+* [Pull request and commit guidelines](https://trino.io/development/process#pull-request-and-commit-guidelines)
+* [Release note guidelines](https://trino.io/development/process#release-note-guidelines)
 
-### Git merge strategy
+Further information in the [development section of the
+website](https://trino.io/development) includes different roles, like
+contributors, reviewers, and maintainers, related processes, and other aspects.
 
-Pull requests are usually merged into `master` using the  [`rebase and merge`](https://docs.github.com/en/github/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/about-pull-request-merges#rebase-and-merge-your-pull-request-commits) strategy.
+## Trino developer guide
 
-A typical pull request should strive to contain a single logical change (but not
-necessarily a single commit). Unrelated changes should generally be extracted
-into their own PRs.
-
-If a pull request contains a stack of more than one commit, then
-popping any number of commits from the top of the stack, should not
-break the PR, ie. every commit should build and pass all tests.
-
-Commit messages and history are important as well, because they are
-used by other developers to keep track of the motivation behind
-changes. Keep logical diffs grouped together in separate commits and
-order commits in a way that explains by itself the evolution of the
-change. Rewriting and reordering commits is a natural part of the
-review process. Mechanical changes like refactoring, renaming, removing
-duplication, extracting helper methods, static imports should be kept
-separated from logical and functional changes like adding a new feature
-or modifying code behaviour. This makes reviewing the code much easier
-and reduces the chance of introducing unintended changes in behavior.
-
-Whenever in doubt on splitting a change into a separate commit, ask
-yourself the following question: if all other work in the PR needs to
-be reverted after merging to master for some objective reason (eg. a
-bug has been discovered), is it worth keeping that commit still in
-master.
+See [the Trino developer guide](https://trino.io/docs/current/develop.html) for
+information about the SPI, implementing connectors and other plugins,
+the client protocol, writing tests and other lower level details.
 
 ## Code Style
 
-We recommend you use IntelliJ as your IDE. The code style template for the
-project can be found in the [codestyle](https://github.com/airlift/codestyle)
-repository along with our general programming and Java guidelines. 
+We recommend you use IntelliJ as your IDE. Code style is managed through [airstyle](https://github.com/airlift/airstyle).
 
-To run checkstyle and other maven checks before opening a PR: `./mvnw validate`
+To run airstyle and other maven checks before opening a PR: `./mvnw validate`
 
 In addition to those you should also adhere to the following:
 
@@ -94,15 +76,22 @@ license by running `mvn license:format`.
 
 ### Prefer String formatting
 
-Consider using String formatting (printf style formatting using the Java
-`Formatter` class): `format("Session property %s is invalid: %s", name, value)`
-(note that `format()` should always be statically imported).  Sometimes, if you
-only need to append something, consider using the `+` operator.  Please avoid
-`format()` or concatenation in performance critical sections of code.
+Consider using String formatting with the `String.formatted` method:
+`"Session property %s is invalid: %s".formatted(name, value)`.
+Sometimes, if you only need to append something, consider using the `+` operator.
+Please avoid `formatted()` or concatenation in performance critical sections of
+code.
 
 ### Avoid ternary operator
 
 Avoid using the ternary operator except for trivial expressions.
+
+ ### Avoid `get` in method names, unless an object must be a Java bean
+
+In most cases, replace `get` with a more specific verb that describes what is 
+happening in the method, like `find` or `fetch`. If there isn't a more specific 
+verb or the method is a getter, omit `get` because it isn't helpful to readers 
+and makes method names longer.
 
 ### Define class API for private inner classes too
 
@@ -127,9 +116,15 @@ Prefer AssertJ for complex assertions.
 For thing not easily expressible with AssertJ, use Airlift's `Assertions` class
 if there is one that covers your case.
 
-### Avoid `var`
+### Use `var` judiciously
 
-Using ``var`` is discouraged.
+Use `var` only when it improves readability. Prefer it when the type
+is obvious from the initializer, such as with `new` expressions, or
+when the explicit type is long or heavily generic and adds noise
+without improving clarity.
+
+Avoid `var` when the inferred type is unclear, surprising, or
+important to understanding the code.
 
 ### Prefer Guava immutable collections
 
@@ -155,6 +150,35 @@ allows static code analysis tools (e.g. Error Prone's `MissingCasesInEnumSwitch`
 check) report a problem when the enum definition is updated but the code using
 it is not.
 
+### Vector API
+It's safe to assume that the JVM has the Vector API
+([JEP 508](https://openjdk.org/jeps/508)) enabled and available at runtime, but
+not safe to assume that the Vector API implementation will perform faster than
+equivalent scalar code on whatever hardware the engine happens to be running on.
+
+Different CPU hardware can exhibit dramatically different performance
+characteristics, so it's important to use hardware feature detection to
+determine under which scenarios a vectorized approach will be faster for
+each implementation. Vectorized code should be tested on AMD, ARM, and Intel
+CPUs to verify the benefits hold on each of those platforms before deciding
+to enable a given code path on each of those platforms. Also note that ARM CPUs
+can exhibit significant differences from between hardware generations as well
+as between Apple Silicon and datacenter class CPUs.
+
+When adding implementations that use the Vector API, prefer the following
+approach unless the specifics of the situation dictate otherwise:
+* Provide an equivalent scalar implementation in code, if one does not already
+exist.
+* Use configuration flags and hardware support detection to ensure that
+vectorized implementation is only selected when running on hardware where it is
+expected to perform better than its scalar equivalent.
+* Add tests that ensure the behavior of the vectorized and scalar
+implementations match.
+* Include micro-benchmarks that demonstrate the performance benefits of the
+vectorized implementation compared to the scalar equivalent logic. Ensure that
+the benefits hold for all CPU architectures on which the vectorized
+implementation is enabled.
+
 ## Keep pom.xml clean and sorted
 
 There are several plugins in place to keep pom.xml clean.
@@ -165,6 +189,43 @@ Your build may fail if:
 Many such errors may be fixed automatically by running the following:
 `./mvnw sortpom:sort`
 
+## Building
+
+The fastest way to build and install the whole project:
+
+```bash
+./mvnw clean install -T 2C -nsu -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
+```
+
+This builds with two threads per core, skips snapshot update checks, tests, Javadoc, and the
+airbase checks (checkstyle, modernizer, dependency analysis). Run `./mvnw validate` separately
+before opening a PR to get those checks back.
+
+## Branch-scoped local repository
+
+Builds from different branches share `~/.m2/repository` and overwrite each other's installed
+SNAPSHOTs, so a build can silently use jars from another branch. The
+[`branch-scoped-local-repository`](https://github.com/lenaschoenburg/branch-scoped-local-repository)
+extension in [`.mvn/extensions.xml`](../.mvn/extensions.xml) keeps installed artifacts separate per
+branch, so several checkouts or [git worktrees](https://git-scm.com/docs/git-worktree) can build
+and install in parallel without interfering.
+
+It is off by default; enable it per build:
+
+```bash
+./mvnw install -DskipTests -DbranchScopedLocalRepo.enabled=true
+```
+
+Before turning it on:
+
+* Pass the flag on the command line of every build in that checkout. Builds without it see the
+  unscoped artifacts instead.
+* The first build on a branch must be a full `install`, and third-party dependencies are
+  downloaded once more.
+* Worktrees on the same branch are still not isolated from each other.
+* Nothing prunes these artifacts, so delete `~/.m2/repository/installed/<branch>/` once the work on
+  a branch is finished.
+
 ## Additional IDE configuration
 
 When using IntelliJ to develop Trino, we recommend starting with all of the
@@ -172,19 +233,19 @@ default inspections, with some modifications.
 
 Enable the following inspections:
 
-- ``Java | Internationalization | Implicit platform default charset``,
-- ``Java | Control flow issues | Redundant 'else'`` (including
-  ``Report when there are no more statements after the 'if' statement`` option),
 - ``Java | Class structure | Utility class is not 'final'``,
 - ``Java | Class structure | Utility class with 'public' constructor``,
-- ``Java | Class structure | Utility class without 'private' constructor``.
+- ``Java | Class structure | Utility class without 'private' constructor``,
+- ``Java | Control flow issues | Redundant 'else'`` (including
+  ``Report when there are no more statements after the 'if' statement`` option), 
+- ``Java | Internationalization | Implicit platform default charset``.
 
 Disable the following inspections:
 
-- ``Java | Performance | Call to 'Arrays.asList()' with too few arguments``,
 - ``Java | Abstraction issues | 'Optional' used as field or parameter type``,
 - ``Java | Code style issues | Local variable or parameter can be 'final'``,
-- ``Java | Data flow | Boolean method is always inverted``.
+- ``Java | Data flow | Boolean method is always inverted``,
+- ``Java | Performance | Call to 'Arrays.asList()' with too few arguments``.
 
 Update the following inspections:
 
@@ -231,30 +292,44 @@ with `@Language`:
 - Local variables which otherwise would not be properly recognized by IDE for
   language injection.
 
+## Building docs
+
+Information about writing and building the documentation can be found in
+the [docs module](../docs).
+
 ## Building the Web UI
 
-The Trino Web UI is composed of several React components and is written in JSX
-and ES6. This source code is compiled and packaged into browser-compatible
-Javascript, which is then checked in to the Trino source code (in the `dist`
-folder). You must have [Node.js](https://nodejs.org/en/download/) and
-[Yarn](https://yarnpkg.com/en/) installed to execute these commands. To update
-this folder after making changes, simply run:
+The Trino Web UI is a React and Vite project located in
+`core/trino-web-ui/src/main/resources/webapp`. You must have
+[Bun](https://bun.sh/docs/installation) installed to execute these
+commands. (Maven builds download Bun automatically, so a local install is only
+needed to run these commands by hand.) Install dependencies with:
 
-    yarn --cwd core/trino-web-ui/src/main/resources/webapp/src install
+    cd core/trino-web-ui/src/main/resources/webapp
+    bun install
 
-If no Javascript dependencies have changed (i.e., no changes to `package.json`),
-it is faster to run:
+For fast local development, run the `WebUiQueryRunner` class. This starts a
+minimal Trino development server configured with the Web UI. Then start the Vite
+development server:
 
-    yarn --cwd core/trino-web-ui/src/main/resources/webapp/src run package
+    bun run dev
 
-To simplify iteration, you can also run in `watch` mode, which automatically
-re-compiles when changes to source files are detected:
+Open `http://localhost:5173/ui` in your browser. The Vite development server
+provides Hot Module Replacement for quick iteration. By default, requests to
+`/ui/auth` and `/ui/api` are proxied to `http://127.0.0.1:8080/`. To use a
+different backend, update `VITE_BASE_URL` in
+`core/trino-web-ui/src/main/resources/webapp/.env.development`.
 
-    yarn --cwd core/trino-web-ui/src/main/resources/webapp/src run watch
+To build the Web UI locally, run:
 
-To iterate quickly, simply re-build the project in IntelliJ after packaging is
-complete. Project resources will be hot-reloaded and changes are reflected on
-browser refresh.
+    bun run build
+
+To run frontend checks, run:
+
+    bun run check
+
+Maven builds package the Web UI automatically, and Maven verification runs the
+frontend checks.
 
 ## Releases
 
@@ -262,16 +337,22 @@ Trino aims for frequent releases, generally once per week. This is a goal but
 not a guarantee, as critical bugs may lead to a release being pushed back or
 require an extra emergency release to patch the issue.
 
-At the start of each release cycle, a GitHub issue is filed and pinned to track
-all necessary release notes. For example, see [the issue for Trino 395](https://github.com/trinodb/trino/issues/13913).
-In addition, a release notes pull request is updated and maintained throughout
-the week, tracking all merged commits to ensure every change is properly
-documented and noted. This uses the [release note template](../docs/release-template.md),
-with changes in each section arranged to have new features first, performance
-improvements second, and bugfixes third. See [the release notes for 395](https://github.com/trinodb/trino/pull/13975)
-as an example.
+At the start of each release cycle, a release notes pull request (PR) is started
+and maintained throughout the week, tracking all merged PRs to ensure every
+change is properly documented and noted.
 
-Once it is time to release, the release process is kicked off. A code freeze is
-announced on the Trino Slack in the #releases channel, and then a maintainer
-utilizes the [release scripts](https://github.com/trinodb/release-scripts) to
-update Trino to the next version.
+The PR uses the [release note template](../docs/release-template.md) and follows
+the [release notes
+guidelines](https://trino.io/development/process#release-note) to use and
+improve the proposed release note entries from the merged PRs. When necessary,
+documentation and clarification for the release notes entries is requested from
+the merging maintainer and the contributor.
+
+See [the release notes for
+455](https://github.com/trinodb/trino/pull/23096) as an example.
+
+Once it is time to release, the release notes PR is merged and the process is
+kicked off. A code freeze is announced on the Trino Slack in the #releases
+channel, and then a maintainer utilizes the [release
+scripts](https://github.com/trinodb/release-scripts) to update Trino to the next
+version.

@@ -30,7 +30,7 @@ public class DateStatisticsBuilder
 
     public DateStatisticsBuilder(BloomFilterBuilder bloomFilterBuilder)
     {
-        this.bloomFilterBuilder = requireNonNull(bloomFilterBuilder, "bloomFilterBuilder is nulll");
+        this.bloomFilterBuilder = requireNonNull(bloomFilterBuilder, "bloomFilterBuilder is null");
     }
 
     @Override
@@ -69,7 +69,7 @@ public class DateStatisticsBuilder
         Optional<DateStatistics> dateStatistics = buildDateStatistics();
         return new ColumnStatistics(
                 nonNullValueCount,
-                dateStatistics.map(s -> DATE_VALUE_BYTES).orElse(0L),
+                dateStatistics.map(_ -> DATE_VALUE_BYTES).orElse(0L),
                 null,
                 null,
                 null,

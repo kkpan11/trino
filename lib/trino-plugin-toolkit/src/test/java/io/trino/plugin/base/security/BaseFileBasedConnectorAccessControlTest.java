@@ -18,8 +18,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Injector;
 import io.airlift.bootstrap.Bootstrap;
-import io.trino.plugin.base.CatalogNameModule;
 import io.trino.spi.QueryId;
+import io.trino.spi.catalog.CatalogName;
+import io.trino.spi.connector.ColumnSchema;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSecurityContext;
 import io.trino.spi.connector.ConnectorTransactionHandle;
@@ -32,24 +33,26 @@ import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
-import java.io.File;
+import java.net.URISyntaxException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.google.common.io.Files.copy;
 import static io.trino.spi.security.PrincipalType.ROLE;
 import static io.trino.spi.security.PrincipalType.USER;
 import static io.trino.spi.security.Privilege.UPDATE;
-import static io.trino.spi.testing.InterfaceTestUtils.assertAllMethodsOverridden;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.testing.InterfaceTestUtils.assertAllMethodsOverridden;
 import static java.lang.Thread.sleep;
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.util.Files.newTemporaryFile;
 
 public abstract class BaseFileBasedConnectorAccessControlTest
 {
@@ -60,10 +63,11 @@ public abstract class BaseFileBasedConnectorAccessControlTest
     private static final ConnectorSecurityContext JOE = user("joe", ImmutableSet.of());
     private static final ConnectorSecurityContext UNKNOWN = user("unknown", ImmutableSet.of());
 
-    protected abstract ConnectorAccessControl createAccessControl(File configFile, Map<String, String> properties);
+    protected abstract ConnectorAccessControl createAccessControl(Path configFile, Map<String, String> properties);
 
     @Test
     public void testEmptyFile()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("empty.json");
 
@@ -73,15 +77,16 @@ public abstract class BaseFileBasedConnectorAccessControlTest
         assertDenied(() -> accessControl.checkCanSetSchemaAuthorization(UNKNOWN, "unknown", new TrinoPrincipal(ROLE, "some_role")));
         accessControl.checkCanShowCreateSchema(UNKNOWN, "unknown");
 
-        accessControl.checkCanSelectFromColumns(UNKNOWN, new SchemaTableName("unknown", "unknown"), ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(UNKNOWN, new SchemaTableName("unknown", "unknown"), Optional.empty(), ImmutableSet.of());
         accessControl.checkCanShowColumns(UNKNOWN, new SchemaTableName("unknown", "unknown"));
-        accessControl.checkCanInsertIntoTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
-        accessControl.checkCanDeleteFromTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
+        accessControl.checkCanInsertIntoTable(UNKNOWN, new SchemaTableName("unknown", "unknown"), Optional.empty());
+        accessControl.checkCanDeleteFromTable(UNKNOWN, new SchemaTableName("unknown", "unknown"), Optional.empty());
 
         accessControl.checkCanCreateTable(UNKNOWN, new SchemaTableName("unknown", "unknown"), Map.of());
         accessControl.checkCanDropTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
         accessControl.checkCanTruncateTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
-        accessControl.checkCanRenameTable(UNKNOWN,
+        accessControl.checkCanRenameTable(
+                UNKNOWN,
                 new SchemaTableName("unknown", "unknown"),
                 new SchemaTableName("unknown", "new_unknown"));
         accessControl.checkCanAlterColumn(UNKNOWN, new SchemaTableName("unknown", "unknown"));
@@ -123,6 +128,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testSchemaRules()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("schema.json");
 
@@ -198,6 +204,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testGrantSchemaPrivilege()
+            throws Exception
     {
         for (Privilege privilege : Privilege.values()) {
             testGrantSchemaPrivilege(privilege, false);
@@ -206,6 +213,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
     }
 
     private void testGrantSchemaPrivilege(Privilege privilege, boolean grantOption)
+            throws URISyntaxException
     {
         ConnectorAccessControl accessControl = createAccessControl("schema.json");
         TrinoPrincipal grantee = new TrinoPrincipal(USER, "alice");
@@ -228,6 +236,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testDenySchemaPrivilege()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("schema.json");
         TrinoPrincipal grantee = new TrinoPrincipal(USER, "alice");
@@ -250,6 +259,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testRevokeSchemaPrivilege()
+            throws Exception
     {
         for (Privilege privilege : Privilege.values()) {
             testRevokeSchemaPrivilege(privilege, false);
@@ -258,6 +268,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
     }
 
     private void testRevokeSchemaPrivilege(Privilege privilege, boolean grantOption)
+            throws URISyntaxException
     {
         ConnectorAccessControl accessControl = createAccessControl("schema.json");
         TrinoPrincipal grantee = new TrinoPrincipal(USER, "alice");
@@ -280,31 +291,32 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testTableRules()
+            throws Exception
     {
         SchemaTableName testTable = new SchemaTableName("test", "test");
         SchemaTableName aliceTable = new SchemaTableName("aliceschema", "alicetable");
         SchemaTableName bobTable = new SchemaTableName("bobschema", "bobtable");
 
         ConnectorAccessControl accessControl = createAccessControl("table.json");
-        accessControl.checkCanSelectFromColumns(ALICE, testTable, ImmutableSet.of());
-        accessControl.checkCanSelectFromColumns(ALICE, bobTable, ImmutableSet.of());
-        accessControl.checkCanSelectFromColumns(ALICE, bobTable, ImmutableSet.of("bobcolumn"));
+        accessControl.checkCanSelectFromColumns(ALICE, testTable, Optional.empty(), ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(ALICE, bobTable, Optional.empty(), ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(ALICE, bobTable, Optional.empty(), ImmutableSet.of("bobcolumn"));
 
         accessControl.checkCanShowColumns(ALICE, bobTable);
         assertThat(accessControl.filterColumns(ALICE, Map.of(bobTable, ImmutableSet.of("a"))))
                 .isEqualTo(Map.of(bobTable, ImmutableSet.of("a")));
-        accessControl.checkCanSelectFromColumns(BOB, bobTable, ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(BOB, bobTable, Optional.empty(), ImmutableSet.of());
         accessControl.checkCanShowColumns(BOB, bobTable);
         assertThat(accessControl.filterColumns(BOB, Map.of(bobTable, ImmutableSet.of("a"))))
                 .isEqualTo(Map.of(bobTable, ImmutableSet.of("a")));
 
-        accessControl.checkCanInsertIntoTable(BOB, bobTable);
-        accessControl.checkCanDeleteFromTable(BOB, bobTable);
+        accessControl.checkCanInsertIntoTable(BOB, bobTable, Optional.empty());
+        accessControl.checkCanDeleteFromTable(BOB, bobTable, Optional.empty());
         accessControl.checkCanTruncateTable(BOB, bobTable);
-        accessControl.checkCanSelectFromColumns(CHARLIE, bobTable, ImmutableSet.of());
-        accessControl.checkCanSelectFromColumns(CHARLIE, bobTable, ImmutableSet.of("bobcolumn"));
-        accessControl.checkCanInsertIntoTable(CHARLIE, bobTable);
-        accessControl.checkCanSelectFromColumns(JOE, bobTable, ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(CHARLIE, bobTable, Optional.empty(), ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(CHARLIE, bobTable, Optional.empty(), ImmutableSet.of("bobcolumn"));
+        accessControl.checkCanInsertIntoTable(CHARLIE, bobTable, Optional.empty());
+        accessControl.checkCanSelectFromColumns(JOE, bobTable, Optional.empty(), ImmutableSet.of());
 
         accessControl.checkCanCreateTable(ADMIN, new SchemaTableName("bob", "test"), Map.of());
         accessControl.checkCanCreateTable(ADMIN, testTable, Map.of());
@@ -336,16 +348,17 @@ public abstract class BaseFileBasedConnectorAccessControlTest
         accessControl.checkCanSetTableProperties(ADMIN, bobTable, ImmutableMap.of());
         accessControl.checkCanSetTableProperties(ALICE, aliceTable, ImmutableMap.of());
 
-        assertDenied(() -> accessControl.checkCanInsertIntoTable(ALICE, bobTable));
+        assertDenied(() -> accessControl.checkCanInsertIntoTable(ALICE, bobTable, Optional.empty()));
         assertDenied(() -> accessControl.checkCanDropTable(BOB, bobTable));
         assertDenied(() -> accessControl.checkCanRenameTable(BOB, bobTable, new SchemaTableName("bobschema", "newbobtable")));
         assertDenied(() -> accessControl.checkCanRenameTable(ALICE, aliceTable, new SchemaTableName("bobschema", "newalicetable")));
         assertDenied(() -> accessControl.checkCanSetViewComment(ALICE, new SchemaTableName("bobschema", "newalicetable")));
         assertDenied(() -> accessControl.checkCanAlterColumn(BOB, bobTable));
         assertDenied(() -> accessControl.checkCanSetTableProperties(BOB, bobTable, ImmutableMap.of()));
-        assertDenied(() -> accessControl.checkCanInsertIntoTable(BOB, testTable));
-        assertDenied(() -> accessControl.checkCanSelectFromColumns(ADMIN, new SchemaTableName("secret", "secret"), ImmutableSet.of()));
-        assertDenied(() -> accessControl.checkCanSelectFromColumns(JOE, new SchemaTableName("secret", "secret"), ImmutableSet.of()));
+        assertDenied(() -> accessControl.checkCanInsertIntoTable(BOB, testTable, Optional.empty()));
+        assertDenied(() -> accessControl.checkCanSelectFromColumns(ADMIN, new SchemaTableName("secret", "secret"), Optional.empty(), ImmutableSet.of()), "Cannot select from table secret.secret");
+        assertDenied(() -> accessControl.checkCanSelectFromColumns(JOE, new SchemaTableName("secret", "secret"), Optional.empty(), ImmutableSet.of()), "Cannot select from table secret.secret");
+        assertDenied(() -> accessControl.checkCanSelectFromColumns(CHARLIE, bobTable, Optional.empty(), ImmutableSet.of("private", "public")), "Cannot select from columns [private] in table or view bobschema.bobtable");
         assertDenied(() -> accessControl.checkCanCreateViewWithSelectFromColumns(JOE, bobTable, ImmutableSet.of()));
         assertDenied(() -> accessControl.checkCanRenameView(BOB, new SchemaTableName("bobschema", "bobview"), new SchemaTableName("bobschema", "newbobview")));
         assertDenied(() -> accessControl.checkCanRenameView(ALICE, aliceTable, new SchemaTableName("bobschema", "newalicetable")));
@@ -371,6 +384,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testTableRulesForMixedGroupUsers()
+            throws Exception
     {
         SchemaTableName myTable = new SchemaTableName("my_schema", "my_table");
 
@@ -380,20 +394,21 @@ public abstract class BaseFileBasedConnectorAccessControlTest
         ConnectorSecurityContext userGroup2 = user("user_2", ImmutableSet.of("group2"));
 
         accessControl.checkCanCreateTable(userGroup1Group2, myTable, Map.of());
-        accessControl.checkCanInsertIntoTable(userGroup1Group2, myTable);
-        accessControl.checkCanDeleteFromTable(userGroup1Group2, myTable);
+        accessControl.checkCanInsertIntoTable(userGroup1Group2, myTable, Optional.empty());
+        accessControl.checkCanDeleteFromTable(userGroup1Group2, myTable, Optional.empty());
         accessControl.checkCanDropTable(userGroup1Group2, myTable);
-        accessControl.checkCanSelectFromColumns(userGroup1Group2, myTable, ImmutableSet.of());
-        assertThat(accessControl.getColumnMask(userGroup1Group2, myTable, "col_a", VARCHAR)).isEqualTo(Optional.empty());
+        accessControl.checkCanSelectFromColumns(userGroup1Group2, myTable, Optional.empty(), ImmutableSet.of());
+        assertThat(accessControl.getColumnMasks(userGroup1Group2, myTable, List.of(ColumnSchema.builder().setName("col_a").setType(VARCHAR).build()))).isEmpty();
         assertThat(accessControl.getRowFilters(userGroup1Group2, myTable)).isEqualTo(ImmutableList.of());
 
         assertDenied(() -> accessControl.checkCanCreateTable(userGroup2, myTable, Map.of()));
-        assertDenied(() -> accessControl.checkCanInsertIntoTable(userGroup2, myTable));
-        assertDenied(() -> accessControl.checkCanDeleteFromTable(userGroup2, myTable));
+        assertDenied(() -> accessControl.checkCanInsertIntoTable(userGroup2, myTable, Optional.empty()));
+        assertDenied(() -> accessControl.checkCanDeleteFromTable(userGroup2, myTable, Optional.empty()));
         assertDenied(() -> accessControl.checkCanDropTable(userGroup2, myTable));
-        accessControl.checkCanSelectFromColumns(userGroup2, myTable, ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(userGroup2, myTable, Optional.empty(), ImmutableSet.of());
+        ColumnSchema colA = ColumnSchema.builder().setName("col_a").setType(VARCHAR).build();
         assertViewExpressionEquals(
-                accessControl.getColumnMask(userGroup2, myTable, "col_a", VARCHAR).orElseThrow(),
+                accessControl.getColumnMasks(userGroup2, myTable, List.of(colA)).get(colA),
                 ViewExpression.builder()
                         .catalog("test_catalog")
                         .schema("my_schema")
@@ -405,19 +420,18 @@ public abstract class BaseFileBasedConnectorAccessControlTest
         ConnectorSecurityContext userGroup3 = user("user_3", ImmutableSet.of("group3"));
 
         accessControl.checkCanCreateTable(userGroup1Group3, myTable, Map.of());
-        accessControl.checkCanInsertIntoTable(userGroup1Group3, myTable);
-        accessControl.checkCanDeleteFromTable(userGroup1Group3, myTable);
+        accessControl.checkCanInsertIntoTable(userGroup1Group3, myTable, Optional.empty());
+        accessControl.checkCanDeleteFromTable(userGroup1Group3, myTable, Optional.empty());
         accessControl.checkCanDropTable(userGroup1Group3, myTable);
-        accessControl.checkCanSelectFromColumns(userGroup1Group3, myTable, ImmutableSet.of());
-        assertThat(accessControl.getColumnMask(userGroup1Group3, myTable, "col_a", VARCHAR)).isEqualTo(Optional.empty());
-
+        accessControl.checkCanSelectFromColumns(userGroup1Group3, myTable, Optional.empty(), ImmutableSet.of());
+        assertThat(accessControl.getColumnMasks(userGroup1Group3, myTable, List.of(ColumnSchema.builder().setName("col_a").setType(VARCHAR).build()))).isEmpty();
         assertDenied(() -> accessControl.checkCanCreateTable(userGroup3, myTable, Map.of()));
-        assertDenied(() -> accessControl.checkCanInsertIntoTable(userGroup3, myTable));
-        assertDenied(() -> accessControl.checkCanDeleteFromTable(userGroup3, myTable));
+        assertDenied(() -> accessControl.checkCanInsertIntoTable(userGroup3, myTable, Optional.empty()));
+        assertDenied(() -> accessControl.checkCanDeleteFromTable(userGroup3, myTable, Optional.empty()));
         assertDenied(() -> accessControl.checkCanDropTable(userGroup3, myTable));
-        accessControl.checkCanSelectFromColumns(userGroup3, myTable, ImmutableSet.of());
+        accessControl.checkCanSelectFromColumns(userGroup3, myTable, Optional.empty(), ImmutableSet.of());
         assertViewExpressionEquals(
-                accessControl.getColumnMask(userGroup3, myTable, "col_a", VARCHAR).orElseThrow(),
+                accessControl.getColumnMasks(userGroup3, myTable, List.of(colA)).get(colA),
                 ViewExpression.builder()
                         .catalog("test_catalog")
                         .schema("my_schema")
@@ -425,7 +439,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
                         .build());
 
         List<ViewExpression> rowFilters = accessControl.getRowFilters(userGroup3, myTable);
-        assertThat(rowFilters.size()).isEqualTo(1);
+        assertThat(rowFilters).hasSize(1);
         assertViewExpressionEquals(
                 rowFilters.get(0),
                 ViewExpression.builder()
@@ -456,6 +470,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testTableFilter()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("table-filter.json");
         Set<SchemaTableName> tables = ImmutableSet.<SchemaTableName>builder()
@@ -487,6 +502,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testNoTableRules()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("no-access.json");
         SchemaTableName bobTable = new SchemaTableName("bobschema", "bobtable");
@@ -506,6 +522,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testNoFunctionRules()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("no-access.json");
 
@@ -529,6 +546,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testSessionPropertyRules()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("session_property.json");
         accessControl.checkCanSetCatalogSessionProperty(ADMIN, "dangerous");
@@ -546,6 +564,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testFilterSchemas()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("visibility.json");
         assertFilterSchemas(accessControl);
@@ -553,7 +572,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     private static void assertFilterSchemas(ConnectorAccessControl accessControl)
     {
-        ImmutableSet<String> allSchemas = ImmutableSet.of("specific-schema", "alice-schema", "bob-schema", "unknown", "ptf_schema", "procedure-schema");
+        Set<String> allSchemas = ImmutableSet.of("specific-schema", "alice-schema", "bob-schema", "unknown", "ptf_schema", "procedure-schema");
         assertThat(accessControl.filterSchemas(ADMIN, allSchemas)).isEqualTo(allSchemas);
         assertThat(accessControl.filterSchemas(ALICE, allSchemas)).isEqualTo(ImmutableSet.of("specific-schema", "alice-schema", "ptf_schema"));
         assertThat(accessControl.filterSchemas(BOB, allSchemas)).isEqualTo(ImmutableSet.of("specific-schema", "bob-schema", "procedure-schema"));
@@ -562,6 +581,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testSchemaRulesForCheckCanShowTables()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("visibility.json");
         accessControl.checkCanShowTables(ADMIN, "specific-schema");
@@ -588,6 +608,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testSchemaRulesForCheckCanShowFunctions()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("visibility.json");
         accessControl.checkCanShowFunctions(ADMIN, "specific-schema");
@@ -614,6 +635,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testFunctionRulesForCheckCanExecute()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("visibility.json");
         assertThat(accessControl.canExecuteFunction(ADMIN, new SchemaRoutineName("ptf_schema", "some_function"))).isFalse();
@@ -639,6 +661,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testProcedureRulesForCheckCanExecute()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("visibility.json");
 
@@ -660,15 +683,18 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testFilterSchemasWithJsonPointer()
+            throws Exception
     {
-        File configFile = new File(getResourcePath("visibility-with-json-pointer.json"));
-        ConnectorAccessControl accessControl = createAccessControl(configFile,
+        Path configFile = getResourcePath("visibility-with-json-pointer.json");
+        ConnectorAccessControl accessControl = createAccessControl(
+                configFile,
                 ImmutableMap.of("security.json-pointer", "/data"));
         assertFilterSchemas(accessControl);
     }
 
     @Test
     public void testSchemaAuthorization()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("authorization-no-roles.json");
 
@@ -693,6 +719,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testTableAuthorization()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("authorization-no-roles.json");
 
@@ -717,6 +744,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     @Test
     public void testViewAuthorization()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("authorization-no-roles.json");
 
@@ -740,7 +768,33 @@ public abstract class BaseFileBasedConnectorAccessControlTest
     }
 
     @Test
+    public void testMaterializedViewAuthorization()
+            throws Exception
+    {
+        ConnectorAccessControl accessControl = createAccessControl("authorization-no-roles.json");
+
+        SchemaTableName table = new SchemaTableName("test", "table");
+        SchemaTableName ownedByUser = new SchemaTableName("test", "owned_by_user");
+        SchemaTableName ownedByGroup = new SchemaTableName("test", "owned_by_group");
+
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewAuthorization(user("user", "group"), table, new TrinoPrincipal(ROLE, "new_role")));
+
+        // access to schema granted to user
+        accessControl.checkCanSetMaterializedViewAuthorization(user("owner_authorized", "group"), ownedByUser, new TrinoPrincipal(USER, "new_user"));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewAuthorization(user("owner_DENY_authorized", "group"), ownedByUser, new TrinoPrincipal(USER, "new_user")));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewAuthorization(user("owner", "group"), ownedByUser, new TrinoPrincipal(USER, "new_user")));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewAuthorization(user("owner_authorized", "group"), ownedByUser, new TrinoPrincipal(ROLE, "new_role")));
+
+        // access to schema granted to group
+        accessControl.checkCanSetMaterializedViewAuthorization(user("authorized", "owner"), ownedByGroup, new TrinoPrincipal(USER, "new_user"));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewAuthorization(user("DENY_authorized", "owner"), ownedByGroup, new TrinoPrincipal(USER, "new_user")));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewAuthorization(user("user", "owner"), ownedByGroup, new TrinoPrincipal(USER, "new_user")));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewAuthorization(user("authorized", "owner"), ownedByGroup, new TrinoPrincipal(ROLE, "new_role")));
+    }
+
+    @Test
     public void testFunctionFilter()
+            throws Exception
     {
         ConnectorAccessControl accessControl = createAccessControl("function-filter.json");
         Set<SchemaFunctionName> functions = ImmutableSet.<SchemaFunctionName>builder()
@@ -778,12 +832,11 @@ public abstract class BaseFileBasedConnectorAccessControlTest
     }
 
     @Test
-    public void testRefreshing()
+    public void testRefreshing(@TempDir Path tempDir)
             throws Exception
     {
-        File configFile = newTemporaryFile();
-        configFile.deleteOnExit();
-        copy(new File(getResourcePath("visibility.json")), configFile);
+        Path configFile = tempDir.resolve("visibility.json");
+        Files.copy(getResourcePath("visibility.json"), configFile, REPLACE_EXISTING);
 
         ConnectorAccessControl accessControl = createAccessControl(configFile, ImmutableMap.of(
                 "security.refresh-period", "1ms"));
@@ -791,13 +844,13 @@ public abstract class BaseFileBasedConnectorAccessControlTest
         accessControl.checkCanShowTables(ALICE, "alice-schema");
         accessControl.checkCanShowTables(ALICE, "alice-schema");
 
-        copy(new File(getResourcePath("no-access.json")), configFile);
+        Files.copy(getResourcePath("no-access.json"), configFile, REPLACE_EXISTING);
         sleep(2);
 
         assertThatThrownBy(() -> accessControl.checkCanShowTables(ALICE, "alice-schema"))
                 .hasMessageContaining("Access Denied");
 
-        copy(new File(getResourcePath("visibility.json")), configFile);
+        Files.copy(getResourcePath("visibility.json"), configFile, REPLACE_EXISTING);
         sleep(2);
 
         accessControl.checkCanShowTables(ALICE, "alice-schema");
@@ -805,7 +858,7 @@ public abstract class BaseFileBasedConnectorAccessControlTest
 
     protected ConnectorAccessControl createAccessControl(Map<String, String> configProperties)
     {
-        Bootstrap bootstrap = new Bootstrap(new CatalogNameModule("test_catalog"), new FileBasedAccessControlModule());
+        Bootstrap bootstrap = new Bootstrap(binder -> binder.bind(CatalogName.class).toInstance(new CatalogName("test_catalog")), new FileBasedAccessControlModule());
 
         Injector injector = bootstrap
                 .doNotInitializeLogging()
@@ -817,14 +870,16 @@ public abstract class BaseFileBasedConnectorAccessControlTest
     }
 
     private ConnectorAccessControl createAccessControl(String rulesName)
+            throws URISyntaxException
     {
-        File configFile = new File(getResourcePath(rulesName));
+        Path configFile = getResourcePath(rulesName);
         return createAccessControl(configFile, ImmutableMap.of());
     }
 
-    private String getResourcePath(String resourceName)
+    private Path getResourcePath(String resourceName)
+            throws URISyntaxException
     {
-        return requireNonNull(this.getClass().getClassLoader().getResource(resourceName), "Resource does not exist: " + resourceName).getPath();
+        return Path.of(requireNonNull(this.getClass().getClassLoader().getResource(resourceName), "Resource does not exist: " + resourceName).toURI());
     }
 
     private static ConnectorSecurityContext user(String user, String group)
@@ -846,6 +901,13 @@ public abstract class BaseFileBasedConnectorAccessControlTest
                 .isInstanceOf(AccessDeniedException.class)
                 // TODO test expected message precisely, as in TestFileBasedSystemAccessControl
                 .hasMessageStartingWith("Access Denied");
+    }
+
+    private static void assertDenied(ThrowingRunnable runnable, String expectedMessage)
+    {
+        assertThatThrownBy(runnable::run)
+                .isInstanceOf(AccessDeniedException.class)
+                .hasMessage("Access Denied: " + expectedMessage);
     }
 
     interface ThrowingRunnable

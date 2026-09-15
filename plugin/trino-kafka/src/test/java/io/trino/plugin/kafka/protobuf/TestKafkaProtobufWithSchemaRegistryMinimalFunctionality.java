@@ -43,6 +43,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 
 import static com.google.common.io.Resources.getResource;
 import static com.google.protobuf.Descriptors.FieldDescriptor.JavaType.ENUM;
@@ -226,7 +227,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         waitUntilTableExists(topic);
 
         assertThat(query(format("SELECT list, map, row FROM %s", toDoubleQuoted(topic))))
-                .matches("""
+                .matches(
+                        """
                         VALUES (
                             ARRAY[CAST('Search' AS VARCHAR)],
                             MAP(CAST(ARRAY['Key1'] AS ARRAY(VARCHAR)), CAST(ARRAY['Value1'] AS ARRAY(VARCHAR))),
@@ -240,7 +242,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                                     boolean_column BOOLEAN,
                                     number_column VARCHAR,
                                     timestamp_column TIMESTAMP(6),
-                                    bytes_column VARBINARY)))""");
+                                    bytes_column VARBINARY)))
+                        """);
     }
 
     @Test
@@ -266,7 +269,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         waitUntilTableExists(topic);
 
         assertThat(query(format("SELECT testOneOfColumn FROM %s", toDoubleQuoted(topic))))
-                .matches("""
+                .matches(
+                        """
                         VALUES (JSON '{"stringColumn":"%s"}')
                         """.formatted(stringData));
     }
@@ -320,7 +324,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
 
         URI anySchemaFile = new File(Resources.getResource("protobuf/any/structural_datatypes/schema").getFile()).toURI();
         assertThat(query(format("SELECT id, anyMessage FROM %s", toDoubleQuoted(topic))))
-                .matches("""
+                .matches(
+                        """
                         VALUES (1, JSON '{"@type":"%s","list":["Search"],"map":{"Key1":"Value1"},"row":{"booleanColumn":true,"bytesColumn":"VHJpbm8=","doubleColumn":3.141592653589793,"floatColumn":3.14,"integerColumn":1,"longColumn":"493857959588286460","numberColumn":"ONE","stringColumn":"Trino","timestampColumn":"2020-12-12T15:35:45.923Z"}}')
                         """.formatted(anySchemaFile));
     }
@@ -328,7 +333,7 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
     private DynamicMessage buildDynamicMessage(Descriptor descriptor, Map<String, Object> data)
     {
         DynamicMessage.Builder builder = DynamicMessage.newBuilder(descriptor);
-        for (Map.Entry<String, Object> entry : data.entrySet()) {
+        for (Entry<String, Object> entry : data.entrySet()) {
             FieldDescriptor fieldDescriptor = descriptor.findFieldByName(entry.getKey());
             if (entry.getValue() instanceof Map<?, ?>) {
                 builder.setField(fieldDescriptor, buildDynamicMessage(fieldDescriptor.getMessageType(), (Map<String, Object>) entry.getValue()));
@@ -380,7 +385,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                 .addAll(newMessages)
                 .build();
         assertCount(topicName, allMessages.size());
-        assertQuery(evolvedQuery, getExpectedValues(allMessages, getEvolvedSchema(), isKeyIncluded));
+        String expectedValues = getExpectedValues(allMessages, getEvolvedSchema(), isKeyIncluded);
+        assertQueryEventually(getSession(), evolvedQuery, expectedValues, io.airlift.units.Duration.valueOf("5s"));
     }
 
     private static String getExpectedValues(List<ProducerRecord<DynamicMessage, DynamicMessage>> messages, Descriptor descriptor, boolean isKeyIncluded)
@@ -529,7 +535,7 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         return DynamicMessage.newBuilder(descriptor)
                 .setField(descriptor.findFieldByName("col_1"), format("string-%s", key))
                 .setField(descriptor.findFieldByName("col_2"), multiplyExact(key, 100))
-                .setField(descriptor.findFieldByName("col_3"), (key + 10.1D) / 10.0D)
+                .setField(descriptor.findFieldByName("col_3"), (key + 10.1d) / 10.0d)
                 .build();
     }
 }

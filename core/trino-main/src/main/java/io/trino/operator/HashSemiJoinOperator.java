@@ -18,7 +18,6 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
-import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.operator.SetBuilderOperator.SetSupplier;
 import io.trino.operator.WorkProcessor.TransformationState;
 import io.trino.spi.Page;
@@ -29,7 +28,6 @@ import io.trino.sql.planner.plan.PlanNodeId;
 import jakarta.annotation.Nullable;
 
 import java.util.List;
-import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -40,7 +38,6 @@ import static io.trino.operator.WorkProcessor.TransformationState.blocked;
 import static io.trino.operator.WorkProcessor.TransformationState.finished;
 import static io.trino.operator.WorkProcessor.TransformationState.ofResult;
 import static io.trino.operator.WorkProcessorOperatorAdapter.createAdapterOperatorFactory;
-import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static java.util.Objects.requireNonNull;
 
@@ -52,10 +49,9 @@ public class HashSemiJoinOperator
             PlanNodeId planNodeId,
             SetSupplier setSupplier,
             List<? extends Type> probeTypes,
-            int probeJoinChannel,
-            Optional<Integer> probeJoinHashChannel)
+            int probeJoinChannel)
     {
-        return createAdapterOperatorFactory(new Factory(operatorId, planNodeId, setSupplier, probeTypes, probeJoinChannel, probeJoinHashChannel));
+        return createAdapterOperatorFactory(new Factory(operatorId, planNodeId, setSupplier, probeTypes, probeJoinChannel));
     }
 
     private static class Factory
@@ -66,10 +62,9 @@ public class HashSemiJoinOperator
         private final SetSupplier setSupplier;
         private final List<Type> probeTypes;
         private final int probeJoinChannel;
-        private final Optional<Integer> probeJoinHashChannel;
         private boolean closed;
 
-        private Factory(int operatorId, PlanNodeId planNodeId, SetSupplier setSupplier, List<? extends Type> probeTypes, int probeJoinChannel, Optional<Integer> probeJoinHashChannel)
+        private Factory(int operatorId, PlanNodeId planNodeId, SetSupplier setSupplier, List<? extends Type> probeTypes, int probeJoinChannel)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
@@ -77,14 +72,13 @@ public class HashSemiJoinOperator
             this.probeTypes = ImmutableList.copyOf(probeTypes);
             checkArgument(probeJoinChannel >= 0, "probeJoinChannel is negative");
             this.probeJoinChannel = probeJoinChannel;
-            this.probeJoinHashChannel = probeJoinHashChannel;
         }
 
         @Override
-        public WorkProcessorOperator create(ProcessorContext processorContext, WorkProcessor<Page> sourcePages)
+        public WorkProcessorOperator create(OperatorContext operatorContext, WorkProcessor<Page> sourcePages)
         {
             checkState(!closed, "Factory is already closed");
-            return new HashSemiJoinOperator(sourcePages, setSupplier, probeJoinChannel, probeJoinHashChannel, processorContext.getMemoryTrackingContext());
+            return new HashSemiJoinOperator(operatorContext, sourcePages, setSupplier, probeJoinChannel);
         }
 
         @Override
@@ -114,25 +108,23 @@ public class HashSemiJoinOperator
         @Override
         public Factory duplicate()
         {
-            return new Factory(operatorId, planNodeId, setSupplier, probeTypes, probeJoinChannel, probeJoinHashChannel);
+            return new Factory(operatorId, planNodeId, setSupplier, probeTypes, probeJoinChannel);
         }
     }
 
     private final WorkProcessor<Page> pages;
 
     private HashSemiJoinOperator(
+            OperatorContext operatorContext,
             WorkProcessor<Page> sourcePages,
             SetSupplier channelSetFuture,
-            int probeJoinChannel,
-            Optional<Integer> probeHashChannel,
-            MemoryTrackingContext memoryTrackingContext)
+            int probeJoinChannel)
     {
         pages = sourcePages
                 .transform(new SemiJoinPages(
                         channelSetFuture,
                         probeJoinChannel,
-                        probeHashChannel,
-                        memoryTrackingContext.aggregateUserMemoryContext()));
+                        operatorContext.aggregateUserMemoryContext()));
     }
 
     @Override
@@ -144,23 +136,19 @@ public class HashSemiJoinOperator
     private static class SemiJoinPages
             implements WorkProcessor.Transformation<Page, Page>
     {
-        private static final int NO_PRECOMPUTED_HASH_CHANNEL = -1;
-
         private final int probeJoinChannel;
-        private final int probeHashChannel; // when >= 0, this is the precomputed hash channel
         private final ListenableFuture<ChannelSet> channelSetFuture;
         private final LocalMemoryContext localMemoryContext;
 
         @Nullable
         private ChannelSet channelSet;
 
-        public SemiJoinPages(SetSupplier channelSetFuture, int probeJoinChannel, Optional<Integer> probeHashChannel, AggregatedMemoryContext aggregatedMemoryContext)
+        public SemiJoinPages(SetSupplier channelSetFuture, int probeJoinChannel, AggregatedMemoryContext aggregatedMemoryContext)
         {
             checkArgument(probeJoinChannel >= 0, "probeJoinChannel is negative");
 
             this.channelSetFuture = channelSetFuture.getChannelSet();
             this.probeJoinChannel = probeJoinChannel;
-            this.probeHashChannel = probeHashChannel.orElse(NO_PRECOMPUTED_HASH_CHANNEL);
             this.localMemoryContext = aggregatedMemoryContext.newLocalMemoryContext(SemiJoinPages.class.getSimpleName());
         }
 
@@ -190,7 +178,6 @@ public class HashSemiJoinOperator
 
             Block probeBlock = inputPage.getBlock(probeJoinChannel).copyRegion(0, inputPage.getPositionCount());
             boolean probeMayHaveNull = probeBlock.mayHaveNull();
-            Block hashBlock = probeHashChannel >= 0 ? inputPage.getBlock(probeHashChannel).copyRegion(0, inputPage.getPositionCount()) : null;
 
             // update hashing strategy to use probe cursor
             for (int position = 0; position < inputPage.getPositionCount(); position++) {
@@ -203,14 +190,7 @@ public class HashSemiJoinOperator
                     }
                 }
                 else {
-                    boolean contains;
-                    if (hashBlock != null) {
-                        long rawHash = BIGINT.getLong(hashBlock, position);
-                        contains = channelSet.contains(probeBlock, position, rawHash);
-                    }
-                    else {
-                        contains = channelSet.contains(probeBlock, position);
-                    }
+                    boolean contains = channelSet.contains(probeBlock, position);
                     if (!contains && channelSet.containsNull()) {
                         blockBuilder.appendNull();
                     }
@@ -226,6 +206,6 @@ public class HashSemiJoinOperator
 
     private static <T> ListenableFuture<Void> asVoid(ListenableFuture<T> future)
     {
-        return Futures.transform(future, v -> null, directExecutor());
+        return Futures.transform(future, _ -> null, directExecutor());
     }
 }

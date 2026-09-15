@@ -25,6 +25,7 @@ import io.trino.util.Reflection;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Array;
+import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.bytecode.Access.FINAL;
@@ -38,7 +39,7 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.newArray;
 import static io.airlift.bytecode.expression.BytecodeExpressions.newInstance;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.gen.BytecodeUtils.loadConstant;
-import static io.trino.util.CompilerUtils.defineClass;
+import static io.trino.util.CompilerUtils.defineHiddenClass;
 import static io.trino.util.CompilerUtils.makeClassName;
 import static io.trino.util.Failures.checkCondition;
 import static java.util.Collections.nCopies;
@@ -130,7 +131,7 @@ public final class VarArgsToArrayAdapterGenerator
         for (int i = 0; i < argsLength; i++) {
             parameterListBuilder.add(arg("input_" + i, javaType));
         }
-        ImmutableList<Parameter> parameterList = parameterListBuilder.build();
+        List<Parameter> parameterList = parameterListBuilder.build();
 
         MethodDefinition methodDefinition = classDefinition.declareMethod(a(PUBLIC, STATIC), "varArgsToArray", type(returnType), parameterList);
         BytecodeBlock body = methodDefinition.getBody();
@@ -147,7 +148,7 @@ public final class VarArgsToArrayAdapterGenerator
                         .ret());
 
         // define class
-        Class<?> generatedClass = defineClass(classDefinition, Object.class, callSiteBinder.getBindings(), VarArgsToArrayAdapterGenerator.class.getClassLoader());
+        Class<?> generatedClass = defineHiddenClass(classDefinition, Object.class, callSiteBinder.getClassData());
         return new MethodHandleAndConstructor(
                 Reflection.methodHandle(
                         generatedClass,

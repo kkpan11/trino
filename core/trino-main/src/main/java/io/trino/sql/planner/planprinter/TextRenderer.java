@@ -34,7 +34,6 @@ import java.util.function.Function;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.trino.server.protocol.spooling.SpooledBlock.SPOOLING_METADATA_COLUMN_NAME;
 import static java.lang.Double.NEGATIVE_INFINITY;
 import static java.lang.Double.POSITIVE_INFINITY;
 import static java.lang.Double.isFinite;
@@ -76,7 +75,6 @@ public class TextRenderer
                 .append("\n");
 
         String columns = node.getOutputs().stream()
-                .filter(s -> !s.name().equals(SPOOLING_METADATA_COLUMN_NAME))
                 .map(s -> s.name() + ":" + s.type())
                 .collect(joining(", "));
 
@@ -144,7 +142,8 @@ public class TextRenderer
         double cpuTimeFraction = 100.0d * nodeStats.getPlanNodeCpuTime().toMillis() / plan.getTotalCpuTime().get().toMillis();
         double blockedTimeFraction = 100.0d * nodeStats.getPlanNodeBlockedTime().toMillis() / plan.getTotalBlockedTime().get().toMillis();
 
-        output.append(format("CPU: %s (%s%%), Scheduled: %s (%s%%), Blocked: %s (%s%%)",
+        output.append(format(
+                "CPU: %s (%s%%), Scheduled: %s (%s%%), Blocked: %s (%s%%)",
                 nodeStats.getPlanNodeCpuTime().convertToMostSuccinctTimeUnit(),
                 formatDouble(cpuTimeFraction),
                 nodeStats.getPlanNodeScheduledTime().convertToMostSuccinctTimeUnit(),
@@ -159,11 +158,12 @@ public class TextRenderer
         output.append("\n");
 
         printMetrics(output, "connector metrics:", BasicOperatorStats::getConnectorMetrics, nodeStats);
+        printConnectorSplitSourceMetrics(output, node);
         printMetrics(output, "metrics:", BasicOperatorStats::getMetrics, nodeStats);
         printDistributions(output, nodeStats);
 
-        if (nodeStats instanceof WindowPlanNodeStats) {
-            printWindowOperatorStats(output, ((WindowPlanNodeStats) nodeStats).getWindowOperatorStats());
+        if (nodeStats instanceof WindowPlanNodeStats windowPlanNodeStats) {
+            printWindowOperatorStats(output, windowPlanNodeStats.getWindowOperatorStats());
         }
 
         return output.toString();
@@ -180,25 +180,39 @@ public class TextRenderer
             String translatedOperatorType = translatedOperatorTypes.get(operator);
             Map<String, Metric<?>> metrics = metricsGetter.apply(stats.getOperatorStats().get(operator)).getMetrics();
 
-            // filter out empty distributions
-            metrics = metrics.entrySet().stream()
-                    .filter(entry -> {
-                        if (!(entry.getValue() instanceof TDigestHistogram histogram)) {
-                            return true;
-                        }
-
-                        return histogram.getMin() != 0. || histogram.getMax() != 0.;
-                    })
-                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
-
-            if (metrics.isEmpty()) {
-                continue;
-            }
-
-            output.append(translatedOperatorType + label).append("\n");
-            Map<String, Metric<?>> sortedMap = new TreeMap<>(metrics);
-            sortedMap.forEach((name, metric) -> output.append(format("  '%s' = %s\n", name, metric)));
+            printMetrics(output, translatedOperatorType + label, metrics);
         }
+    }
+
+    private void printConnectorSplitSourceMetrics(StringBuilder output, NodeRepresentation node)
+    {
+        if (!verbose) {
+            return;
+        }
+        Metrics metrics = node.getSplitSourceMetrics();
+        printMetrics(output, "splits generation metrics:", metrics.getMetrics());
+    }
+
+    private void printMetrics(StringBuilder output, String label, Map<String, Metric<?>> metrics)
+    {
+        // filter out empty distributions
+        metrics = metrics.entrySet().stream()
+                .filter(entry -> {
+                    if (!(entry.getValue() instanceof TDigestHistogram histogram)) {
+                        return true;
+                    }
+
+                    return histogram.getMin() != 0. || histogram.getMax() != 0.;
+                })
+                .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        if (metrics.isEmpty()) {
+            return;
+        }
+
+        output.append(label).append("\n");
+        Map<String, Metric<?>> sortedMap = new TreeMap<>(metrics);
+        sortedMap.forEach((name, metric) -> output.append(format("  '%s' = %s\n", name, metric)));
     }
 
     private void printDistributions(StringBuilder output, PlanNodeStats stats)
@@ -269,7 +283,8 @@ public class TextRenderer
     private String formatPlanNodeStatsAndCostSummary(PlanNodeStatsAndCostSummary stats)
     {
         requireNonNull(stats, "stats is null");
-        return format("{rows: %s (%s), cpu: %s, memory: %s, network: %s}",
+        return format(
+                "{rows: %s (%s), cpu: %s, memory: %s, network: %s}",
                 formatAsLong(stats.getOutputRowCount()),
                 formatAsDataSize(stats.getOutputSizeInBytes()),
                 formatAsCpuCost(stats.getCpuCost()),

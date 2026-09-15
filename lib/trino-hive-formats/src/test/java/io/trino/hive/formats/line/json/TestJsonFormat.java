@@ -23,6 +23,7 @@ import io.trino.hive.formats.line.LineDeserializer;
 import io.trino.hive.formats.line.LineSerializer;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
+import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DateType;
@@ -67,6 +68,7 @@ import static io.trino.hive.formats.FormatTestUtils.readTrinoValues;
 import static io.trino.hive.formats.FormatTestUtils.toSingleRowPage;
 import static io.trino.hive.formats.FormatTestUtils.toSqlTimestamp;
 import static io.trino.hive.formats.HiveFormatUtils.TIMESTAMP_FORMATS_KEY;
+import static io.trino.hive.formats.HiveFormatsErrorCode.HIVE_UNSERIALIZABLE_JSON_VALUE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.CharType.createCharType;
@@ -254,13 +256,13 @@ public class TestJsonFormat
         assertVarbinary(
                 allBytesJsonValue,
                 "" +
-                "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000B\f\r\u000E\u000F" +
-                "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F" +
-                " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~" +
-                "\u007F\u0080\u0081\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008A\u008B\u008C\u008D\u008E" +
-                "\u008F\u0090\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009A\u009B\u009C\u009D\u009E" +
-                "\u009F\u00A0\u00A1\u00A2\u00A3\u00A4\u00A5\u00A6\u00A7\u00A8\u00A9\u00AA\u00AB\u00AC\u00AD" +
-                "®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþ");
+                        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000B\f\r\u000E\u000F" +
+                        "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F" +
+                        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~" +
+                        "\u007F\u0080\u0081\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008A\u008B\u008C\u008D\u008E" +
+                        "\u008F\u0090\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009A\u009B\u009C\u009D\u009E" +
+                        "\u009F\u00A0\u00A1\u00A2\u00A3\u00A4\u00A5\u00A6\u00A7\u00A8\u00A9\u00AA\u00AB\u00AC\u00AD" +
+                        "®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþ");
 
         // all possible input bytes processed by Hive writer
         byte[] allBytes = new byte[255];
@@ -278,11 +280,11 @@ public class TestJsonFormat
         assertVarbinary(
                 hiveJsonValue,
                 "" +
-                "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000B\f\r\u000E\u000F" +
-                "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F" +
-                " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~" +
-                "\u007F" +
-                "�������������������������������������������������������������������������������������������������������������������������������");
+                        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000B\f\r\u000E\u000F" +
+                        "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F" +
+                        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~" +
+                        "\u007F" +
+                        "�������������������������������������������������������������������������������������������������������������������������������");
     }
 
     private static void assertVarbinary(String jsonValue, String expectedValue)
@@ -595,9 +597,12 @@ public class TestJsonFormat
         assertValue(REAL, "1.5645e33", 1.5645e33f);
 
         assertValueFails(REAL, "NaN", false);
+        assertUnserializableJsonValue(REAL, Float.NaN);
         assertValueFails(REAL, "Infinity", false);
         assertValueFails(REAL, "+Infinity", false);
+        assertUnserializableJsonValue(REAL, Float.POSITIVE_INFINITY);
         assertValueFails(REAL, "-Infinity", false);
+        assertUnserializableJsonValue(REAL, Float.NEGATIVE_INFINITY);
         assertValueFails(REAL, "+Inf");
         assertValueFails(REAL, "-Inf");
         // Map keys support NaN, infinity and negative infinity
@@ -632,9 +637,12 @@ public class TestJsonFormat
         assertValue(DOUBLE, "1.5645e33", 1.5645e33);
 
         assertValueFails(DOUBLE, "NaN", false);
+        assertUnserializableJsonValue(DOUBLE, Double.NaN);
         assertValueFails(DOUBLE, "Infinity", false);
         assertValueFails(DOUBLE, "+Infinity", false);
+        assertUnserializableJsonValue(DOUBLE, Double.POSITIVE_INFINITY);
         assertValueFails(DOUBLE, "-Infinity", false);
+        assertUnserializableJsonValue(DOUBLE, Double.NEGATIVE_INFINITY);
         assertValueFails(DOUBLE, "+Inf");
         assertValueFails(DOUBLE, "-Inf");
         // Map keys support NaN, infinity and negative infinity
@@ -651,6 +659,19 @@ public class TestJsonFormat
 
         assertValueFails(DOUBLE, "[ 42 ]", false);
         assertValueFails(DOUBLE, "{ \"x\" : 42 }", false);
+    }
+
+    private static void assertUnserializableJsonValue(Type type, Object value)
+    {
+        List<Column> columns = ImmutableList.of(new Column("test", type, 33));
+        Page page = toSingleRowPage(columns, singletonList(value));
+
+        // write the data to json
+        LineSerializer serializer = new JsonSerializerFactory().create(columns, ImmutableMap.of());
+        SliceOutput sliceOutput = new DynamicSliceOutput(64);
+        assertThatThrownBy(() -> serializer.write(page, 0, sliceOutput))
+                .isInstanceOf(TrinoException.class)
+                .matches(e -> ((TrinoException) e).getErrorCode() == HIVE_UNSERIALIZABLE_JSON_VALUE.toErrorCode());
     }
 
     @Test
@@ -1006,11 +1027,11 @@ public class TestJsonFormat
 
         Properties schema = new Properties();
         schema.put(LIST_COLUMNS, columns.stream()
-                .sorted(Comparator.comparing(Column::ordinal))
+                .sorted(Comparator.comparingInt(Column::ordinal))
                 .map(Column::name)
                 .collect(joining(",")));
         schema.put(LIST_COLUMN_TYPES, columns.stream()
-                .sorted(Comparator.comparing(Column::ordinal))
+                .sorted(Comparator.comparingInt(Column::ordinal))
                 .map(Column::type)
                 .map(FormatTestUtils::getJavaObjectInspector)
                 .map(ObjectInspector::getTypeName)

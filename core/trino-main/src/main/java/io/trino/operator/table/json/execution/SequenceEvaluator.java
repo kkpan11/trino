@@ -15,24 +15,22 @@ package io.trino.operator.table.json.execution;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
-import io.trino.json.JsonPathEvaluator;
-import io.trino.json.PathEvaluationException;
-import io.trino.json.ir.TypedValue;
+import io.trino.jsonpath.JsonPathEvaluator;
+import io.trino.jsonpath.PathEvaluationException;
+import io.trino.jsonpath.ir.TypedValue;
 import io.trino.operator.scalar.json.JsonOutputConversionException;
 
 import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
-import static io.trino.json.JsonInputErrorNode.JSON_ERROR;
-import static io.trino.json.ir.SqlJsonLiteralConverter.getJsonNode;
+import static io.trino.jsonpath.JsonInputErrorNode.JSON_ERROR;
+import static io.trino.jsonpath.ir.SqlJsonLiteralConverter.getJsonNode;
 import static java.lang.String.format;
 
-public class SequenceEvaluator
+public final class SequenceEvaluator
 {
-    private SequenceEvaluator()
-    {
-    }
+    private SequenceEvaluator() {}
 
     // creates a sequence of JSON items, and applies error handling
     public static List<JsonNode> getSequence(JsonNode item, Object[] pathParameters, JsonPathEvaluator pathEvaluator, boolean errorOnError)

@@ -84,7 +84,7 @@ public class TestTrinoDriverUri
         // property in url multiple times
         assertInvalid("jdbc:trino://localhost:8080/blackhole?password=a&password=b", "Connection property password is in the URL multiple times");
 
-        // property not well formed, missing '='
+        // property not well-formed, missing '='
         assertInvalid("jdbc:trino://localhost:8080/blackhole?password&user=abc", "Connection argument is not a valid connection property: 'password'");
 
         // property in both url and arguments
@@ -100,7 +100,7 @@ public class TestTrinoDriverUri
         assertInvalid("jdbc:trino://localhost:8080?SSL=2", "Connection property SSL value is invalid: 2");
         assertInvalid("jdbc:trino://localhost:8080?SSL=abc", "Connection property SSL value is invalid: abc");
 
-        //invalid ssl verification mode
+        // invalid ssl verification mode
         assertInvalid("jdbc:trino://localhost:8080?SSL=true&SSLVerification=0", "Connection property SSLVerification value is invalid: 0");
         assertInvalid("jdbc:trino://localhost:8080?SSL=true&SSLVerification=abc", "Connection property SSLVerification value is invalid: abc");
 
@@ -185,7 +185,8 @@ public class TestTrinoDriverUri
         assertInvalid("jdbc:presto://localhost:8080", "Invalid JDBC URL: jdbc:presto://localhost:8080");
 
         // cannot set mutually exclusive properties for non-conforming clients to true
-        assertInvalid("jdbc:trino://localhost:8080?assumeLiteralNamesInMetadataCallsForNonConformingClients=true&assumeLiteralUnderscoreInMetadataCallsForNonConformingClients=true",
+        assertInvalid(
+                "jdbc:trino://localhost:8080?assumeLiteralNamesInMetadataCallsForNonConformingClients=true&assumeLiteralUnderscoreInMetadataCallsForNonConformingClients=true",
                 "Connection property assumeLiteralNamesInMetadataCallsForNonConformingClients cannot be set if assumeLiteralUnderscoreInMetadataCallsForNonConformingClients is enabled");
     }
 
@@ -477,6 +478,18 @@ public class TestTrinoDriverUri
 
         TrinoDriverUri secureUri = createDriverUri("jdbc:trino://localhost?SSL=true");
         assertThat(secureUri.getHttpUri()).isEqualTo(URI.create("https://localhost:443"));
+    }
+
+    @Test
+    public void testAValidateConnection()
+            throws SQLException
+    {
+        TrinoDriverUri uri = createDriverUri("jdbc:trino://localhost:8080");
+        assertThat(uri.isValidateConnection()).isFalse();
+        uri = createDriverUri("jdbc:trino://localhost:8080?validateConnection=true");
+        assertThat(uri.isValidateConnection()).isTrue();
+        uri = createDriverUri("jdbc:trino://localhost:8080?validateConnection=false");
+        assertThat(uri.isValidateConnection()).isFalse();
     }
 
     private static void assertUriPortScheme(TrinoDriverUri parameters, int port, String scheme)

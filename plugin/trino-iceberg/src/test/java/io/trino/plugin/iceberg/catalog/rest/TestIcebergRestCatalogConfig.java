@@ -14,13 +14,19 @@
 package io.trino.plugin.iceberg.catalog.rest;
 
 import com.google.common.collect.ImmutableMap;
+import io.airlift.units.Duration;
+import org.apache.iceberg.CatalogProperties;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class TestIcebergRestCatalogConfig
 {
@@ -31,9 +37,21 @@ public class TestIcebergRestCatalogConfig
                 .setBaseUri(null)
                 .setPrefix(null)
                 .setWarehouse(null)
+                .setNestedNamespaceEnabled(false)
                 .setSessionType(IcebergRestCatalogConfig.SessionType.NONE)
+                .setSessionTimeout(new Duration(CatalogProperties.AUTH_SESSION_TIMEOUT_MS_DEFAULT, MILLISECONDS))
+                .setSocketTimeout(null)
+                .setConnectionTimeout(null)
+                .setMaxRetries(5)
                 .setSecurity(IcebergRestCatalogConfig.Security.NONE)
-                .setVendedCredentialsEnabled(false));
+                .setVendedCredentialsEnabled(false)
+                .setViewEndpointsEnabled(true)
+                .setServerAssignedTableLocationEnabled(false)
+                .setMetricsReportingEnabled(true)
+                .setCaseInsensitiveNameMatching(false)
+                .setCaseInsensitiveNameMatchingCacheTtl(new Duration(1, MINUTES))
+                .setCaseInsensitiveNameMatchingCacheMaximumSize(10_000)
+                .setHttpHeaders(List.of()));
     }
 
     @Test
@@ -43,18 +61,42 @@ public class TestIcebergRestCatalogConfig
                 .put("iceberg.rest-catalog.uri", "http://localhost:1234")
                 .put("iceberg.rest-catalog.prefix", "dev")
                 .put("iceberg.rest-catalog.warehouse", "test_warehouse_identifier")
+                .put("iceberg.rest-catalog.nested-namespace-enabled", "true")
                 .put("iceberg.rest-catalog.security", "OAUTH2")
                 .put("iceberg.rest-catalog.session", "USER")
+                .put("iceberg.rest-catalog.connection-timeout", "180s")
+                .put("iceberg.rest-catalog.socket-timeout", "60s")
+                .put("iceberg.rest-catalog.max-retries", "10")
+                .put("iceberg.rest-catalog.session-timeout", "100ms")
                 .put("iceberg.rest-catalog.vended-credentials-enabled", "true")
+                .put("iceberg.rest-catalog.view-endpoints-enabled", "false")
+                .put("iceberg.rest-catalog.server-assigned-table-location-enabled", "true")
+                .put("iceberg.rest-catalog.metrics-reporting-enabled", "false")
+                .put("iceberg.rest-catalog.case-insensitive-name-matching", "true")
+                .put("iceberg.rest-catalog.case-insensitive-name-matching.cache-ttl", "3m")
+                .put("iceberg.rest-catalog.case-insensitive-name-matching.cache-max-size", "5000")
+                .put("iceberg.rest-catalog.http-headers", "Polaris-Realm: default-realm")
                 .buildOrThrow();
 
         IcebergRestCatalogConfig expected = new IcebergRestCatalogConfig()
                 .setBaseUri("http://localhost:1234")
                 .setPrefix("dev")
                 .setWarehouse("test_warehouse_identifier")
+                .setNestedNamespaceEnabled(true)
                 .setSessionType(IcebergRestCatalogConfig.SessionType.USER)
+                .setConnectionTimeout(new Duration(180, SECONDS))
+                .setSocketTimeout(new Duration(60, SECONDS))
+                .setMaxRetries(10)
+                .setSessionTimeout(new Duration(100, MILLISECONDS))
                 .setSecurity(IcebergRestCatalogConfig.Security.OAUTH2)
-                .setVendedCredentialsEnabled(true);
+                .setVendedCredentialsEnabled(true)
+                .setViewEndpointsEnabled(false)
+                .setServerAssignedTableLocationEnabled(true)
+                .setMetricsReportingEnabled(false)
+                .setCaseInsensitiveNameMatching(true)
+                .setCaseInsensitiveNameMatchingCacheTtl(new Duration(3, MINUTES))
+                .setCaseInsensitiveNameMatchingCacheMaximumSize(5000)
+                .setHttpHeaders(List.of("Polaris-Realm: default-realm"));
 
         assertFullMapping(properties, expected);
     }

@@ -22,6 +22,7 @@ import io.trino.client.ClientSession;
 import io.trino.client.Column;
 import io.trino.client.QueryStatusInfo;
 import io.trino.client.StatementClient;
+import io.trino.client.spooling.EncodedQueryData;
 import io.trino.metadata.MetadataUtil;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.metadata.QualifiedTablePrefix;
@@ -106,7 +107,10 @@ public abstract class AbstractTestingTrinoClient<T>
         ClientSession clientSession = toClientSession(session, trinoServer.getBaseUrl(), new Duration(2, TimeUnit.MINUTES));
         try (StatementClient client = statementClientFactory.create(httpClient, session, clientSession, sql)) {
             while (client.isRunning()) {
-                resultsSession.addResults(client.currentStatusInfo(), client.currentData());
+                resultsSession.addResults(client.currentStatusInfo(), client.currentRows());
+                if (client.currentData() instanceof EncodedQueryData encodedQueryData) {
+                    resultsSession.setQueryDataEncoding(encodedQueryData.getEncoding());
+                }
                 client.advance();
             }
 
@@ -118,8 +122,8 @@ public abstract class AbstractTestingTrinoClient<T>
                 if (results.getUpdateType() != null) {
                     resultsSession.setUpdateType(results.getUpdateType());
                 }
-                if (results.getUpdateCount() != null) {
-                    resultsSession.setUpdateCount(results.getUpdateCount());
+                if (results.getUpdateCount().isPresent()) {
+                    resultsSession.setUpdateCount(results.getUpdateCount().orElseThrow());
                 }
 
                 resultsSession.setWarnings(results.getWarnings());
@@ -136,7 +140,7 @@ public abstract class AbstractTestingTrinoClient<T>
             throw new QueryFailedException(queryId, "Query failed: " + results.getError().getMessage());
 
             // dump query info to console for debugging (NOTE: not pretty printed)
-            // JsonCodec<QueryInfo> queryInfoJsonCodec = createCodecFactory().prettyPrint().jsonCodec(QueryInfo.class);
+            // TrinoJsonCodec<QueryInfo> queryInfoJsonCodec = createCodecFactory().prettyPrint().jsonCodec(QueryInfo.class);
             // log.info("\n" + queryInfoJsonCodec.toJson(queryInfo));
         }
     }
@@ -159,7 +163,7 @@ public abstract class AbstractTestingTrinoClient<T>
         estimates.getPeakMemoryBytes().ifPresent(e -> resourceEstimates.put(PEAK_MEMORY, e.toString()));
         return ClientSession.builder()
                 .server(server)
-                .principal(Optional.of(session.getIdentity().getUser()))
+                .user(Optional.of(session.getIdentity().getUser()))
                 .source(session.getSource().orElse("test"))
                 .traceToken(session.getTraceToken())
                 .clientTags(session.getClientTags())
@@ -188,7 +192,7 @@ public abstract class AbstractTestingTrinoClient<T>
         return builder.buildOrThrow();
     }
 
-    private static ClientSelectedRole toClientSelectedRole(io.trino.spi.security.SelectedRole value)
+    private static ClientSelectedRole toClientSelectedRole(SelectedRole value)
     {
         return new ClientSelectedRole(ClientSelectedRole.Type.valueOf(value.getType().toString()), value.getRole());
     }

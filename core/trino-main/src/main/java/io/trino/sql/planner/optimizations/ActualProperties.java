@@ -31,6 +31,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -133,7 +134,7 @@ public class ActualProperties
     public ActualProperties translate(Function<Symbol, Optional<Symbol>> translator)
     {
         return builder()
-                .global(global.translate(new Partitioning.Translator(translator, symbol -> Optional.ofNullable(constants.get(symbol)), expression -> Optional.empty())))
+                .global(global.translate(new Partitioning.Translator(translator, symbol -> Optional.ofNullable(constants.get(symbol)), _ -> Optional.empty())))
                 .local(LocalProperties.translate(localProperties, translator))
                 .constants(translateConstants(translator))
                 .build();
@@ -185,7 +186,7 @@ public class ActualProperties
     private Map<Symbol, NullableValue> translateConstants(Function<Symbol, Optional<Symbol>> translator)
     {
         Map<Symbol, NullableValue> translatedConstants = new HashMap<>();
-        for (Map.Entry<Symbol, NullableValue> entry : constants.entrySet()) {
+        for (Entry<Symbol, NullableValue> entry : constants.entrySet()) {
             Optional<Symbol> translatedKey = translator.apply(entry.getKey());
             translatedKey.ifPresent(symbol -> translatedConstants.put(symbol, entry.getValue()));
         }
@@ -369,7 +370,9 @@ public class ActualProperties
 
         private boolean isCompatibleTablePartitioningWith(Partitioning partitioning, boolean nullsAndAnyReplicated, Metadata metadata, Session session)
         {
-            return nodePartitioning.isPresent() && nodePartitioning.get().isCompatibleWith(partitioning, metadata, session) && this.nullsAndAnyReplicated == nullsAndAnyReplicated;
+            return this.nullsAndAnyReplicated == nullsAndAnyReplicated &&
+                    nodePartitioning.isPresent() &&
+                    nodePartitioning.get().isCompatibleWith(partitioning, metadata, session);
         }
 
         private boolean isCompatibleTablePartitioningWith(
@@ -380,7 +383,8 @@ public class ActualProperties
                 Metadata metadata,
                 Session session)
         {
-            return nodePartitioning.isPresent() &&
+            return nullsAndAnyReplicated == other.nullsAndAnyReplicated &&
+                    nodePartitioning.isPresent() &&
                     other.nodePartitioning.isPresent() &&
                     nodePartitioning.get().isCompatibleWith(
                             other.nodePartitioning.get(),
@@ -388,8 +392,7 @@ public class ActualProperties
                             leftConstantMapping,
                             rightConstantMapping,
                             metadata,
-                            session) &&
-                    nullsAndAnyReplicated == other.nullsAndAnyReplicated;
+                            session);
         }
 
         private Optional<Partitioning> getNodePartitioning()

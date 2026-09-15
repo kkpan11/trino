@@ -26,7 +26,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.rowNumber;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
@@ -37,8 +37,8 @@ public class TestReplaceWindowWithRowNumber
     @Test
     public void test()
     {
-        ResolvedFunction rowNumberFunction = tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes());
-        tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
+        ResolvedFunction rowNumberFunction = tester().getMetadata().resolveBuiltinFunction(getCharVarcharCoercion(tester().getSession()), "row_number", ImmutableList.of());
+        tester().assertThat(new ReplaceWindowWithRowNumber())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
@@ -53,7 +53,7 @@ public class TestReplaceWindowWithRowNumber
                                 .partitionBy(ImmutableList.of("a")),
                         values("a")));
 
-        tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
+        tester().assertThat(new ReplaceWindowWithRowNumber())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
@@ -72,8 +72,8 @@ public class TestReplaceWindowWithRowNumber
     @Test
     public void testDoNotFire()
     {
-        ResolvedFunction rank = tester().getMetadata().resolveBuiltinFunction("rank", fromTypes());
-        tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
+        ResolvedFunction rank = tester().getMetadata().resolveBuiltinFunction(getCharVarcharCoercion(tester().getSession()), "rank", ImmutableList.of());
+        tester().assertThat(new ReplaceWindowWithRowNumber())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rank1 = p.symbol("rank_1");
@@ -84,8 +84,8 @@ public class TestReplaceWindowWithRowNumber
                 })
                 .doesNotFire();
 
-        ResolvedFunction rowNumber = tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes());
-        tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
+        ResolvedFunction rowNumber = tester().getMetadata().resolveBuiltinFunction(getCharVarcharCoercion(tester().getSession()), "row_number", ImmutableList.of());
+        tester().assertThat(new ReplaceWindowWithRowNumber())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumber1 = p.symbol("row_number_1");
@@ -97,7 +97,7 @@ public class TestReplaceWindowWithRowNumber
                 })
                 .doesNotFire();
 
-        tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
+        tester().assertThat(new ReplaceWindowWithRowNumber())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     OrderingScheme orderingScheme = new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST));
@@ -115,7 +115,9 @@ public class TestReplaceWindowWithRowNumber
         return new WindowNode.Function(
                 resolvedFunction,
                 ImmutableList.of(),
+                Optional.empty(),
                 DEFAULT_FRAME,
+                false,
                 false);
     }
 }

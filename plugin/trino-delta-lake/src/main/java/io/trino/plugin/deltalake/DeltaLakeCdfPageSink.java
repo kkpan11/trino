@@ -15,12 +15,12 @@ package io.trino.plugin.deltalake;
 
 import io.airlift.json.JsonCodec;
 import io.trino.filesystem.Location;
-import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.TypeOperators;
 
 import java.util.List;
+import java.util.Optional;
 
 import static io.trino.plugin.deltalake.DataFileInfo.DataFileType.CHANGE_DATA_FEED;
 
@@ -35,18 +35,19 @@ public class DeltaLakeCdfPageSink
             List<DeltaLakeColumnHandle> inputColumns,
             List<String> originalPartitionColumns,
             PageIndexerFactory pageIndexerFactory,
-            TrinoFileSystemFactory fileSystemFactory,
+            DeltaLakeFileSystemFactory fileSystemFactory,
             int maxOpenWriters,
             JsonCodec<DataFileInfo> dataFileInfoCodec,
             Location tableLocation,
+            Optional<DeltaLakeTableCredentials> tableCredentials,
             Location outputPath,
             ConnectorSession session,
             DeltaLakeWriterStats stats,
             String trinoVersion,
-            DeltaLakeParquetSchemaMapping parquetSchemaMapping)
+            DeltaLakeParquetSchemaMapping parquetSchemaMapping,
+            boolean useDeltaLengthByteArrayEncoding)
     {
-        super(
-                typeOperators,
+        super(typeOperators,
                 inputColumns,
                 originalPartitionColumns,
                 pageIndexerFactory,
@@ -54,11 +55,13 @@ public class DeltaLakeCdfPageSink
                 maxOpenWriters,
                 dataFileInfoCodec,
                 tableLocation,
+                tableCredentials,
                 outputPath,
                 session,
                 stats,
                 trinoVersion,
-                parquetSchemaMapping);
+                parquetSchemaMapping,
+                useDeltaLengthByteArrayEncoding);
     }
 
     @Override

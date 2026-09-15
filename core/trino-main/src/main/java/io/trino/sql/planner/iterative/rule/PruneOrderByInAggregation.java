@@ -20,11 +20,11 @@ import io.trino.metadata.Metadata;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.AggregationNode;
+import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 
-import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 
-import static io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import static io.trino.sql.planner.plan.Patterns.aggregation;
 import static java.util.Objects.requireNonNull;
 
@@ -54,25 +54,22 @@ public class PruneOrderByInAggregation
 
         boolean anyRewritten = false;
         ImmutableMap.Builder<Symbol, Aggregation> aggregations = ImmutableMap.builder();
-        for (Map.Entry<Symbol, Aggregation> entry : node.getAggregations().entrySet()) {
+        for (Entry<Symbol, Aggregation> entry : node.getAggregations().entrySet()) {
             Aggregation aggregation = entry.getValue();
-            if (aggregation.getOrderingScheme().isEmpty()) {
-                aggregations.put(entry);
-            }
+
             // getAggregateFunctionImplementation can be expensive, so check it last.
-            else if (metadata.getAggregationFunctionMetadata(context.getSession(), aggregation.getResolvedFunction()).isOrderSensitive()) {
-                aggregations.put(entry);
-            }
-            else {
-                anyRewritten = true;
-                aggregations.put(entry.getKey(), new Aggregation(
+            if (aggregation.getOrderingScheme().isPresent() &&
+                    !metadata.getAggregationFunctionMetadata(context.getSession(), aggregation.getResolvedFunction()).orderSensitive()) {
+                aggregation = new Aggregation(
                         aggregation.getResolvedFunction(),
                         aggregation.getArguments(),
                         aggregation.isDistinct(),
                         aggregation.getFilter(),
                         Optional.empty(),
-                        aggregation.getMask()));
+                        aggregation.getMask());
+                anyRewritten = true;
             }
+            aggregations.put(entry.getKey(), aggregation);
         }
 
         if (!anyRewritten) {

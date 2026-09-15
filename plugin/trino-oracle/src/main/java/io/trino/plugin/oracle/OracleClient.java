@@ -21,9 +21,12 @@ import io.trino.plugin.base.aggregation.AggregateFunctionRewriter;
 import io.trino.plugin.base.aggregation.AggregateFunctionRule;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
 import io.trino.plugin.base.mapping.IdentifierMapping;
+import io.trino.plugin.base.projection.ProjectFunctionRewriter;
+import io.trino.plugin.base.projection.ProjectFunctionRule;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.BooleanWriteFunction;
+import io.trino.plugin.jdbc.CaseSensitivity;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DoubleWriteFunction;
@@ -62,6 +65,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.JoinCondition;
+import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
@@ -75,8 +79,10 @@ import oracle.jdbc.OracleTypes;
 
 import java.math.RoundingMode;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.time.Instant;
@@ -87,29 +93,39 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
+import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.Spliterator;
+import java.util.Spliterators;
 import java.util.function.BiFunction;
+import java.util.stream.StreamSupport;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.emptyToNull;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.trino.plugin.jdbc.CaseSensitivity.CASE_INSENSITIVE;
+import static io.trino.plugin.jdbc.CaseSensitivity.CASE_SENSITIVE;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.charReadFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.decimalColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.fromLongTrinoTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.fromTrinoTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.numberColumnMapping;
+import static io.trino.plugin.jdbc.StandardColumnMappings.numberWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintWriteFunction;
@@ -133,6 +149,7 @@ import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.NumberType.NUMBER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.MAX_SHORT_PRECISION;
@@ -153,6 +170,8 @@ import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.lang.String.join;
+import static java.math.RoundingMode.UNNECESSARY;
+import static java.sql.Types.FLOAT;
 import static java.util.Locale.ENGLISH;
 import static java.util.concurrent.TimeUnit.DAYS;
 
@@ -165,12 +184,14 @@ public class OracleClient
     private static final int MAX_BYTES_PER_CHAR = 4;
 
     private static final int ORACLE_VARCHAR2_MAX_BYTES = 4000;
-    private static final int ORACLE_VARCHAR2_MAX_CHARS = ORACLE_VARCHAR2_MAX_BYTES / MAX_BYTES_PER_CHAR;
+    public static final int ORACLE_VARCHAR2_MAX_CHARS = ORACLE_VARCHAR2_MAX_BYTES / MAX_BYTES_PER_CHAR;
 
     private static final int ORACLE_CHAR_MAX_BYTES = 2000;
-    private static final int ORACLE_CHAR_MAX_CHARS = ORACLE_CHAR_MAX_BYTES / MAX_BYTES_PER_CHAR;
+    public static final int ORACLE_CHAR_MAX_CHARS = ORACLE_CHAR_MAX_BYTES / MAX_BYTES_PER_CHAR;
 
     private static final int PRECISION_OF_UNSPECIFIED_NUMBER = 127;
+    // Oracle JDBC reports columnSize=0 for NUMBER expressions (e.g. COUNT(*), SUM(), EXTRACT(...)) in passthrough queries
+    private static final int EXPRESSION_NUMBER_COLUMN_SIZE = 0;
 
     private static final int TRINO_BIGINT_TYPE = 832_424_001;
 
@@ -215,6 +236,7 @@ public class OracleClient
 
     private final boolean synonymsEnabled;
     private final ConnectorExpressionRewriter<ParameterizedExpression> connectorExpressionRewriter;
+    private final ProjectFunctionRewriter<JdbcExpression, ParameterizedExpression> projectFunctionRewriter;
     private final AggregateFunctionRewriter<JdbcExpression, ?> aggregateFunctionRewriter;
     private final Optional<Integer> fetchSize;
 
@@ -242,6 +264,12 @@ public class OracleClient
                 .map("$greater_than_or_equal(left: numeric_type, right: numeric_type)").to("left >= right")
                 .add(new RewriteStringComparison())
                 .build();
+
+        this.projectFunctionRewriter = new ProjectFunctionRewriter<>(
+                this.connectorExpressionRewriter,
+                ImmutableSet.<ProjectFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
+                        .add(new RewriteCast((session, type) -> toWriteMapping(session, type).getDataType()))
+                        .build());
 
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(TRINO_BIGINT_TYPE, Optional.of("NUMBER"), Optional.of(0), Optional.of(0), Optional.empty(), Optional.empty());
         this.aggregateFunctionRewriter = new AggregateFunctionRewriter<>(
@@ -275,12 +303,12 @@ public class OracleClient
     }
 
     @Override
-    protected boolean filterSchema(String schemaName)
+    protected boolean filterRemoteSchema(String schemaName)
     {
         if (INTERNAL_SCHEMAS.contains(schemaName.toLowerCase(ENGLISH))) {
             return false;
         }
-        return super.filterSchema(schemaName);
+        return super.filterRemoteSchema(schemaName);
     }
 
     @Override
@@ -378,6 +406,83 @@ public class OracleClient
     }
 
     @Override
+    protected List<JdbcColumnHandle> getColumns(ConnectorSession session, Connection connection, ResultSetMetaData metadata)
+            throws SQLException
+    {
+        ImmutableList.Builder<JdbcColumnHandle> columns = ImmutableList.builder();
+        for (int column = 1; column <= metadata.getColumnCount(); column++) {
+            JdbcTypeHandle jdbcTypeHandle = getJdbcTypeHandle(metadata, column);
+
+            // Use getColumnLabel method because query pass-through table function may contain column aliases
+            String name = metadata.getColumnLabel(column);
+            Type type = toColumnMapping(session, connection, jdbcTypeHandle)
+                    .orElseThrow(() -> new UnsupportedOperationException(format("Unsupported type: %s of column: %s", jdbcTypeHandle, name)))
+                    .getType();
+            columns.add(new JdbcColumnHandle(name, jdbcTypeHandle, type));
+        }
+        return columns.build();
+    }
+
+    private static JdbcTypeHandle getJdbcTypeHandle(ResultSetMetaData metadata, int column)
+            throws SQLException
+    {
+        int columnType = metadata.getColumnType(column);
+        int columnSize = metadata.getPrecision(column);
+        int scale = metadata.getScale(column);
+        CaseSensitivity caseSensitive = metadata.isCaseSensitive(column) ? CASE_SENSITIVE : CASE_INSENSITIVE;
+        if (columnType == OracleTypes.NUMBER) {
+            String columnClassName = metadata.getColumnClassName(column);
+            // Oracle report both NUMBER and FLOAT column as NUMBER type via `getColumnTypeName` (in table function),
+            // so we have to rely on the column class name here, Oracle NUMBER column are expected "java.math.BigDecimal",
+            // when the column class name is "java.lang.Double" it means it's actual a FLOAT type in Oracle side
+            // and the scale is expected to be -127
+            if ("java.lang.Double".equals(columnClassName)) {
+                verify(scale == -127, "FLOAT scale is expected to be -127 but got %s", scale);
+                return new JdbcTypeHandle(FLOAT, Optional.of("FLOAT"), Optional.of(columnSize), Optional.of(scale), Optional.empty(), Optional.of(caseSensitive));
+            }
+        }
+
+        return new JdbcTypeHandle(
+                columnType,
+                Optional.ofNullable(metadata.getColumnTypeName(column)),
+                Optional.of(columnSize),
+                Optional.of(scale),
+                Optional.empty(), // TODO support arrays
+                Optional.of(caseSensitive));
+    }
+
+    // Iterates over filtered schemas to fetch column details per schema, preventing unnecessary columns for Oracle's internal schemas
+    @Override
+    public Iterator<RelationColumnsMetadata> getAllTableColumns(ConnectorSession session, Optional<String> schema)
+    {
+        Collection<String> schemaNames;
+        if (schema.isEmpty()) {
+            schemaNames = getSchemaNames(session);
+        }
+        else {
+            schemaNames = ImmutableList.of(schema.get());
+        }
+
+        return schemaNames.stream()
+                .map(schemaName -> super.getAllTableColumns(session, Optional.of(schemaName)))
+                .flatMap(iterator -> StreamSupport.stream(
+                        Spliterators.spliteratorUnknownSize(iterator, Spliterator.ORDERED), false))
+                .iterator();
+    }
+
+    @Override
+    protected ResultSet getAllTableColumns(Connection connection, Optional<String> remoteSchemaName)
+            throws SQLException
+    {
+        DatabaseMetaData metadata = connection.getMetaData();
+        return metadata.getColumns(
+                metadata.getConnection().getCatalog(),
+                escapeObjectNameForMetadataQuery(remoteSchemaName, metadata.getSearchStringEscape()).orElse(null),
+                null,
+                null);
+    }
+
+    @Override
     protected List<String> createTableSqls(RemoteTableName remoteTableName, List<String> columns, ConnectorTableMetadata tableMetadata)
     {
         checkArgument(tableMetadata.getProperties().isEmpty(), "Unsupported table properties: %s", tableMetadata.getProperties());
@@ -428,102 +533,119 @@ public class OracleClient
                     FULL_PUSHDOWN));
         }
 
-        switch (typeHandle.jdbcType()) {
-            case Types.SMALLINT:
-                return Optional.of(ColumnMapping.longMapping(
-                        SMALLINT,
-                        ResultSet::getShort,
-                        smallintWriteFunction(),
-                        FULL_PUSHDOWN));
-            case OracleTypes.BINARY_FLOAT:
-                return Optional.of(ColumnMapping.longMapping(
-                        REAL,
-                        (resultSet, columnIndex) -> floatToRawIntBits(resultSet.getFloat(columnIndex)),
-                        oracleRealWriteFunction(),
-                        FULL_PUSHDOWN));
+        Optional<ColumnMapping> columnMapping = switch (typeHandle.jdbcType()) {
+            case Types.SMALLINT -> Optional.of(ColumnMapping.longMapping(
+                    SMALLINT,
+                    ResultSet::getShort,
+                    smallintWriteFunction(),
+                    FULL_PUSHDOWN));
+            case OracleTypes.BINARY_FLOAT -> Optional.of(ColumnMapping.longMapping(
+                    REAL,
+                    (resultSet, columnIndex) -> floatToRawIntBits(resultSet.getFloat(columnIndex)),
+                    oracleRealWriteFunction(),
+                    FULL_PUSHDOWN));
 
-            case OracleTypes.BINARY_DOUBLE:
-            case OracleTypes.FLOAT:
-                return Optional.of(ColumnMapping.doubleMapping(
-                        DOUBLE,
-                        ResultSet::getDouble,
-                        oracleDoubleWriteFunction(),
-                        FULL_PUSHDOWN));
-            case OracleTypes.NUMBER:
-                int actualPrecision = typeHandle.requiredColumnSize();
+            case OracleTypes.BINARY_DOUBLE, OracleTypes.FLOAT -> Optional.of(ColumnMapping.doubleMapping(
+                    DOUBLE,
+                    ResultSet::getDouble,
+                    oracleDoubleWriteFunction(),
+                    FULL_PUSHDOWN));
+            case OracleTypes.NUMBER -> {
+                int columnSize = typeHandle.requiredColumnSize();
                 int decimalDigits = typeHandle.requiredDecimalDigits();
-                // Map negative scale to decimal(p+s, 0).
-                int precision = actualPrecision + max(-decimalDigits, 0);
-                int scale = max(decimalDigits, 0);
-                Optional<Integer> numberDefaultScale = getNumberDefaultScale(session);
-                RoundingMode roundingMode = getNumberRoundingMode(session);
-                if (precision < scale) {
-                    if (roundingMode == RoundingMode.UNNECESSARY) {
-                        break;
+                if (columnSize != PRECISION_OF_UNSPECIFIED_NUMBER && columnSize != EXPRESSION_NUMBER_COLUMN_SIZE) {
+                    int scale = decimalDigits;
+                    // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
+                    // Map decimal(p, s) with s>p, to decimal(s, s).
+                    int precision = max(columnSize + max(-scale, 0), scale);
+                    scale = max(scale, 0);
+                    if (precision <= Decimals.MAX_PRECISION) {
+                        yield Optional.of(decimalColumnMapping(createDecimalType(precision, scale), UNNECESSARY));
                     }
-                    scale = min(Decimals.MAX_PRECISION, scale);
-                    precision = scale;
                 }
-                else if (numberDefaultScale.isPresent() && precision == PRECISION_OF_UNSPECIFIED_NUMBER) {
-                    precision = Decimals.MAX_PRECISION;
-                    scale = numberDefaultScale.get();
-                }
-                else if (precision > Decimals.MAX_PRECISION || actualPrecision <= 0) {
-                    break;
-                }
-                DecimalType decimalType = createDecimalType(precision, scale);
-                // JDBC driver can return BigDecimal with lower scale than column's scale when there are trailing zeroes
-                if (decimalType.isShort()) {
-                    return Optional.of(ColumnMapping.longMapping(
+                Optional<Integer> numberDefaultScale = getNumberDefaultScale(session);
+                Optional<RoundingMode> configuredRoundingMode = getNumberRoundingMode(session);
+                if (configuredRoundingMode.isPresent() || numberDefaultScale.isPresent()) {
+                    // TODO remove legacy mode along with associated config and session properties.
+                    // Legacy mode. It's unclear why it does things they way it does:
+                    //  - it does not support precision < scale: e.g. Oracle number(5, 10) could map to Trino decimal(10, 10). This is now handled above.
+                    //  - why it supports all the possible RoundingMode values, with UNNECESSARY doubling as a kill-switch
+                    // The code is retained with minimal modifications to reduce a risk.
+                    int actualPrecision = columnSize;
+                    // Map negative scale to decimal(p+s, 0).
+                    int precision = actualPrecision + max(-decimalDigits, 0);
+                    int scale = max(decimalDigits, 0);
+
+                    RoundingMode roundingMode = configuredRoundingMode.orElse(UNNECESSARY);
+                    if (precision < scale) {
+                        if (roundingMode == RoundingMode.UNNECESSARY) {
+                            yield Optional.empty();
+                        }
+                        scale = min(Decimals.MAX_PRECISION, scale);
+                        precision = scale;
+                    }
+                    else if (numberDefaultScale.isPresent() && precision == PRECISION_OF_UNSPECIFIED_NUMBER) {
+                        precision = Decimals.MAX_PRECISION;
+                        scale = numberDefaultScale.get();
+                    }
+                    else if (precision > Decimals.MAX_PRECISION || actualPrecision <= 0) {
+                        yield Optional.empty();
+                    }
+                    DecimalType decimalType = createDecimalType(precision, scale);
+                    // JDBC driver can return BigDecimal with lower scale than column's scale when there are trailing zeroes
+                    if (decimalType.isShort()) {
+                        yield Optional.of(ColumnMapping.longMapping(
+                                decimalType,
+                                shortDecimalReadFunction(decimalType, roundingMode),
+                                shortDecimalWriteFunction(decimalType),
+                                FULL_PUSHDOWN));
+                    }
+                    yield Optional.of(ColumnMapping.objectMapping(
                             decimalType,
-                            shortDecimalReadFunction(decimalType, roundingMode),
-                            shortDecimalWriteFunction(decimalType),
+                            longDecimalReadFunction(decimalType, roundingMode),
+                            longDecimalWriteFunction(decimalType),
                             FULL_PUSHDOWN));
                 }
-                return Optional.of(ColumnMapping.objectMapping(
-                        decimalType,
-                        longDecimalReadFunction(decimalType, roundingMode),
-                        longDecimalWriteFunction(decimalType),
-                        FULL_PUSHDOWN));
+                yield Optional.of(numberColumnMapping());
+            }
 
-            case OracleTypes.CHAR:
-            case OracleTypes.NCHAR:
+            case OracleTypes.CHAR, OracleTypes.NCHAR -> {
                 CharType charType = createCharType(typeHandle.requiredColumnSize());
-                return Optional.of(ColumnMapping.sliceMapping(
+                yield Optional.of(ColumnMapping.sliceMapping(
                         charType,
                         charReadFunction(charType),
                         oracleCharWriteFunction(),
                         FULL_PUSHDOWN));
+            }
 
-            case OracleTypes.VARCHAR:
-            case OracleTypes.NVARCHAR:
-                return Optional.of(ColumnMapping.sliceMapping(
-                        createVarcharType(typeHandle.requiredColumnSize()),
-                        (varcharResultSet, varcharColumnIndex) -> utf8Slice(varcharResultSet.getString(varcharColumnIndex)),
-                        varcharWriteFunction(),
-                        FULL_PUSHDOWN));
+            case OracleTypes.VARCHAR, OracleTypes.NVARCHAR -> Optional.of(ColumnMapping.sliceMapping(
+                    createVarcharType(typeHandle.requiredColumnSize()),
+                    (varcharResultSet, varcharColumnIndex) -> utf8Slice(varcharResultSet.getString(varcharColumnIndex)),
+                    varcharWriteFunction(),
+                    FULL_PUSHDOWN));
 
-            case OracleTypes.CLOB:
-            case OracleTypes.NCLOB:
-                return Optional.of(ColumnMapping.sliceMapping(
-                        createUnboundedVarcharType(),
-                        (resultSet, columnIndex) -> utf8Slice(resultSet.getString(columnIndex)),
-                        varcharWriteFunction(),
-                        DISABLE_PUSHDOWN));
+            case OracleTypes.CLOB, OracleTypes.NCLOB -> Optional.of(ColumnMapping.sliceMapping(
+                    createUnboundedVarcharType(),
+                    (resultSet, columnIndex) -> utf8Slice(resultSet.getString(columnIndex)),
+                    varcharWriteFunction(),
+                    DISABLE_PUSHDOWN));
 
-            case OracleTypes.VARBINARY: // Oracle's RAW(n)
-            case OracleTypes.BLOB:
-                return Optional.of(ColumnMapping.sliceMapping(
-                        VARBINARY,
-                        (resultSet, columnIndex) -> wrappedBuffer(resultSet.getBytes(columnIndex)),
-                        varbinaryWriteFunction(),
-                        DISABLE_PUSHDOWN));
+            case OracleTypes.VARBINARY, // Oracle's RAW(n)
+                 OracleTypes.BLOB -> Optional.of(ColumnMapping.sliceMapping(
+                    VARBINARY,
+                    (resultSet, columnIndex) -> wrappedBuffer(resultSet.getBytes(columnIndex)),
+                    varbinaryWriteFunction(),
+                    DISABLE_PUSHDOWN));
 
-            case OracleTypes.TIMESTAMP:
+            case OracleTypes.TIMESTAMP -> {
                 int timestampPrecision = typeHandle.requiredDecimalDigits();
-                return Optional.of(oracleTimestampColumnMapping(createTimestampType(timestampPrecision)));
-            case OracleTypes.TIMESTAMPTZ:
-                return Optional.of(oracleTimestampWithTimeZoneColumnMapping());
+                yield Optional.of(oracleTimestampColumnMapping(createTimestampType(timestampPrecision)));
+            }
+            case OracleTypes.TIMESTAMPTZ -> Optional.of(oracleTimestampWithTimeZoneColumnMapping());
+            default -> Optional.empty();
+        };
+        if (columnMapping.isPresent()) {
+            return columnMapping;
         }
         if (getUnsupportedTypeHandling(session) == CONVERT_TO_VARCHAR) {
             return mapToUnboundedVarchar(typeHandle);
@@ -559,6 +681,12 @@ public class OracleClient
         return connectorExpressionRewriter.rewrite(session, expression, assignments);
     }
 
+    @Override
+    public Optional<JdbcExpression> convertProjection(ConnectorSession session, JdbcTableHandle handle, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return projectFunctionRewriter.rewrite(session, handle, expression, assignments);
+    }
+
     private static Optional<JdbcTypeHandle> toTypeHandle(DecimalType decimalType)
     {
         return Optional.of(new JdbcTypeHandle(OracleTypes.NUMBER, Optional.of("NUMBER"), Optional.of(decimalType.getPrecision()), Optional.of(decimalType.getScale()), Optional.empty(), Optional.empty()));
@@ -567,7 +695,7 @@ public class OracleClient
     @Override
     protected Optional<BiFunction<String, Long, String>> limitFunction()
     {
-        return Optional.of((sql, limit) -> format("SELECT * FROM (%s) WHERE ROWNUM <= %s", sql, limit));
+        return Optional.of((sql, limit) -> format("%s FETCH FIRST %s ROWS ONLY", sql, limit));
     }
 
     @Override
@@ -646,7 +774,8 @@ public class OracleClient
         int precision = timestampType.getPrecision();
         verifyLongTimestampPrecision(timestampType);
 
-        return new ObjectWriteFunction() {
+        return new ObjectWriteFunction()
+        {
             @Override
             public Class<?> getJavaType()
             {
@@ -746,7 +875,8 @@ public class OracleClient
     {
         int precision = timestampType.getPrecision();
         checkArgument(precision > MAX_SHORT_PRECISION && precision <= MAX_ORACLE_TIMESTAMP_PRECISION,
-                "Precision is out of range: %s", precision);
+                "Precision is out of range: %s",
+                precision);
     }
 
     public static ColumnMapping oracleTimestampWithTimeZoneColumnMapping()
@@ -828,6 +958,9 @@ public class OracleClient
                 return WriteMapping.longMapping(dataType, shortDecimalWriteFunction(decimalType));
             }
             return WriteMapping.objectMapping(dataType, longDecimalWriteFunction(decimalType));
+        }
+        if (type == NUMBER) {
+            return WriteMapping.objectMapping("number", numberWriteFunction());
         }
         if (type instanceof TimestampType timestampType) {
             if (type.equals(TIMESTAMP_SECONDS)) {

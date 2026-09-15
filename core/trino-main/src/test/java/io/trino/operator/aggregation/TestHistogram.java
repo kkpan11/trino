@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Ints;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.AggregationMetrics;
 import io.trino.operator.aggregation.groupby.AggregationTestInput;
 import io.trino.operator.aggregation.groupby.AggregationTestInputBuilder;
 import io.trino.operator.aggregation.groupby.AggregationTestOutput;
@@ -57,7 +58,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.TimeZoneKey.getTimeZoneKey;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
 import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static io.trino.util.DateTimeZoneIndex.getDateTimeZone;
 import static io.trino.util.StructuralTestUtil.mapType;
@@ -121,7 +122,8 @@ public class TestHistogram
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                "histogram", fromTypes(DOUBLE),
+                "histogram",
+                fromTypes(DOUBLE),
                 ImmutableMap.of(0.1, 1L, 0.3, 1L, 0.2, 1L),
                 createDoublesBlock(0.1, 0.3, 0.2));
 
@@ -236,7 +238,7 @@ public class TestHistogram
     {
         TestingAggregationFunction function = getInternalDefaultVarCharAggregation();
         GroupedAggregator groupedAggregator = function.createAggregatorFactory(SINGLE, Ints.asList(new int[] {}), OptionalInt.empty())
-                .createGroupedAggregator();
+                .createGroupedAggregator(new AggregationMetrics());
         BlockBuilder blockBuilder = function.getFinalType().createBlockBuilder(null, 1000);
 
         groupedAggregator.evaluate(0, blockBuilder);
@@ -292,7 +294,7 @@ public class TestHistogram
         int itemCount = 30;
         Random random = new Random();
         GroupedAggregator groupedAggregator = aggregationFunction.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty())
-                .createGroupedAggregator();
+                .createGroupedAggregator(new AggregationMetrics());
 
         for (int j = 0; j < numGroups; j++) {
             Map<String, Long> expectedValues = new HashMap<>();
@@ -300,7 +302,7 @@ public class TestHistogram
 
             for (int i = 0; i < itemCount; i++) {
                 String str = String.valueOf(i % 10);
-                String item = IntStream.range(0, itemCount).mapToObj(x -> str).collect(Collectors.joining());
+                String item = IntStream.range(0, itemCount).mapToObj(_ -> str).collect(Collectors.joining());
                 boolean distinctValue = random.nextDouble() < distinctFraction;
                 if (distinctValue) {
                     // produce a unique value for the histogram
@@ -310,7 +312,7 @@ public class TestHistogram
                 else {
                     valueList.add(item);
                 }
-                expectedValues.compute(item, (k, v) -> v == null ? 1L : ++v);
+                expectedValues.compute(item, (_, v) -> v == null ? 1L : ++v);
             }
 
             Block block = createStringsBlock(valueList);

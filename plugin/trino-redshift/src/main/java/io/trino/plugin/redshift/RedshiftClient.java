@@ -24,6 +24,8 @@ import io.trino.plugin.base.aggregation.AggregateFunctionRewriter;
 import io.trino.plugin.base.aggregation.AggregateFunctionRule;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
 import io.trino.plugin.base.mapping.IdentifierMapping;
+import io.trino.plugin.base.projection.ProjectFunctionRewriter;
+import io.trino.plugin.base.projection.ProjectFunctionRule;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ColumnMapping;
@@ -31,6 +33,7 @@ import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcJoinCondition;
+import io.trino.plugin.jdbc.JdbcMetadata;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
@@ -113,7 +116,7 @@ import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_NON_TRANSIENT_ERROR;
 import static io.trino.plugin.jdbc.JdbcJoinPushdownUtil.implementJoinCostAware;
-import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
+import static io.trino.plugin.jdbc.PredicatePushdownController.pushdownDiscreteValues;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.booleanColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.booleanWriteFunction;
@@ -121,14 +124,12 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.charReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.decimalColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.smallintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryReadFunction;
@@ -185,7 +186,7 @@ public class RedshiftClient
      * other precisions.
      *
      * @see <a href="https://docs.aws.amazon.com/redshift/latest/dg/r_Numeric_types201.html#r_Numeric_types201-decimal-or-numeric-type">
-     * Redshift documentation</a>
+     *         Redshift documentation</a>
      */
     private static final int REDSHIFT_DECIMAL_CUTOFF_PRECISION = 19;
 
@@ -202,7 +203,7 @@ public class RedshiftClient
      * Maximum size of a Redshift CHAR column.
      *
      * @see <a href="https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html">
-     * Redshift documentation</a>
+     *         Redshift documentation</a>
      */
     private static final int REDSHIFT_MAX_CHAR = 4096;
 
@@ -210,7 +211,7 @@ public class RedshiftClient
      * Maximum size of a Redshift VARCHAR column.
      *
      * @see <a href="https://docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html">
-     * Redshift documentation</a>
+     *         Redshift documentation</a>
      */
     static final int REDSHIFT_MAX_VARCHAR = 65535;
 
@@ -224,6 +225,7 @@ public class RedshiftClient
             .toFormatter();
     private static final OffsetDateTime REDSHIFT_MIN_SUPPORTED_TIMESTAMP_TZ = OffsetDateTime.of(-4712, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
 
+    private final ProjectFunctionRewriter<JdbcExpression, ParameterizedExpression> projectFunctionRewriter;
     private final AggregateFunctionRewriter<JdbcExpression, ?> aggregateFunctionRewriter;
     private final boolean statisticsEnabled;
     private final RedshiftTableStatisticsReader statisticsReader;
@@ -249,6 +251,12 @@ public class RedshiftClient
                 .map("$greater_than(left, right)").to("left > right")
                 .map("$greater_than_or_equal(left, right)").to("left >= right")
                 .build();
+
+        this.projectFunctionRewriter = new ProjectFunctionRewriter<>(
+                connectorExpressionRewriter,
+                ImmutableSet.<ProjectFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
+                        .add(new RewriteCast((session, type) -> toWriteMapping(session, type).getDataType()))
+                        .build());
 
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
 
@@ -362,6 +370,12 @@ public class RedshiftClient
     }
 
     @Override
+    public Optional<JdbcExpression> convertProjection(ConnectorSession session, JdbcTableHandle handle, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return projectFunctionRewriter.rewrite(session, handle, expression, assignments);
+    }
+
+    @Override
     public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
     {
         return connectorExpressionRewriter.rewrite(session, expression, assignments);
@@ -377,7 +391,7 @@ public class RedshiftClient
             return TableStatistics.empty();
         }
         try {
-            return statisticsReader.readTableStatistics(session, handle, () -> this.getColumns(session, handle));
+            return statisticsReader.readTableStatistics(session, handle, () -> JdbcMetadata.getColumns(session, this, handle));
         }
         catch (SQLException | RuntimeException e) {
             throwIfInstanceOf(e, TrinoException.class);
@@ -420,7 +434,8 @@ public class RedshiftClient
     }
 
     @Override
-    public Optional<PreparedQuery> implementJoin(ConnectorSession session,
+    public Optional<PreparedQuery> implementJoin(
+            ConnectorSession session,
             JoinType joinType,
             PreparedQuery leftSource,
             Map<JdbcColumnHandle, String> leftProjections,
@@ -443,7 +458,8 @@ public class RedshiftClient
     }
 
     @Override
-    public Optional<PreparedQuery> legacyImplementJoin(ConnectorSession session,
+    public Optional<PreparedQuery> legacyImplementJoin(
+            ConnectorSession session,
             JoinType joinType,
             PreparedQuery leftSource,
             PreparedQuery rightSource,
@@ -611,85 +627,81 @@ public class RedshiftClient
                     RedshiftClient::readTime,
                     RedshiftClient::writeTime));
         }
+        if ("binary varying".equals(type.jdbcTypeName().orElse("")) || type.jdbcType() == Types.LONGVARBINARY) {
+            return Optional.of(ColumnMapping.sliceMapping(
+                    VARBINARY,
+                    varbinaryReadFunction(),
+                    varbinaryWriteFunction()));
+        }
 
-        switch (type.jdbcType()) {
-            case Types.BIT: // Redshift uses this for booleans
-                return Optional.of(booleanColumnMapping());
+        return switch (type.jdbcType()) {
+            // Redshift uses this for booleans
+            case Types.BIT -> Optional.of(booleanColumnMapping());
 
             // case Types.TINYINT: -- Redshift doesn't support tinyint
-            case Types.SMALLINT:
-                return Optional.of(smallintColumnMapping());
-            case Types.INTEGER:
-                return Optional.of(integerColumnMapping());
-            case Types.BIGINT:
-                return Optional.of(bigintColumnMapping());
+            // IN clause query in Redshift performs better compared to range queries, hence convert range queries to discrete set where possible.
+            case Types.SMALLINT -> Optional.of(ColumnMapping.longMapping(SMALLINT, ResultSet::getShort, smallintWriteFunction(), pushdownDiscreteValues(SMALLINT)));
+            // IN clause query in Redshift performs better compared to range queries, hence convert range queries to discrete set where possible.
+            case Types.INTEGER -> Optional.of(ColumnMapping.longMapping(INTEGER, ResultSet::getInt, integerWriteFunction(), pushdownDiscreteValues(INTEGER)));
+            // IN clause query in Redshift performs better compared to range queries, hence convert range queries to discrete set where possible.
+            case Types.BIGINT -> Optional.of(ColumnMapping.longMapping(BIGINT, ResultSet::getLong, bigintWriteFunction(), pushdownDiscreteValues(BIGINT)));
 
-            case Types.REAL:
-                return Optional.of(realColumnMapping());
-            case Types.DOUBLE:
-                return Optional.of(doubleColumnMapping());
+            case Types.REAL -> Optional.of(realColumnMapping());
+            case Types.DOUBLE -> Optional.of(doubleColumnMapping());
 
-            case Types.NUMERIC: {
+            case Types.NUMERIC -> {
                 int precision = type.requiredColumnSize();
                 int scale = type.requiredDecimalDigits();
                 DecimalType decimalType = createDecimalType(precision, scale);
                 if (precision == REDSHIFT_DECIMAL_CUTOFF_PRECISION) {
-                    return Optional.of(ColumnMapping.objectMapping(
+                    yield Optional.of(ColumnMapping.objectMapping(
                             decimalType,
                             longDecimalReadFunction(decimalType),
                             writeDecimalAtRedshiftCutoff(scale)));
                 }
-                return Optional.of(decimalColumnMapping(decimalType, UNNECESSARY));
+                yield Optional.of(decimalColumnMapping(decimalType, UNNECESSARY));
             }
 
-            case Types.CHAR:
+            case Types.CHAR -> {
                 CharType charType = createCharType(type.requiredColumnSize());
-                return Optional.of(ColumnMapping.sliceMapping(
+                yield Optional.of(ColumnMapping.sliceMapping(
                         charType,
                         charReadFunction(charType),
                         RedshiftClient::writeChar));
+            }
 
-            case Types.VARCHAR: {
+            case Types.VARCHAR -> {
                 if (type.columnSize().isEmpty()) {
                     throw new TrinoException(REDSHIFT_INVALID_TYPE, "column size not present");
                 }
                 int length = type.requiredColumnSize();
-                return Optional.of(varcharColumnMapping(
+                if (length == -1) {
+                    // CHARACTER VARYING returns -1. Treat the type as varchar(0) for the empty string.
+                    length = 0;
+                }
+                yield Optional.of(varcharColumnMapping(
                         length < VarcharType.MAX_LENGTH
                                 ? createVarcharType(length)
                                 : createUnboundedVarcharType(),
                         true));
             }
 
-            case Types.LONGVARBINARY:
-                return Optional.of(ColumnMapping.sliceMapping(
-                        VARBINARY,
-                        varbinaryReadFunction(),
-                        varbinaryWriteFunction()));
+            case Types.DATE -> Optional.of(ColumnMapping.longMapping(
+                    DATE,
+                    RedshiftClient::readDate,
+                    RedshiftClient::writeDate));
 
-            case Types.DATE:
-                return Optional.of(ColumnMapping.longMapping(
-                        DATE,
-                        RedshiftClient::readDate,
-                        RedshiftClient::writeDate));
+            case Types.TIMESTAMP -> Optional.of(ColumnMapping.longMapping(
+                    TIMESTAMP_MICROS,
+                    RedshiftClient::readTimestamp,
+                    RedshiftClient::writeShortTimestamp));
 
-            case Types.TIMESTAMP:
-                return Optional.of(ColumnMapping.longMapping(
-                        TIMESTAMP_MICROS,
-                        RedshiftClient::readTimestamp,
-                        RedshiftClient::writeShortTimestamp));
-
-            case Types.TIMESTAMP_WITH_TIMEZONE:
-                return Optional.of(ColumnMapping.objectMapping(
-                        TIMESTAMP_TZ_MICROS,
-                        longTimestampWithTimeZoneReadFunction(),
-                        longTimestampWithTimeZoneWriteFunction()));
-        }
-
-        if (getUnsupportedTypeHandling(session) == CONVERT_TO_VARCHAR) {
-            return mapToUnboundedVarchar(type);
-        }
-        return Optional.empty();
+            case Types.TIMESTAMP_WITH_TIMEZONE -> Optional.of(ColumnMapping.objectMapping(
+                    TIMESTAMP_TZ_MICROS,
+                    longTimestampWithTimeZoneReadFunction(),
+                    longTimestampWithTimeZoneWriteFunction()));
+            default -> getUnsupportedTypeHandling(session) == CONVERT_TO_VARCHAR ? mapToUnboundedVarchar(type) : Optional.empty();
+        };
     }
 
     @Override
@@ -731,11 +743,11 @@ public class RedshiftClient
                     : WriteMapping.objectMapping(name, longDecimalWriteFunction(decimal));
         }
 
-        if (type instanceof CharType) {
+        if (type instanceof CharType charType) {
             // Redshift has no unbounded text/binary types, so if a CHAR is too
             // large for Redshift, we write as VARCHAR. If too large for that,
             // we use the largest VARCHAR Redshift supports.
-            int size = ((CharType) type).getLength();
+            int size = charType.getLength();
             if (size <= REDSHIFT_MAX_CHAR) {
                 return WriteMapping.sliceMapping(
                         format("char(%d)", size),
@@ -747,10 +759,10 @@ public class RedshiftClient
                     (statement, index, value) -> writeCharAsVarchar(statement, index, value, redshiftVarcharWidth));
         }
 
-        if (type instanceof VarcharType) {
+        if (type instanceof VarcharType varcharType) {
             // Redshift has no unbounded text/binary types, so if a VARCHAR is
             // larger than Redshift's limit, we make it that big instead.
-            int size = ((VarcharType) type).getLength()
+            int size = varcharType.getLength()
                     .filter(n -> n <= REDSHIFT_MAX_VARCHAR)
                     .orElse(REDSHIFT_MAX_VARCHAR);
             return WriteMapping.sliceMapping(format("varchar(%d)", size), varcharWriteFunction());
@@ -768,8 +780,8 @@ public class RedshiftClient
             return WriteMapping.longMapping("time", RedshiftClient::writeTime);
         }
 
-        if (type instanceof TimestampType) {
-            if (((TimestampType) type).isShort()) {
+        if (type instanceof TimestampType timestampType) {
+            if (timestampType.isShort()) {
                 return WriteMapping.longMapping(
                         "timestamp",
                         RedshiftClient::writeShortTimestamp);

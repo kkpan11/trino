@@ -25,11 +25,14 @@ import org.testng.ITestResult;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 
+import static io.trino.testing.SystemEnvironmentUtils.isEnvSet;
 import static io.trino.testng.services.Listeners.formatTestName;
 import static java.lang.String.format;
 
 public class ProgressLoggingListener
-        implements IClassListener, ITestListener, IInvokedMethodListener
+        implements IClassListener,
+                   IInvokedMethodListener,
+                   ITestListener
 {
     private static final Logger LOGGER = Logger.get(ProgressLoggingListener.class);
     private final boolean enabled;
@@ -47,7 +50,7 @@ public class ProgressLoggingListener
         if (System.getProperty("ProgressLoggingListener.enabled") != null) {
             return Boolean.getBoolean("ProgressLoggingListener.enabled");
         }
-        if (System.getenv("CONTINUOUS_INTEGRATION") != null) {
+        if (isEnvSet("CONTINUOUS_INTEGRATION")) {
             return true;
         }
         // most often not useful for local development

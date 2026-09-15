@@ -27,11 +27,11 @@ import io.airlift.units.Duration;
 import io.opentelemetry.api.OpenTelemetry;
 import io.trino.FeaturesConfig.DataIntegrityVerification;
 import io.trino.exchange.DirectExchangeInput;
+import io.trino.exchange.ExchangeManagerConfig;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.buffer.PagesSerdeFactory;
-import io.trino.execution.buffer.TestingPagesSerdeFactory;
 import io.trino.metadata.Split;
 import io.trino.operator.ExchangeOperator.ExchangeOperatorFactory;
 import io.trino.spi.Page;
@@ -55,11 +55,14 @@ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.cache.SafeCaches.buildNonEvictableCacheWithWeakInvalidateAll;
+import static io.trino.execution.buffer.CompressionCodec.LZ4;
+import static io.trino.execution.buffer.TestingPagesSerdes.createTestingPagesSerdeFactory;
 import static io.trino.operator.ExchangeOperator.REMOTE_CATALOG_HANDLE;
-import static io.trino.operator.PageAssertions.assertPageEquals;
+import static io.trino.operator.PageAssertions.assertPagesEqual;
 import static io.trino.operator.TestingTaskBuffer.PAGE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
+import static java.util.Collections.nCopies;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -70,7 +73,7 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 public class TestExchangeOperator
 {
     private static final List<Type> TYPES = ImmutableList.of(VARCHAR);
-    private static final PagesSerdeFactory SERDE_FACTORY = new TestingPagesSerdeFactory();
+    private static final PagesSerdeFactory SERDE_FACTORY = createTestingPagesSerdeFactory(LZ4);
 
     private static final TaskId TASK_1_ID = new TaskId(new StageId("query", 0), 0, 0);
     private static final TaskId TASK_2_ID = new TaskId(new StageId("query", 0), 1, 0);
@@ -94,7 +97,7 @@ public class TestExchangeOperator
         pageBufferClientCallbackExecutor = Executors.newSingleThreadExecutor();
         httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers, SERDE_FACTORY), scheduler);
 
-        directExchangeClientSupplier = (queryId, exchangeId, span, memoryContext, taskFailureListener, retryPolicy) -> new DirectExchangeClient(
+        directExchangeClientSupplier = (_, _, _, memoryContext, taskFailureListener, _) -> new DirectExchangeClient(
                 "localhost",
                 DataIntegrityVerification.ABORT,
                 new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, MEGABYTE)),
@@ -269,7 +272,8 @@ public class TestExchangeOperator
                 directExchangeClientSupplier,
                 SERDE_FACTORY,
                 RetryPolicy.NONE,
-                new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of())));
+                new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of()), new ExchangeManagerConfig()),
+                TYPES);
 
         DriverContext driverContext = createTaskContext(scheduler, scheduledExecutor, TEST_SESSION)
                 .addPipelineContext(0, true, true, false)
@@ -324,10 +328,7 @@ public class TestExchangeOperator
         assertThat(operator.getOutput()).isNull();
 
         // verify pages
-        assertThat(outputPages.size()).isEqualTo(expectedPageCount);
-        for (Page page : outputPages) {
-            assertPageEquals(TYPES, page, PAGE);
-        }
+        assertPagesEqual(TYPES, outputPages, nCopies(expectedPageCount, PAGE));
 
         return outputPages;
     }

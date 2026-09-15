@@ -16,6 +16,7 @@ package io.trino.filesystem.azure;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
+import io.airlift.units.Duration;
 import io.trino.filesystem.azure.AzureFileSystemConfig.AuthType;
 import org.junit.jupiter.api.Test;
 
@@ -24,6 +25,8 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static java.lang.Math.max;
+import static java.util.concurrent.TimeUnit.MINUTES;
 
 class TestAzureFileSystemConfig
 {
@@ -37,7 +40,12 @@ class TestAzureFileSystemConfig
                 .setWriteBlockSize(DataSize.of(4, Unit.MEGABYTE))
                 .setMaxWriteConcurrency(8)
                 .setMaxSingleUploadSize(DataSize.of(4, Unit.MEGABYTE))
-                .setMaxHttpRequests(2 * Runtime.getRuntime().availableProcessors()));
+                .setMaxHttpRequests(2 * Runtime.getRuntime().availableProcessors())
+                .setMaxHttpConnections(2 * max(8, Runtime.getRuntime().availableProcessors()))
+                .setConnectionPoolMaxIdleTime(new Duration(5, MINUTES))
+                .setHttpRequestTimeout(new Duration(10, MINUTES))
+                .setApplicationId("Trino")
+                .setMultipartWriteEnabled(false));
     }
 
     @Test
@@ -51,6 +59,11 @@ class TestAzureFileSystemConfig
                 .put("azure.max-write-concurrency", "7")
                 .put("azure.max-single-upload-size", "7MB")
                 .put("azure.max-http-requests", "128")
+                .put("azure.max-http-connections", "128")
+                .put("azure.connection-pool-max-idle-time", "1m")
+                .put("azure.http-request-timeout", "1m")
+                .put("azure.application-id", "application id")
+                .put("azure.multipart-write-enabled", "true")
                 .buildOrThrow();
 
         AzureFileSystemConfig expected = new AzureFileSystemConfig()
@@ -60,7 +73,12 @@ class TestAzureFileSystemConfig
                 .setWriteBlockSize(DataSize.of(5, Unit.MEGABYTE))
                 .setMaxWriteConcurrency(7)
                 .setMaxSingleUploadSize(DataSize.of(7, Unit.MEGABYTE))
-                .setMaxHttpRequests(128);
+                .setMaxHttpRequests(128)
+                .setMaxHttpConnections(128)
+                .setConnectionPoolMaxIdleTime(new Duration(1, MINUTES))
+                .setHttpRequestTimeout(new Duration(1, MINUTES))
+                .setApplicationId("application id")
+                .setMultipartWriteEnabled(true);
 
         assertFullMapping(properties, expected);
     }

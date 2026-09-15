@@ -19,6 +19,7 @@ import io.trino.orc.metadata.CompressionKind;
 import io.trino.plugin.tpch.DecimalTypeMapping;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.SqlDecimal;
 import io.trino.spi.type.SqlTimestamp;
@@ -328,8 +329,8 @@ public class BenchmarkColumnReaders
     {
         List<Page> pages = new ArrayList<>();
         try (OrcRecordReader recordReader = data.createRecordReader()) {
-            for (Page page = recordReader.nextPage(); page != null; page = recordReader.nextPage()) {
-                pages.add(page.getLoadedPage());
+            for (SourcePage page = recordReader.nextPage(); page != null; page = recordReader.nextPage()) {
+                pages.add(page.getPage());
             }
         }
         return pages;
@@ -375,8 +376,8 @@ public class BenchmarkColumnReaders
             throws IOException
     {
         List<Block> blocks = new ArrayList<>();
-        for (Page page = recordReader.nextPage(); page != null; page = recordReader.nextPage()) {
-            blocks.add(page.getBlock(0).getLoadedBlock());
+        for (SourcePage page = recordReader.nextPage(); page != null; page = recordReader.nextPage()) {
+            blocks.add(page.getBlock(0));
         }
         return blocks;
     }
@@ -429,6 +430,7 @@ public class BenchmarkColumnReaders
             return orcReader.createRecordReader(
                     orcReader.getRootColumn().getNestedColumns(),
                     types,
+                    false,
                     OrcPredicate.TRUE,
                     UTC, // arbitrary
                     newSimpleAggregatedMemoryContext(),
@@ -444,20 +446,16 @@ public class BenchmarkColumnReaders
         @SuppressWarnings("unused")
         @Param({
                 "boolean",
-
                 "tinyint",
                 "integer",
                 "bigint",
                 "decimal(10,5)",
-
                 "timestamp",
-
                 "real",
                 "double",
-
                 "varchar",
                 "varbinary",
-                "uuid"
+                "uuid",
         })
         private String typeName;
 
@@ -500,6 +498,9 @@ public class BenchmarkColumnReaders
     public static class BooleanWithNullBenchmarkData
             extends BenchmarkData
     {
+        @Param({"0.01", "0.1", "0.5", "0.9"})
+        private double nullRate;
+
         @Setup
         public void setup()
                 throws Exception
@@ -511,7 +512,7 @@ public class BenchmarkColumnReaders
         {
             List<Boolean> values = new ArrayList<>();
             for (int i = 0; i < ROWS; ++i) {
-                values.add(random.nextBoolean() ? random.nextBoolean() : null);
+                values.add(random.nextDouble() < nullRate ? null : random.nextBoolean());
             }
             return values.iterator();
         }
@@ -1207,8 +1208,7 @@ public class BenchmarkColumnReaders
         public void setup()
                 throws Exception
         {
-            setup(
-                    getTableColumns("lineitem", DecimalTypeMapping.DOUBLE),
+            setup(getTableColumns("lineitem", DecimalTypeMapping.DOUBLE),
                     getTablePages("lineitem", 0.1, DecimalTypeMapping.DOUBLE));
         }
     }
@@ -1229,7 +1229,7 @@ public class BenchmarkColumnReaders
         }
     }
 
-    public static void main(String[] args)
+    static void main()
             throws Exception
     {
         benchmark(BenchmarkColumnReaders.class).run();

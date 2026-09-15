@@ -22,7 +22,6 @@ import io.airlift.bootstrap.Bootstrap;
 import io.airlift.concurrent.BoundedExecutor;
 import io.airlift.http.client.HttpClient;
 import io.airlift.json.JsonModule;
-import io.airlift.tracetoken.TraceTokenModule;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Tracer;
 import io.trino.plugin.opa.schema.OpaBatchColumnMaskQueryResult;
@@ -54,12 +53,6 @@ public class OpaAccessControlFactory
     }
 
     @Override
-    public SystemAccessControl create(Map<String, String> config)
-    {
-        return create(config, Optional.empty(), Optional.empty());
-    }
-
-    @Override
     public SystemAccessControl create(Map<String, String> config, SystemAccessControlContext context)
     {
         return create(config, Optional.empty(), Optional.ofNullable(context));
@@ -73,8 +66,8 @@ public class OpaAccessControlFactory
         requireNonNull(context, "context is null");
 
         Bootstrap app = new Bootstrap(
+                "io.trino.bootstrap.access.opa",
                 new JsonModule(),
-                new TraceTokenModule(),
                 binder -> {
                     jsonCodecBinder(binder).bindJsonCodec(OpaQuery.class);
                     jsonCodecBinder(binder).bindJsonCodec(OpaQueryResult.class);
@@ -83,7 +76,7 @@ public class OpaAccessControlFactory
                     jsonCodecBinder(binder).bindJsonCodec(OpaBatchColumnMaskQueryResult.class);
                     httpClient.ifPresentOrElse(
                             client -> binder.bind(Key.get(HttpClient.class, ForOpa.class)).toInstance(client),
-                            () -> httpClientBinder(binder).bindHttpClient("opa", ForOpa.class).withTracing());
+                            () -> httpClientBinder(binder).bindHttpClient("opa", ForOpa.class));
                     context.ifPresentOrElse(
                             actualContext -> {
                                 binder.bind(OpaPluginContext.class).toInstance(new OpaPluginContext(actualContext.getVersion()));
@@ -101,6 +94,7 @@ public class OpaAccessControlFactory
 
         Injector injector = app
                 .doNotInitializeLogging()
+                .disableSystemProperties()
                 .setRequiredConfigurationProperties(config)
                 .initialize();
         return injector.getInstance(SystemAccessControl.class);

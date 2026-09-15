@@ -20,7 +20,9 @@ import io.trino.spi.function.AggregationFunction;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
+import io.trino.spi.type.StandardTypes;
 
 import static io.trino.type.setdigest.SetDigestType.SET_DIGEST;
 
@@ -30,7 +32,7 @@ public final class MergeSetDigestAggregation
     private MergeSetDigestAggregation() {}
 
     @InputFunction
-    public static void input(SetDigestState state, @SqlType(SetDigestType.NAME) Slice value)
+    public static void input(SetDigestState state, @SqlType(StandardTypes.SET_DIGEST) Slice value)
     {
         SetDigest instance = SetDigest.newInstance(value);
         merge(state, instance);
@@ -52,7 +54,8 @@ public final class MergeSetDigestAggregation
         }
     }
 
-    @OutputFunction(SetDigestType.NAME)
+    @SqlNullable
+    @OutputFunction(StandardTypes.SET_DIGEST)
     public static void output(SetDigestState state, BlockBuilder out)
     {
         if (state.getDigest() == null) {

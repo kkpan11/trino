@@ -15,6 +15,7 @@ package io.trino.sql.routine;
 
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.security.AllowAllAccessControl;
+import io.trino.spi.function.FunctionId;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.FunctionSpecification;
@@ -26,16 +27,21 @@ import org.junit.jupiter.api.Test;
 
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
+import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_PROPERTY;
 import static io.trino.spi.StandardErrorCode.MISSING_RETURN;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SYNTAX_ERROR;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
+import static io.trino.sql.routine.SqlRoutineAnalyzer.extractFunctionMetadata;
+import static io.trino.sql.routine.SqlRoutineAnalyzer.getLanguageName;
+import static io.trino.sql.routine.SqlRoutineAnalyzer.isRunAsInvoker;
 import static io.trino.testing.TestingSession.testSession;
 import static io.trino.testing.TransactionBuilder.transaction;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.from;
 
 class TestSqlRoutineAnalyzer
@@ -76,6 +82,10 @@ class TestSqlRoutineAnalyzer
         assertFails("FUNCTION test() RETURNS int NOT DETERMINISTIC DETERMINISTIC RETURN 123")
                 .hasErrorCode(SYNTAX_ERROR)
                 .hasMessage("line 1:47: Multiple deterministic clauses specified");
+
+        assertExtractMetadataFails("FUNCTION test() RETURNS int WITH (x = 1) WITH (y = 2) RETURN 123")
+                .hasErrorCode(SYNTAX_ERROR)
+                .hasMessage("line 1:42: Multiple properties clauses specified");
     }
 
     @Test
@@ -119,9 +129,79 @@ class TestSqlRoutineAnalyzer
         assertThat(analyze("FUNCTION test() RETURNS bigint LANGUAGE SQL RETURN abs(-42)"))
                 .returns(true, from(SqlRoutineAnalysis::deterministic));
 
-        assertFails("FUNCTION test() RETURNS bigint LANGUAGE JAVASCRIPT RETURN abs(-42)")
+        assertExtractMetadataFails("FUNCTION test() RETURNS bigint LANGUAGE JAVASCRIPT RETURN abs(-42)")
+                .hasErrorCode(SYNTAX_ERROR)
+                .hasMessage("line 1:52: Only functions using language 'SQL' may be defined using SQL");
+
+        assertThatThrownBy(() -> analyze(
+                """
+                FUNCTION test() RETURNS bigint
+                LANGUAGE JAVASCRIPT AS $$
+                xxx
+                $$
+                """))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("function language must be SQL");
+
+        assertExtractMetadataFails(
+                """
+                FUNCTION test() RETURNS bigint AS $$
+                xxx
+                $$
+                """)
+                .hasErrorCode(SYNTAX_ERROR)
+                .hasMessage("line 1:35: Functions using language 'SQL' must be defined using SQL");
+
+        assertExtractMetadataFails("FUNCTION test() RETURNS bigint WITH (abc = 'test') RETURN abs(-42)")
+                .hasErrorCode(INVALID_FUNCTION_PROPERTY)
+                .hasMessage("line 1:38: Function language 'SQL' does not support properties");
+
+        assertThat(getLanguageName(function("FUNCTION test() RETURNS bigint RETURN 123")))
+                .isEqualTo("SQL");
+
+        assertThat(getLanguageName(function("FUNCTION test() RETURNS bigint LANGUAGE ABC RETURN 123")))
+                .isEqualTo("ABC");
+    }
+
+    @Test
+    void testSecurity()
+    {
+        extractMetadata("FUNCTION test() RETURNS bigint SECURITY INVOKER RETURN 123");
+
+        extractMetadata("FUNCTION test() RETURNS bigint SECURITY DEFINER RETURN 123");
+
+        assertExtractMetadataFails("FUNCTION test() RETURNS bigint SECURITY INVOKER SECURITY DEFINER RETURN 123")
+                .hasErrorCode(SYNTAX_ERROR)
+                .hasMessage("line 1:49: Multiple security clauses specified");
+
+        assertThat(isRunAsInvoker(function("FUNCTION test() RETURNS bigint RETURN 123")))
+                .isFalse();
+
+        assertThat(isRunAsInvoker(function("FUNCTION test() RETURNS bigint SECURITY DEFINER RETURN 123")))
+                .isFalse();
+
+        assertThat(isRunAsInvoker(function("FUNCTION test() RETURNS bigint SECURITY INVOKER RETURN 123")))
+                .isTrue();
+
+        assertExtractMetadataFails(
+                """
+                FUNCTION test() RETURNS bigint SECURITY DEFINER
+                LANGUAGE JAVASCRIPT AS $$
+                xxx
+                $$
+                """)
                 .hasErrorCode(NOT_SUPPORTED)
-                .hasMessage("line 1:41: Unsupported function language: JAVASCRIPT");
+                .hasMessage("line 1:32: Only functions using language 'SQL' may declare security");
+
+        assertExtractMetadataFails(
+                """
+                FUNCTION test() RETURNS bigint SECURITY INVOKER
+                LANGUAGE JAVASCRIPT AS $$
+                xxx
+                $$
+                """)
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:32: Only functions using language 'SQL' may declare security");
     }
 
     @Test
@@ -151,7 +231,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testIfConditionType()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   IF random() THEN
@@ -167,7 +248,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testElseIfConditionType()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   IF false THEN
@@ -185,7 +267,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testCaseWhenClauseValueType()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test(x int) RETURNS int
                 BEGIN
                   CASE x
@@ -202,7 +285,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testCaseWhenClauseConditionType()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   CASE
@@ -223,7 +307,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(MISSING_RETURN)
                 .hasMessage("line 1:29: Function must end in a RETURN statement");
 
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   IF false THEN
@@ -233,12 +318,176 @@ class TestSqlRoutineAnalyzer
                 """)
                 .hasErrorCode(MISSING_RETURN)
                 .hasMessage("line 2:1: Function must end in a RETURN statement");
+
+        // an ELSEIF chain with no final ELSE can still fall through, regardless of whether
+        // every existing branch returns
+        assertFails(
+                """
+                FUNCTION test() RETURNS int
+                BEGIN
+                  IF false THEN
+                    RETURN 13;
+                  ELSEIF true THEN
+                    RETURN 14;
+                  END IF;
+                END
+                """)
+                .hasErrorCode(MISSING_RETURN)
+                .hasMessage("line 2:1: Function must end in a RETURN statement");
+
+        assertFails(
+                """
+                FUNCTION test() RETURNS int
+                BEGIN
+                  CASE
+                    WHEN false THEN RETURN 13;
+                  END CASE;
+                END
+                """)
+                .hasErrorCode(MISSING_RETURN)
+                .hasMessage("line 2:1: Function must end in a RETURN statement");
+
+        // a loop as the last statement still requires a trailing RETURN
+        assertFails(
+                """
+                FUNCTION test() RETURNS int
+                BEGIN
+                  WHILE true DO
+                    RETURN 13;
+                  END WHILE;
+                END
+                """)
+                .hasErrorCode(MISSING_RETURN)
+                .hasMessage("line 2:1: Function must end in a RETURN statement");
+
+        assertFails(
+                """
+                FUNCTION test() RETURNS int
+                BEGIN
+                  REPEAT
+                    RETURN 13;
+                  UNTIL true
+                  END REPEAT;
+                END
+                """)
+                .hasErrorCode(MISSING_RETURN)
+                .hasMessage("line 2:1: Function must end in a RETURN statement");
+
+        // an exhaustive IF followed by another statement does not satisfy the RETURN requirement
+        assertFails(
+                """
+                FUNCTION test() RETURNS int
+                BEGIN
+                  DECLARE x int;
+                  IF true THEN
+                    RETURN 13;
+                  ELSE
+                    RETURN 14;
+                  END IF;
+                  SET x = 1;
+                END
+                """)
+                .hasErrorCode(MISSING_RETURN)
+                .hasMessage("line 2:1: Function must end in a RETURN statement");
+    }
+
+    @Test
+    void testExhaustiveIfReturn()
+    {
+        // every branch returns, so no trailing RETURN is needed
+        analyze(
+                """
+                FUNCTION test(a bigint) RETURNS varchar
+                BEGIN
+                  IF a = 0 THEN
+                    RETURN 'zero';
+                  ELSEIF a = 1 THEN
+                    RETURN 'one';
+                  ELSE
+                    RETURN 'more than one or negative';
+                  END IF;
+                END
+                """);
+
+        analyze(
+                """
+                FUNCTION test(a bigint) RETURNS varchar
+                BEGIN
+                  IF a = 0 THEN
+                    RETURN 'zero';
+                  ELSE
+                    RETURN 'nonzero';
+                  END IF;
+                END
+                """);
+
+        // nested IF statements are checked recursively
+        analyze(
+                """
+                FUNCTION test(a bigint, b bigint) RETURNS varchar
+                BEGIN
+                  IF a = 0 THEN
+                    IF b = 0 THEN
+                      RETURN 'both zero';
+                    ELSE
+                      RETURN 'a zero';
+                    END IF;
+                  ELSE
+                    RETURN 'a nonzero';
+                  END IF;
+                END
+                """);
+
+        // a BEGIN/END block as a branch body
+        analyze(
+                """
+                FUNCTION test(a bigint) RETURNS varchar
+                BEGIN
+                  IF a = 0 THEN
+                    BEGIN
+                      RETURN 'zero';
+                    END;
+                  ELSE
+                    RETURN 'nonzero';
+                  END IF;
+                END
+                """);
+    }
+
+    @Test
+    void testExhaustiveCaseReturn()
+    {
+        // every branch returns, so no trailing RETURN is needed
+        analyze(
+                """
+                FUNCTION test(a int) RETURNS int
+                BEGIN
+                  CASE
+                    WHEN a = 0 THEN RETURN 0;
+                    WHEN a = 1 THEN RETURN 1;
+                    ELSE RETURN -1;
+                  END CASE;
+                END
+                """);
+
+        analyze(
+                """
+                FUNCTION test(a int) RETURNS int
+                BEGIN
+                  CASE a
+                    WHEN 0 THEN RETURN 0;
+                    WHEN 1 THEN RETURN 1;
+                    ELSE RETURN -1;
+                  END CASE;
+                END
+                """);
     }
 
     @Test
     void testBadVariableDefault()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   DECLARE x int DEFAULT 'abc';
@@ -252,7 +501,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testVariableAlreadyDeclared()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   DECLARE x int;
@@ -263,7 +513,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(ALREADY_EXISTS)
                 .hasMessage("line 4:11: Variable already declared in this scope: x");
 
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   DECLARE x int;
@@ -274,7 +525,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(ALREADY_EXISTS)
                 .hasMessage("line 4:14: Variable already declared in this scope: x");
 
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   DECLARE x, y, x int;
@@ -284,7 +536,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(ALREADY_EXISTS)
                 .hasMessage("line 3:17: Variable already declared in this scope: x");
 
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   DECLARE x int;
@@ -297,7 +550,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(ALREADY_EXISTS)
                 .hasMessage("line 5:13: Variable already declared in this scope: x");
 
-        analyze("""
+        analyze(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   BEGIN
@@ -314,7 +568,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testAssignmentUnknownTarget()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   SET x = 13;
@@ -328,7 +583,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testAssignmentType()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   DECLARE x int;
@@ -343,7 +599,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testWhileConditionType()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   WHILE 13 DO
@@ -359,7 +616,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testUntilConditionType()
     {
-         assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   REPEAT
@@ -369,13 +627,14 @@ class TestSqlRoutineAnalyzer
                 END
                 """)
                 .hasErrorCode(TYPE_MISMATCH)
-                 .hasMessage("line 5:9: Condition of REPEAT statement must evaluate to boolean (actual: integer)");
+                .hasMessage("line 5:9: Condition of REPEAT statement must evaluate to boolean (actual: integer)");
     }
 
     @Test
     void testIterateUnknownLabel()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   WHILE true DO
@@ -391,7 +650,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testLeaveUnknownLabel()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   LEAVE abc;
@@ -405,7 +665,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testDuplicateWhileLabel()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   abc: WHILE true DO
@@ -420,7 +681,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(ALREADY_EXISTS)
                 .hasMessage("line 5:5: Label already declared in this scope: abc");
 
-        analyze("""
+        analyze(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   abc: WHILE true DO
@@ -437,7 +699,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testDuplicateRepeatLabel()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   abc: REPEAT
@@ -452,7 +715,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(ALREADY_EXISTS)
                 .hasMessage("line 5:5: Label already declared in this scope: abc");
 
-        analyze("""
+        analyze(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   abc: REPEAT
@@ -469,7 +733,8 @@ class TestSqlRoutineAnalyzer
     @Test
     void testDuplicateLoopLabel()
     {
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   abc: LOOP
@@ -484,7 +749,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(ALREADY_EXISTS)
                 .hasMessage("line 5:5: Label already declared in this scope: abc");
 
-        analyze("""
+        analyze(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   abc: LOOP
@@ -505,7 +771,8 @@ class TestSqlRoutineAnalyzer
                 .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:36: Queries are not allowed in functions");
 
-        assertFails("""
+        assertFails(
+                """
                 FUNCTION test() RETURNS int
                 BEGIN
                   RETURN (SELECT 123);
@@ -515,6 +782,16 @@ class TestSqlRoutineAnalyzer
                 .hasMessage("line 3:10: Queries are not allowed in functions");
     }
 
+    private static TrinoExceptionAssert assertExtractMetadataFails(@Language("SQL") String function)
+    {
+        return assertTrinoExceptionThrownBy(() -> extractMetadata(function));
+    }
+
+    private static void extractMetadata(@Language("SQL") String function)
+    {
+        extractFunctionMetadata(new FunctionId("test"), function(function));
+    }
+
     private static TrinoExceptionAssert assertFails(@Language("SQL") String function)
     {
         return assertTrinoExceptionThrownBy(() -> analyze(function));
@@ -522,8 +799,6 @@ class TestSqlRoutineAnalyzer
 
     private static SqlRoutineAnalysis analyze(@Language("SQL") String function)
     {
-        FunctionSpecification specification = SQL_PARSER.createFunctionSpecification(function);
-
         TransactionManager transactionManager = new TestingTransactionManager();
         PlannerContext plannerContext = plannerContextBuilder()
                 .withTransactionManager(transactionManager)
@@ -532,7 +807,12 @@ class TestSqlRoutineAnalyzer
                 .singleStatement()
                 .execute(testSession(), transactionSession -> {
                     SqlRoutineAnalyzer analyzer = new SqlRoutineAnalyzer(plannerContext, WarningCollector.NOOP);
-                    return analyzer.analyze(transactionSession, new AllowAllAccessControl(), specification);
+                    return analyzer.analyze(transactionSession, new AllowAllAccessControl(), function(function));
                 });
+    }
+
+    private static FunctionSpecification function(@Language("SQL") String function)
+    {
+        return SQL_PARSER.createFunctionSpecification(function);
     }
 }

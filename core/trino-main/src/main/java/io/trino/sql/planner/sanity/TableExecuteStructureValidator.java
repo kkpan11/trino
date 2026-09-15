@@ -16,7 +16,9 @@ package io.trino.sql.planner.sanity;
 import io.trino.Session;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.sql.PlannerContext;
+import io.trino.sql.planner.AdaptivePlanner;
 import io.trino.sql.planner.plan.ExchangeNode;
+import io.trino.sql.planner.plan.ExplainAnalyzeNode;
 import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
@@ -32,12 +34,15 @@ public class TableExecuteStructureValidator
         implements PlanSanityChecker.Checker
 {
     @Override
-    public void validate(PlanNode planNode,
+    public void validate(
+            PlanNode planNode,
             Session session,
             PlannerContext plannerContext,
             WarningCollector warningCollector)
     {
-        Optional<PlanNode> tableExecuteNode = searchFrom(planNode)
+        PlanNode currentPlan = AdaptivePlanner.getCurrentPlan(planNode); // resolve potential adaptive plan nodes
+
+        Optional<PlanNode> tableExecuteNode = searchFrom(currentPlan)
                 .where(node -> node instanceof TableExecuteNode)
                 .findFirst();
 
@@ -46,7 +51,7 @@ public class TableExecuteStructureValidator
             return;
         }
 
-        searchFrom(planNode)
+        searchFrom(currentPlan)
                 .findAll()
                 .forEach(node -> {
                     if (!isAllowedNode(node)) {
@@ -62,6 +67,7 @@ public class TableExecuteStructureValidator
                 || node instanceof TableExecuteNode
                 || node instanceof OutputNode
                 || node instanceof ExchangeNode
-                || node instanceof TableFinishNode;
+                || node instanceof TableFinishNode
+                || node instanceof ExplainAnalyzeNode;
     }
 }

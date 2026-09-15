@@ -26,7 +26,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.plugin.iceberg.ColumnIdentity.TypeCategory.PRIMITIVE;
@@ -57,30 +56,29 @@ public class TestParquetPredicates
 
         // parquet type
         MessageType fileSchema = new MessageType("iceberg_schema",
-                new GroupType(OPTIONAL, "row_field",
+                new GroupType(
+                        OPTIONAL,
+                        "row_field",
                         new PrimitiveType(OPTIONAL, INT32, "a").withId(1),
                         new PrimitiveType(OPTIONAL, INT32, "b").withId(2),
                         new PrimitiveType(OPTIONAL, INT32, "c").withId(3)));
 
         // predicate domain
-        IcebergColumnHandle projectedColumn = new IcebergColumnHandle(
-                new ColumnIdentity(
+        IcebergColumnHandle projectedColumn = IcebergColumnHandle.required(new ColumnIdentity(
                         5,
                         "row_field",
                         STRUCT,
-                        ImmutableList.of(fieldA, fieldB, fieldC)),
-                baseType,
-                ImmutableList.of(2),
-                INTEGER,
-                false,
-                Optional.empty());
+                        ImmutableList.of(fieldA, fieldB, fieldC)))
+                .fieldType(baseType, INTEGER)
+                .path(2)
+                .build();
         Domain predicateDomain = Domain.singleValue(INTEGER, 123L);
         TupleDomain<IcebergColumnHandle> tupleDomain = withColumnDomains(ImmutableMap.of(projectedColumn, predicateDomain));
 
         Map<List<String>, ColumnDescriptor> descriptorsByPath = getDescriptors(fileSchema, fileSchema);
         TupleDomain<ColumnDescriptor> calculatedTupleDomain = getParquetTupleDomain(descriptorsByPath, tupleDomain);
 
-        assertThat(calculatedTupleDomain.getDomains().orElseThrow().size()).isEqualTo(1);
+        assertThat(calculatedTupleDomain.getDomains().orElseThrow()).hasSize(1);
         ColumnDescriptor selectedColumnDescriptor = descriptorsByPath.get(ImmutableList.of("row_field", "b"));
         assertThat(calculatedTupleDomain.getDomains().orElseThrow().get(selectedColumnDescriptor)).isEqualTo(predicateDomain);
     }
@@ -101,23 +99,22 @@ public class TestParquetPredicates
 
         // parquet type
         MessageType fileSchema = new MessageType("iceberg_schema",
-                new GroupType(OPTIONAL, "row_field",
+                new GroupType(
+                        OPTIONAL,
+                        "row_field",
                         new PrimitiveType(OPTIONAL, INT32, "a").withId(1),
                         new PrimitiveType(OPTIONAL, INT32, "b").withId(2),
                         new PrimitiveType(OPTIONAL, INT32, "c").withId(3)).withId(5));
 
         // predicate domain
-        IcebergColumnHandle projectedColumn = new IcebergColumnHandle(
-                new ColumnIdentity(
+        IcebergColumnHandle projectedColumn = IcebergColumnHandle.required(new ColumnIdentity(
                         5,
                         "row_field",
                         STRUCT,
-                        ImmutableList.of(fieldA, fieldB, fieldC)),
-                baseType,
-                ImmutableList.of(4),
-                INTEGER,
-                false,
-                Optional.empty());
+                        ImmutableList.of(fieldA, fieldB, fieldC)))
+                .fieldType(baseType, INTEGER)
+                .path(4)
+                .build();
         Domain predicateDomain = Domain.singleValue(INTEGER, 123L);
         TupleDomain<IcebergColumnHandle> tupleDomain = withColumnDomains(ImmutableMap.of(projectedColumn, predicateDomain));
 
@@ -148,25 +145,25 @@ public class TestParquetPredicates
 
         // parquet type
         MessageType fileSchema = new MessageType("iceberg_schema",
-                new GroupType(OPTIONAL, "row_field",
+                new GroupType(
+                        OPTIONAL,
+                        "row_field",
                         new PrimitiveType(OPTIONAL, INT32, "a").withId(3),
                         new PrimitiveType(OPTIONAL, INT32, "b").withId(4),
-                        new GroupType(OPTIONAL,
+                        new GroupType(
+                                OPTIONAL,
                                 "c",
                                 new PrimitiveType(OPTIONAL, INT32, "c1").withId(1),
                                 new PrimitiveType(OPTIONAL, INT32, "c2").withId(2)).withId(5)));
         // predicate domain
-        IcebergColumnHandle projectedColumn = new IcebergColumnHandle(
-                new ColumnIdentity(
+        IcebergColumnHandle projectedColumn = IcebergColumnHandle.required(new ColumnIdentity(
                         6,
                         "row_field",
                         STRUCT,
-                        ImmutableList.of(fieldA, fieldB, fieldC)),
-                baseType,
-                ImmutableList.of(5),
-                nestedType,
-                false,
-                Optional.empty());
+                        ImmutableList.of(fieldA, fieldB, fieldC)))
+                .fieldType(baseType, nestedType)
+                .path(5)
+                .build();
 
         Domain predicateDomain = Domain.onlyNull(nestedType);
         TupleDomain<IcebergColumnHandle> tupleDomain = withColumnDomains(ImmutableMap.of(projectedColumn, predicateDomain));
@@ -193,22 +190,21 @@ public class TestParquetPredicates
 
         // parquet type
         MessageType fileSchema = new MessageType("iceberg_schema",
-                new GroupType(OPTIONAL, "row_field",
+                new GroupType(
+                        OPTIONAL,
+                        "row_field",
                         new PrimitiveType(OPTIONAL, INT32, "a").withId(1),
                         new PrimitiveType(OPTIONAL, INT32, "b").withId(2)));
 
         // predicate domain
-        IcebergColumnHandle projectedColumn = new IcebergColumnHandle(
-                new ColumnIdentity(
+        IcebergColumnHandle projectedColumn = IcebergColumnHandle.required(new ColumnIdentity(
                         5,
                         "row_field",
                         STRUCT,
-                        ImmutableList.of(fieldA, fieldB, fieldC)),
-                baseType,
-                ImmutableList.of(3),
-                INTEGER,
-                false,
-                Optional.empty());
+                        ImmutableList.of(fieldA, fieldB, fieldC)))
+                .fieldType(baseType, INTEGER)
+                .path(3)
+                .build();
         Domain predicateDomain = Domain.singleValue(INTEGER, 123L);
         TupleDomain<IcebergColumnHandle> tupleDomain = withColumnDomains(ImmutableMap.of(projectedColumn, predicateDomain));
 

@@ -20,6 +20,7 @@ import io.trino.spi.Page;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
+import io.trino.sql.gen.OrderingCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.MaterializedResult;
 import org.junit.jupiter.api.AfterEach;
@@ -31,6 +32,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
@@ -54,11 +56,12 @@ public class TestTopNOperator
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
-    private final TypeOperators typeOperators = new TypeOperators();
+    private OrderingCompiler orderingCompiler;
 
     @BeforeEach
     public void setUp()
     {
+        orderingCompiler = new OrderingCompiler(new TypeOperators());
         executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
         scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
         driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
@@ -69,6 +72,7 @@ public class TestTopNOperator
     @AfterEach
     public void tearDown()
     {
+        orderingCompiler = null;
         executor.shutdownNow();
         scheduledExecutor.shutdownNow();
     }
@@ -183,10 +187,11 @@ public class TestTopNOperator
 
     @Test
     public void testExceedMemoryLimit()
+            throws Exception
     {
-        List<Page> input = rowPagesBuilder(BIGINT)
+        Page input = rowPagesBuilder(BIGINT)
                 .row(1L)
-                .build();
+                .buildPage();
 
         DriverContext smallDiverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.ofBytes(1))
                 .addPipelineContext(0, true, true, false)
@@ -197,26 +202,28 @@ public class TestTopNOperator
                 100,
                 ImmutableList.of(0),
                 ImmutableList.of(ASC_NULLS_LAST));
-        Operator operator = operatorFactory.createOperator(smallDiverContext);
-        operator.addInput(input.get(0));
-        assertThatThrownBy(operator::getOutput)
-                .isInstanceOf(ExceededMemoryLimitException.class)
-                .hasMessageStartingWith("Query exceeded per-node memory limit of ");
+        try (Operator operator = operatorFactory.createOperator(smallDiverContext)) {
+            operator.addInput(input);
+            assertThatThrownBy(operator::getOutput)
+                    .isInstanceOf(ExceededMemoryLimitException.class)
+                    .hasMessageStartingWith("Query exceeded per-node memory limit of ");
+        }
     }
 
     private OperatorFactory topNOperatorFactory(
-            List<? extends Type> types,
+            List<Type> types,
             int n,
             List<Integer> sortChannels,
             List<SortOrder> sortOrders)
     {
+        List<Type> sortTypes = sortChannels.stream()
+                .map(types::get)
+                .collect(toImmutableList());
         return TopNOperator.createOperatorFactory(
                 0,
                 new PlanNodeId("test"),
                 types,
                 n,
-                sortChannels,
-                sortOrders,
-                typeOperators);
+                orderingCompiler.compilePageWithPositionComparator(sortTypes, sortChannels, sortOrders));
     }
 }

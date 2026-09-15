@@ -58,6 +58,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Predicates.in;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.SystemSessionProperties.getCharVarcharCoercion;
 import static io.trino.spi.function.FunctionKind.AGGREGATE;
 import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.ir.IrUtils.combineConjuncts;
@@ -134,14 +135,14 @@ public class IndexJoinOptimizer
                 }
 
                 switch (node.getType()) {
-                    case INNER:
+                    case INNER -> {
                         // Prefer the right candidate over the left candidate
                         PlanNode indexJoinNode = null;
                         if (rightIndexCandidate.isPresent()) {
-                            indexJoinNode = new IndexJoinNode(idAllocator.getNextId(), IndexJoinNode.Type.INNER, leftRewritten, rightIndexCandidate.get(), createEquiJoinClause(leftJoinSymbols, rightJoinSymbols), Optional.empty(), Optional.empty());
+                            indexJoinNode = new IndexJoinNode(idAllocator.getNextId(), IndexJoinNode.Type.INNER, leftRewritten, rightIndexCandidate.get(), createEquiJoinClause(leftJoinSymbols, rightJoinSymbols));
                         }
                         else if (leftIndexCandidate.isPresent()) {
-                            indexJoinNode = new IndexJoinNode(idAllocator.getNextId(), IndexJoinNode.Type.INNER, rightRewritten, leftIndexCandidate.get(), createEquiJoinClause(rightJoinSymbols, leftJoinSymbols), Optional.empty(), Optional.empty());
+                            indexJoinNode = new IndexJoinNode(idAllocator.getNextId(), IndexJoinNode.Type.INNER, rightRewritten, leftIndexCandidate.get(), createEquiJoinClause(rightJoinSymbols, leftJoinSymbols));
                         }
 
                         if (indexJoinNode != null) {
@@ -158,27 +159,21 @@ public class IndexJoinOptimizer
 
                             return indexJoinNode;
                         }
-                        break;
-
-                    case LEFT:
+                    }
+                    case LEFT -> {
                         // We cannot use indices for outer joins until index join supports in-line filtering
                         if (node.getFilter().isEmpty() && rightIndexCandidate.isPresent()) {
                             return createIndexJoinWithExpectedOutputs(node.getOutputSymbols(), IndexJoinNode.Type.SOURCE_OUTER, leftRewritten, rightIndexCandidate.get(), createEquiJoinClause(leftJoinSymbols, rightJoinSymbols), idAllocator);
                         }
-                        break;
-
-                    case RIGHT:
+                    }
+                    case RIGHT -> {
                         // We cannot use indices for outer joins until index join supports in-line filtering
                         if (node.getFilter().isEmpty() && leftIndexCandidate.isPresent()) {
                             return createIndexJoinWithExpectedOutputs(node.getOutputSymbols(), IndexJoinNode.Type.SOURCE_OUTER, rightRewritten, leftIndexCandidate.get(), createEquiJoinClause(rightJoinSymbols, leftJoinSymbols), idAllocator);
                         }
-                        break;
-
-                    case FULL:
-                        break;
-
-                    default:
-                        throw new IllegalArgumentException("Unknown type: " + node.getType());
+                    }
+                    case FULL -> {}
+                    default -> throw new IllegalArgumentException("Unknown type: " + node.getType());
                 }
             }
 
@@ -193,8 +188,6 @@ public class IndexJoinOptimizer
                         node.getRightOutputSymbols(),
                         node.isMaySkipOutputDuplicates(),
                         node.getFilter(),
-                        node.getLeftHashSymbol(),
-                        node.getRightHashSymbol(),
                         node.getDistributionType(),
                         node.isSpillable(),
                         node.getDynamicFilters(),
@@ -205,7 +198,7 @@ public class IndexJoinOptimizer
 
         private static PlanNode createIndexJoinWithExpectedOutputs(List<Symbol> expectedOutputs, IndexJoinNode.Type type, PlanNode probe, PlanNode index, List<IndexJoinNode.EquiJoinClause> equiJoinClause, PlanNodeIdAllocator idAllocator)
         {
-            PlanNode result = new IndexJoinNode(idAllocator.getNextId(), type, probe, index, equiJoinClause, Optional.empty(), Optional.empty());
+            PlanNode result = new IndexJoinNode(idAllocator.getNextId(), type, probe, index, equiJoinClause);
             if (!result.getOutputSymbols().equals(expectedOutputs)) {
                 result = new ProjectNode(
                         idAllocator.getNextId(),
@@ -314,7 +307,7 @@ public class IndexJoinOptimizer
                     node.getAssignments());
 
             Expression resultingPredicate = combineConjuncts(
-                    domainTranslator.toPredicate(resolvedIndex.getUnresolvedTupleDomain().transformKeys(inverseAssignments::get)),
+                    domainTranslator.toPredicate(getCharVarcharCoercion(session), resolvedIndex.getUnresolvedTupleDomain().transformKeys(inverseAssignments::get)),
                     decomposedPredicate.getRemainingExpression());
 
             if (!resultingPredicate.equals(TRUE)) {
@@ -401,7 +394,7 @@ public class IndexJoinOptimizer
 
             PlanNode source = node;
             if (rewrittenProbeSource != node.getProbeSource()) {
-                source = new IndexJoinNode(node.getId(), node.getType(), rewrittenProbeSource, node.getIndexSource(), node.getCriteria(), node.getProbeHashSymbol(), node.getIndexHashSymbol());
+                source = new IndexJoinNode(node.getId(), node.getType(), rewrittenProbeSource, node.getIndexSource(), node.getCriteria());
             }
 
             return source;
@@ -462,6 +455,8 @@ public class IndexJoinOptimizer
      */
     public static final class IndexKeyTracer
     {
+        private IndexKeyTracer() {}
+
         public static Map<Symbol, Symbol> trace(PlanNode node, Set<Symbol> lookupSymbols)
         {
             return node.accept(new Visitor(), lookupSymbols);
@@ -480,7 +475,7 @@ public class IndexJoinOptimizer
             public Map<Symbol, Symbol> visitProject(ProjectNode node, Set<Symbol> lookupSymbols)
             {
                 // Map from output Symbols to source Symbols
-                Map<Symbol, Symbol> directSymbolTranslationOutputMap = Maps.transformValues(Maps.filterValues(node.getAssignments().getMap(), Reference.class::isInstance), Symbol::from);
+                Map<Symbol, Symbol> directSymbolTranslationOutputMap = Maps.transformValues(Maps.filterValues(node.getAssignments().assignments(), Reference.class::isInstance), Symbol::from);
                 Map<Symbol, Symbol> outputToSourceMap = lookupSymbols.stream()
                         .filter(directSymbolTranslationOutputMap.keySet()::contains)
                         .collect(toImmutableMap(identity(), directSymbolTranslationOutputMap::get));

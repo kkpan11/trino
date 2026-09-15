@@ -48,7 +48,6 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
-import jakarta.annotation.Nullable;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Days;
 import org.joda.time.LocalDateTime;
@@ -60,7 +59,6 @@ import org.joda.time.format.DateTimeParser;
 import org.joda.time.format.DateTimePrinter;
 
 import java.math.BigDecimal;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -78,6 +76,8 @@ import static io.trino.hive.formats.HiveClassNames.HUDI_PARQUET_REALTIME_INPUT_F
 import static io.trino.hive.formats.HiveClassNames.HUDI_REALTIME_INPUT_FORMAT;
 import static io.trino.hive.thrift.metastore.hive_metastoreConstants.FILE_INPUT_FORMAT;
 import static io.trino.metastore.HiveType.toHiveTypes;
+import static io.trino.metastore.Partitions.HIVE_DEFAULT_DYNAMIC_PARTITION;
+import static io.trino.metastore.Partitions.escapePathName;
 import static io.trino.metastore.SortingColumn.Order.ASCENDING;
 import static io.trino.metastore.SortingColumn.Order.DESCENDING;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.PARTITION_KEY;
@@ -101,13 +101,12 @@ import static io.trino.plugin.hive.HiveMetadata.ORC_BLOOM_FILTER_FPP_KEY;
 import static io.trino.plugin.hive.HiveMetadata.PARQUET_BLOOM_FILTER_COLUMNS_KEY;
 import static io.trino.plugin.hive.HiveMetadata.SKIP_FOOTER_COUNT_KEY;
 import static io.trino.plugin.hive.HiveMetadata.SKIP_HEADER_COUNT_KEY;
-import static io.trino.plugin.hive.HivePartitionKey.HIVE_DEFAULT_DYNAMIC_PARTITION;
 import static io.trino.plugin.hive.HiveSessionProperties.getTimestampPrecision;
 import static io.trino.plugin.hive.HiveTableProperties.ORC_BLOOM_FILTER_FPP;
 import static io.trino.plugin.hive.projection.PartitionProjectionProperties.getPartitionProjectionTrinoColumnProperties;
 import static io.trino.plugin.hive.util.HiveBucketing.isSupportedBucketing;
 import static io.trino.plugin.hive.util.HiveTypeUtil.getType;
-import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeSignature;
+import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeDescriptor;
 import static io.trino.plugin.hive.util.HiveTypeUtil.typeSupported;
 import static io.trino.plugin.hive.util.SerdeConstants.LIST_COLUMNS;
 import static io.trino.plugin.hive.util.SerdeConstants.LIST_COLUMN_TYPES;
@@ -149,19 +148,13 @@ public final class HiveUtil
     public static final String ICEBERG_TABLE_TYPE_NAME = "table_type";
     public static final String ICEBERG_TABLE_TYPE_VALUE = "iceberg";
 
-    private static final HexFormat HEX_UPPER_FORMAT = HexFormat.of().withUpperCase();
-
     private static final LocalDateTime EPOCH_DAY = new LocalDateTime(1970, 1, 1, 0, 0);
-    private static final DateTimeFormatter HIVE_DATE_PARSER;
-    private static final DateTimeFormatter HIVE_TIMESTAMP_PARSER;
+    public static final DateTimeFormatter HIVE_DATE_PARSER;
+    public static final DateTimeFormatter HIVE_TIMESTAMP_PARSER;
 
     private static final String BIG_DECIMAL_POSTFIX = "BD";
 
     private static final Splitter COLUMN_NAMES_SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
-
-    private static final CharMatcher PATH_CHAR_TO_ESCAPE = CharMatcher.inRange((char) 0, (char) 31)
-            .or(CharMatcher.anyOf("\"#%'*/:=?\\\u007F{[]^"))
-            .precomputed();
 
     private static final CharMatcher DOT_MATCHER = CharMatcher.is('.');
 
@@ -184,16 +177,14 @@ public final class HiveUtil
         HIVE_DATE_PARSER = new DateTimeFormatterBuilder().append(timestampWithoutTimeZonePrinter, timestampWithoutTimeZoneParser).toFormatter().withZoneUTC();
     }
 
-    private HiveUtil()
-    {
-    }
+    private HiveUtil() {}
 
     public static Optional<String> getInputFormatName(Map<String, String> schema)
     {
         return Optional.ofNullable(schema.get(FILE_INPUT_FORMAT));
     }
 
-    private static long parseHiveDate(String value)
+    public static long parseHiveDate(String value)
     {
         LocalDateTime date = HIVE_DATE_PARSER.parseLocalDateTime(value);
         if (!date.toLocalTime().equals(LocalTime.MIDNIGHT)) {
@@ -207,7 +198,7 @@ public final class HiveUtil
         return HIVE_TIMESTAMP_PARSER.parseMillis(value) * MICROSECONDS_PER_MILLISECOND;
     }
 
-    public static String getDeserializerClassName(Map<String, String> schema)
+    public static String getSerializationLibraryName(Map<String, String> schema)
     {
         String name = schema.get(SERIALIZATION_LIB);
         checkCondition(name != null, HIVE_INVALID_METADATA, "Table or partition is missing Hive deserializer property: %s", SERIALIZATION_LIB);
@@ -577,7 +568,7 @@ public final class HiveUtil
             if (!typeSupported(hiveType.getTypeInfo(), table.getStorage().getStorageFormat())) {
                 throw new TrinoException(NOT_SUPPORTED, format("Unsupported Hive type %s found in partition keys of table %s.%s", hiveType, table.getDatabaseName(), table.getTableName()));
             }
-            columns.add(createBaseColumn(field.getName(), -1, hiveType, typeManager.getType(getTypeSignature(hiveType)), PARTITION_KEY, field.getComment()));
+            columns.add(createBaseColumn(field.getName(), -1, hiveType, typeManager.getType(getTypeDescriptor(hiveType)), PARTITION_KEY, field.getComment()));
         }
 
         return columns.build();
@@ -591,10 +582,9 @@ public final class HiveUtil
         }
     }
 
-    @Nullable
-    public static String columnExtraInfo(boolean partitionKey)
+    public static Optional<String> columnExtraInfo(boolean partitionKey)
     {
-        return partitionKey ? "partition key" : null;
+        return partitionKey ? Optional.of("partition key") : Optional.empty();
     }
 
     public static NullableValue getPrefilledColumnValue(
@@ -614,7 +604,7 @@ public final class HiveUtil
             columnValue = path;
         }
         else if (isBucketColumnHandle(columnHandle)) {
-            columnValue = String.valueOf(bucketNumber.getAsInt());
+            columnValue = String.valueOf(bucketNumber.orElseThrow());
         }
         else if (isFileSizeColumnHandle(columnHandle)) {
             columnValue = String.valueOf(fileSize);
@@ -833,7 +823,8 @@ public final class HiveUtil
         table.getDataColumns().stream().map(Column::getName).forEach(columnNames::add);
         List<String> allColumnNames = columnNames.build();
         if (allColumnNames.size() > Sets.newHashSet(allColumnNames).size()) {
-            throw new TrinoException(HIVE_INVALID_METADATA,
+            throw new TrinoException(
+                    HIVE_INVALID_METADATA,
                     format("Hive metadata for table %s is invalid: Table descriptor contains duplicate columns", table.getTableName()));
         }
 
@@ -854,7 +845,7 @@ public final class HiveUtil
                 .setName(handle.getName())
                 .setType(handle.getType())
                 .setComment(handle.isHidden() ? Optional.empty() : columnComment.get(handle.getName()))
-                .setExtraInfo(Optional.ofNullable(columnExtraInfo(handle.isPartitionKey())))
+                .setExtraInfo(columnExtraInfo(handle.isPartitionKey()))
                 .setHidden(handle.isHidden())
                 .setProperties(getPartitionProjectionTrinoColumnProperties(table, handle.getName()))
                 .build();
@@ -880,60 +871,5 @@ public final class HiveUtil
             throw new TrinoException(GENERIC_USER_ERROR, "Invalid table name");
         }
         return escapePathName(tableName);
-    }
-
-    // copy of org.apache.hadoop.hive.common.FileUtils#escapePathName
-    public static String escapePathName(String path)
-    {
-        if (isNullOrEmpty(path)) {
-            return HIVE_DEFAULT_DYNAMIC_PARTITION;
-        }
-
-        //  Fast-path detection, no escaping and therefore no copying necessary
-        int escapeAtIndex = PATH_CHAR_TO_ESCAPE.indexIn(path);
-        if (escapeAtIndex < 0) {
-            return path;
-        }
-
-        // slow path, escape beyond the first required escape character into a new string
-        StringBuilder sb = new StringBuilder();
-        int fromIndex = 0;
-        while (escapeAtIndex >= 0 && escapeAtIndex < path.length()) {
-            // preceding characters without escaping needed
-            if (escapeAtIndex > fromIndex) {
-                sb.append(path, fromIndex, escapeAtIndex);
-            }
-            // escape single character
-            char c = path.charAt(escapeAtIndex);
-            sb.append('%').append(HEX_UPPER_FORMAT.toHighHexDigit(c)).append(HEX_UPPER_FORMAT.toLowHexDigit(c));
-            // find next character to escape
-            fromIndex = escapeAtIndex + 1;
-            if (fromIndex < path.length()) {
-                escapeAtIndex = PATH_CHAR_TO_ESCAPE.indexIn(path, fromIndex);
-            }
-            else {
-                escapeAtIndex = -1;
-            }
-        }
-        // trailing characters without escaping needed
-        if (fromIndex < path.length()) {
-            sb.append(path, fromIndex, path.length());
-        }
-        return sb.toString();
-    }
-
-    // copy of org.apache.hadoop.hive.common.FileUtils#makePartName
-    public static String makePartName(List<String> columns, List<String> values)
-    {
-        StringBuilder name = new StringBuilder();
-        for (int i = 0; i < columns.size(); i++) {
-            if (i > 0) {
-                name.append('/');
-            }
-            name.append(escapePathName(columns.get(i).toLowerCase(ENGLISH)));
-            name.append('=');
-            name.append(escapePathName(values.get(i)));
-        }
-        return name.toString();
     }
 }

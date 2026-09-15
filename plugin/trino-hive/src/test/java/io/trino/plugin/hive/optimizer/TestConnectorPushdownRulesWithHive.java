@@ -17,19 +17,19 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
+import io.trino.connector.CatalogHandle;
 import io.trino.cost.ScalarStatsCalculator;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TestingFunctionResolution;
 import io.trino.metastore.Database;
 import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.HiveMetastoreFactory;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HiveColumnProjectionInfo;
 import io.trino.plugin.hive.HiveTableHandle;
 import io.trino.plugin.hive.HiveTransactionHandle;
 import io.trino.plugin.hive.TestingHiveConnectorFactory;
-import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
@@ -37,7 +37,6 @@ import io.trino.spi.security.PrincipalType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.sql.ir.Call;
-import io.trino.sql.ir.Comparison;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.FieldReference;
@@ -69,7 +68,8 @@ import static io.trino.plugin.hive.util.HiveTypeTranslator.toHiveType;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RowType.field;
-import static io.trino.sql.ir.Comparison.Operator.EQUAL;
+import static io.trino.sql.ir.ComparisonOperator.EQUAL;
+import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
@@ -225,13 +225,13 @@ public class TestConnectorPushdownRulesWithHive
         tester().assertThat(pushPredicateIntoTableScan)
                 .on(p ->
                         p.filter(
-                                new Comparison(EQUAL, new Reference(INTEGER, "a"), new Constant(INTEGER, 5L)),
+                                comparison(EQUAL, new Reference(INTEGER, "a"), new Constant(INTEGER, 5L)),
                                 p.tableScan(
                                         table,
                                         ImmutableList.of(p.symbol("a", INTEGER)),
                                         ImmutableMap.of(p.symbol("a", INTEGER), column))))
                 .matches(filter(
-                        new Comparison(EQUAL, new Reference(INTEGER, "a"), new Constant(INTEGER, 5L)),
+                        comparison(EQUAL, new Reference(INTEGER, "a"), new Constant(INTEGER, 5L)),
                         tableScan(
                                 tableHandle -> ((HiveTableHandle) tableHandle).getCompactEffectivePredicate().getDomains().get()
                                         .equals(ImmutableMap.of(column, Domain.singleValue(INTEGER, 5L))),
@@ -316,8 +316,10 @@ public class TestConnectorPushdownRulesWithHive
                     return p.project(
                             Assignments.of(
                                     // The column reference is part of both the assignments
-                                    p.symbol("column_ref", BIGINT), column,
-                                    p.symbol("negated_column_ref", BIGINT), negation),
+                                    p.symbol("column_ref", BIGINT),
+                                    column,
+                                    p.symbol("negated_column_ref", BIGINT),
+                                    negation),
                             p.tableScan(
                                     table,
                                     ImmutableList.of(p.symbol("just_bigint", BIGINT)),
@@ -340,8 +342,10 @@ public class TestConnectorPushdownRulesWithHive
                     return p.project(
                             Assignments.of(
                                     // The subscript expression instance is part of both the assignments
-                                    p.symbol("expr_deref", BIGINT), fieldReference,
-                                    p.symbol("expr_deref_2", BIGINT), sum),
+                                    p.symbol("expr_deref", BIGINT),
+                                    fieldReference,
+                                    p.symbol("expr_deref_2", BIGINT),
+                                    sum),
                             p.tableScan(
                                     table,
                                     ImmutableList.of(p.symbol("struct_of_bigint", ROW_TYPE)),

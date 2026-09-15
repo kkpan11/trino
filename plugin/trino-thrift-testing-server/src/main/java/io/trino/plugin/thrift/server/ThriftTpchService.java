@@ -34,9 +34,9 @@ import io.trino.plugin.thrift.api.TrinoThriftSplitBatch;
 import io.trino.plugin.thrift.api.TrinoThriftTableMetadata;
 import io.trino.plugin.thrift.api.TrinoThriftTupleDomain;
 import io.trino.plugin.tpch.DecimalTypeMapping;
-import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.RecordPageSource;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
 import io.trino.tpch.TpchColumn;
@@ -223,13 +223,11 @@ public class ThriftTpchService
 
     public static double schemaNameToScaleFactor(String schemaName)
     {
-        switch (schemaName) {
-            case "tiny":
-                return 0.01;
-            case "sf1":
-                return 1.0;
-        }
-        throw new IllegalArgumentException("Schema is not setup: " + schemaName);
+        return switch (schemaName) {
+            case "tiny" -> 0.01;
+            case "sf1" -> 1.0;
+            default -> throw new IllegalArgumentException("Schema is not setup: " + schemaName);
+        };
     }
 
     private static TrinoThriftPageResult getRowsInternal(ConnectorPageSource pageSource, String tableName, List<String> columnNames, @Nullable TrinoThriftId nextToken)
@@ -238,9 +236,9 @@ public class ThriftTpchService
         int skipPages = nextToken != null ? Ints.fromByteArray(nextToken.getId()) : 0;
         skipPages(pageSource, skipPages);
 
-        Page page = null;
+        SourcePage page = null;
         while (!pageSource.isFinished() && page == null) {
-            page = pageSource.getNextPage();
+            page = pageSource.getNextSourcePage();
             skipPages++;
         }
         TrinoThriftId newNextToken = pageSource.isFinished() ? null : new TrinoThriftId(Ints.toByteArray(skipPages));
@@ -248,7 +246,7 @@ public class ThriftTpchService
         return toThriftPage(page, types(tableName, columnNames), newNextToken);
     }
 
-    private static TrinoThriftPageResult toThriftPage(Page page, List<Type> columnTypes, @Nullable TrinoThriftId nextToken)
+    private static TrinoThriftPageResult toThriftPage(SourcePage page, List<Type> columnTypes, @Nullable TrinoThriftId nextToken)
     {
         if (page == null) {
             checkState(nextToken == null, "there must be no more data when page is null");
@@ -267,28 +265,21 @@ public class ThriftTpchService
     {
         for (int i = 0; i < skipPages; i++) {
             checkState(!pageSource.isFinished(), "pageSource is unexpectedly finished");
-            pageSource.getNextPage();
+            pageSource.getNextSourcePage();
         }
     }
 
     private static ConnectorPageSource createPageSource(SplitInfo splitInfo, List<String> columnNames)
     {
-        switch (splitInfo.getTableName()) {
-            case "orders":
-                return createPageSource(TpchTable.ORDERS, columnNames, splitInfo);
-            case "customer":
-                return createPageSource(TpchTable.CUSTOMER, columnNames, splitInfo);
-            case "lineitem":
-                return createPageSource(TpchTable.LINE_ITEM, columnNames, splitInfo);
-            case "nation":
-                return createPageSource(TpchTable.NATION, columnNames, splitInfo);
-            case "region":
-                return createPageSource(TpchTable.REGION, columnNames, splitInfo);
-            case "part":
-                return createPageSource(TpchTable.PART, columnNames, splitInfo);
-            default:
-                throw new IllegalArgumentException("Table not setup: " + splitInfo.getTableName());
-        }
+        return switch (splitInfo.getTableName()) {
+            case "orders" -> createPageSource(TpchTable.ORDERS, columnNames, splitInfo);
+            case "customer" -> createPageSource(TpchTable.CUSTOMER, columnNames, splitInfo);
+            case "lineitem" -> createPageSource(TpchTable.LINE_ITEM, columnNames, splitInfo);
+            case "nation" -> createPageSource(TpchTable.NATION, columnNames, splitInfo);
+            case "region" -> createPageSource(TpchTable.REGION, columnNames, splitInfo);
+            case "part" -> createPageSource(TpchTable.PART, columnNames, splitInfo);
+            default -> throw new IllegalArgumentException("Table not setup: " + splitInfo.getTableName());
+        };
     }
 
     private static <T extends TpchEntity> ConnectorPageSource createPageSource(TpchTable<T> table, List<String> columnNames, SplitInfo splitInfo)
@@ -317,6 +308,6 @@ public class ThriftTpchService
 
     private static String getTypeString(TpchColumn<?> column)
     {
-        return getTrinoType(column, DecimalTypeMapping.DOUBLE).getTypeSignature().toString();
+        return getTrinoType(column, DecimalTypeMapping.DOUBLE).getTypeDescriptor().toString();
     }
 }

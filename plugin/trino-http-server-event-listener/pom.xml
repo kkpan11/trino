@@ -5,12 +5,13 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>459-SNAPSHOT</version>
+        <version>484-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>trino-http-server-event-listener</artifactId>
     <packaging>trino-plugin</packaging>
+    <name>${project.artifactId}</name>
     <description>Trino event listener exposing collected event via HTTP server</description>
 
     <properties>
@@ -21,11 +22,6 @@
         <dependency>
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>com.google.inject</groupId>
-            <artifactId>guice</artifactId>
         </dependency>
 
         <dependency>
@@ -40,7 +36,7 @@
 
         <dependency>
             <groupId>io.airlift</groupId>
-            <artifactId>event</artifactId>
+            <artifactId>guice</artifactId>
         </dependency>
 
         <dependency>
@@ -111,13 +107,13 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-core</artifactId>
-            <scope>runtime</scope>
+            <scope>test</scope>
         </dependency>
 
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-            <scope>runtime</scope>
+            <scope>test</scope>
         </dependency>
 
         <dependency>
@@ -128,10 +124,6 @@
                 <exclusion>
                     <groupId>io.airlift</groupId>
                     <artifactId>slice</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.openjdk.jol</groupId>
-                    <artifactId>jol-core</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>
@@ -150,6 +142,12 @@
 
         <dependency>
             <groupId>io.trino</groupId>
+            <artifactId>trino-plugin-toolkit</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
             <artifactId>trino-testing-services</artifactId>
             <scope>test</scope>
         </dependency>
@@ -163,6 +161,12 @@
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

@@ -32,11 +32,10 @@ public final class PinotTransformFunctionTypeResolver
 
     private static final Map<String, TransformFunctionType> TRANSFORM_FUNCTION_TYPE_MAP;
 
-    static
-    {
+    static {
         Map<String, TransformFunctionType> builder = new HashMap<>();
         for (TransformFunctionType transformFunctionType : TransformFunctionType.values()) {
-            for (String alias : transformFunctionType.getAlternativeNames()) {
+            for (String alias : transformFunctionType.getNames()) {
                 TransformFunctionType previousValue = builder.put(canonicalize(alias), transformFunctionType);
                 checkState(previousValue == null || previousValue == transformFunctionType, "Duplicate key with different values for alias '%s', transform function type '%s' and previous value '%s'", canonicalize(alias), transformFunctionType, previousValue);
             }
@@ -53,7 +52,7 @@ public final class PinotTransformFunctionTypeResolver
         if (transformFunctionType != null) {
             return Optional.of(transformFunctionType);
         }
-        if (FunctionRegistry.containsFunction(canonicalizedFunctionName)) {
+        if (FunctionRegistry.contains(canonicalizedFunctionName)) {
             return Optional.of(SCALAR);
         }
         return Optional.empty();

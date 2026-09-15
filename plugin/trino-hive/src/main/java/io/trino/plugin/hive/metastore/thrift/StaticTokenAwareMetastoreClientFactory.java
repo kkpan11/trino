@@ -81,7 +81,7 @@ public class StaticTokenAwareMetastoreClientFactory
     /**
      * Create a metastore client connected to the Hive metastore.
      * <p>
-     * As per Hive HA metastore behavior, return the first metastore in the list
+     * As per Hive HA metastore behavior, return the first metastore in the
      * list of available metastores (i.e. the default metastore) if a connection
      * can be made, else try another of the metastores at random, until either a
      * connection succeeds or there are no more fallback metastores.
@@ -103,6 +103,7 @@ public class StaticTokenAwareMetastoreClientFactory
             }
             catch (TException e) {
                 lastException = e;
+                backoff.fail();
             }
         }
 
@@ -193,7 +194,7 @@ public class StaticTokenAwareMetastoreClientFactory
             if (lastFailureTimestamp.isEmpty()) {
                 return 0;
             }
-            long timeSinceLastFail = ticker.read() - lastFailureTimestamp.getAsLong();
+            long timeSinceLastFail = ticker.read() - lastFailureTimestamp.orElseThrow();
             return max(backoffDuration - timeSinceLastFail, 0);
         }
     }

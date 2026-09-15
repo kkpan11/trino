@@ -23,6 +23,7 @@ import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -77,7 +78,8 @@ public class TestDefaultJdbcMetadata
             throws Exception
     {
         database = new TestingDatabase();
-        metadata = new DefaultJdbcMetadata(new GroupingSetsEnabledJdbcClient(database.getJdbcClient(),
+        metadata = new DefaultJdbcMetadata(new GroupingSetsEnabledJdbcClient(
+                database.getJdbcClient(),
                 Optional.empty()),
                 TimestampTimeZoneDomain.ANY,
                 false,
@@ -88,7 +90,8 @@ public class TestDefaultJdbcMetadata
     @Test
     public void testSupportsRetriesValidation()
     {
-        metadata = new DefaultJdbcMetadata(new GroupingSetsEnabledJdbcClient(database.getJdbcClient(),
+        metadata = new DefaultJdbcMetadata(new GroupingSetsEnabledJdbcClient(
+                database.getJdbcClient(),
                 Optional.of(false)),
                 TimestampTimeZoneDomain.ANY,
                 false,
@@ -105,7 +108,8 @@ public class TestDefaultJdbcMetadata
     @Test
     public void testNonTransactionalInsertValidation()
     {
-        metadata = new DefaultJdbcMetadata(new GroupingSetsEnabledJdbcClient(database.getJdbcClient(),
+        metadata = new DefaultJdbcMetadata(new GroupingSetsEnabledJdbcClient(
+                database.getJdbcClient(),
                 Optional.of(true)),
                 TimestampTimeZoneDomain.ANY,
                 false,
@@ -256,7 +260,7 @@ public class TestDefaultJdbcMetadata
         assertThat(layout.getColumns())
                 .containsExactly(new ColumnMetadata("text", VARCHAR));
 
-        metadata.addColumn(SESSION, handle, new ColumnMetadata("x", VARCHAR));
+        metadata.addColumn(SESSION, handle, new ColumnMetadata("x", VARCHAR), new ColumnPosition.Last());
         layout = metadata.getTableMetadata(SESSION, handle);
         assertThat(layout.getColumns())
                 .containsExactly(
@@ -346,9 +350,9 @@ public class TestDefaultJdbcMetadata
         JdbcTableHandle tableHandleWithFilter = applyFilter(session, aggregatedTable, new Constraint(TupleDomain.withColumnDomains(ImmutableMap.of(groupByColumn, secondDomain))));
         assertThat(tableHandleWithFilter.getConstraint().getDomains())
                 .isEqualTo(
-                    // The query effectively intersects firstDomain and secondDomain, but this is not visible in JdbcTableHandle.constraint,
-                    // as firstDomain has been converted into a PreparedQuery
-                    Optional.of(ImmutableMap.of(groupByColumn, secondDomain)));
+                        // The query effectively intersects firstDomain and secondDomain, but this is not visible in JdbcTableHandle.constraint,
+                        // as firstDomain has been converted into a PreparedQuery
+                        Optional.of(ImmutableMap.of(groupByColumn, secondDomain)));
         assertThat(((JdbcQueryRelationHandle) tableHandleWithFilter.getRelationHandle()).getPreparedQuery().query())
                 .isEqualTo("SELECT \"TEXT\", count(*) AS \"_pfgnrtd_0\" " +
                         "FROM \"" + database.getDatabaseName() + "\".\"EXAMPLE\".\"NUMBERS\" " +

@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.ThreadSafe;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
+import io.trino.cache.CacheManagerRegistry;
 import io.trino.connector.CatalogFactory;
 import io.trino.connector.CatalogStoreManager;
 import io.trino.eventlistener.EventListenerManager;
@@ -27,6 +28,7 @@ import io.trino.metadata.GlobalFunctionCatalog;
 import io.trino.metadata.HandleResolver;
 import io.trino.metadata.InternalFunctionBundle;
 import io.trino.metadata.InternalFunctionBundle.InternalFunctionBundleBuilder;
+import io.trino.metadata.LanguageFunctionEngineManager;
 import io.trino.metadata.TypeRegistry;
 import io.trino.security.AccessControlManager;
 import io.trino.security.GroupProviderManager;
@@ -36,12 +38,13 @@ import io.trino.server.security.HeaderAuthenticatorManager;
 import io.trino.server.security.PasswordAuthenticatorManager;
 import io.trino.spi.Plugin;
 import io.trino.spi.block.BlockEncoding;
+import io.trino.spi.cache.BlobCacheManagerFactory;
 import io.trino.spi.catalog.CatalogStoreFactory;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.eventlistener.EventListenerFactory;
 import io.trino.spi.exchange.ExchangeManagerFactory;
-import io.trino.spi.protocol.SpoolingManagerFactory;
+import io.trino.spi.function.LanguageFunctionEngine;
 import io.trino.spi.resourcegroups.ResourceGroupConfigurationManagerFactory;
 import io.trino.spi.security.CertificateAuthenticatorFactory;
 import io.trino.spi.security.GroupProviderFactory;
@@ -49,6 +52,7 @@ import io.trino.spi.security.HeaderAuthenticatorFactory;
 import io.trino.spi.security.PasswordAuthenticatorFactory;
 import io.trino.spi.security.SystemAccessControlFactory;
 import io.trino.spi.session.SessionPropertyConfigurationManagerFactory;
+import io.trino.spi.spool.SpoolingManagerFactory;
 import io.trino.spi.type.ParametricType;
 import io.trino.spi.type.Type;
 
@@ -68,13 +72,30 @@ import static java.util.Objects.requireNonNull;
 public class PluginManager
         implements PluginInstaller
 {
-    private static final ImmutableList<String> SPI_PACKAGES = ImmutableList.<String>builder()
+    private static final List<String> SPI_PACKAGES = ImmutableList.<String>builder()
             .add("io.trino.spi.")
             .add("com.fasterxml.jackson.annotation.")
+            // Jackson Blackbird generates field accessors via LambdaMetafactory; for a connector bean the accessor
+            // lambda is defined in the plugin classloader, so the leaf functional interfaces it implements must be a
+            // single class identity shared with the engine, otherwise serialization fails with a ClassCastException.
+            // Share ONLY these leaf interfaces (the non-JDK ones Blackbird generates lambdas for) - NOT the enclosing
+            // ser/deser packages, which also hold the Blackbird BeanSerializerModifier/BeanDeserializerModifier: those
+            // extend (plugin-local) databind types, so sharing them breaks any plugin that itself installs Blackbird
+            // (its setupModule fails with a VerifyError). Keeping databind/core plugin-local preserves Jackson isolation.
+            .add("com.fasterxml.jackson.module.blackbird.ser.ToBooleanFunction")
+            .add("com.fasterxml.jackson.module.blackbird.deser.ObjBooleanConsumer")
+            .add("com.fasterxml.jackson.module.blackbird.deser.BBDeserializerModifier$ObjIntBiFunction")
+            .add("com.fasterxml.jackson.module.blackbird.deser.BBDeserializerModifier$ObjLongBiFunction")
+            .add("com.fasterxml.jackson.module.blackbird.deser.BBDeserializerModifier$ObjBooleanBiFunction")
             .add("io.airlift.slice.")
-            .add("org.openjdk.jol.")
             .add("io.opentelemetry.api.")
             .add("io.opentelemetry.context.")
+            .add("org.locationtech.jts.")
+            .build();
+
+    private static final List<String> SPI_PACKAGES_EXCLUDED = ImmutableList.<String>builder()
+            .add("org.locationtech.jts.io.geojson.")
+            .add("org.locationtech.jts.io.twkb.")
             .build();
 
     private static final Logger log = Logger.get(PluginManager.class);
@@ -83,6 +104,7 @@ public class PluginManager
     private final Optional<CatalogStoreManager> catalogStoreManager;
     private final CatalogFactory connectorFactory;
     private final GlobalFunctionCatalog globalFunctionCatalog;
+    private final LanguageFunctionEngineManager languageFunctionEngineManager;
     private final ResourceGroupManager<?> resourceGroupManager;
     private final AccessControlManager accessControlManager;
     private final Optional<PasswordAuthenticatorManager> passwordAuthenticatorManager;
@@ -92,6 +114,7 @@ public class PluginManager
     private final GroupProviderManager groupProviderManager;
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private final SpoolingManagerRegistry spoolingManagerRegistry;
+    private final CacheManagerRegistry cacheManagerRegistry;
     private final SessionPropertyDefaults sessionPropertyDefaults;
     private final TypeRegistry typeRegistry;
     private final BlockEncodingManager blockEncodingManager;
@@ -104,6 +127,7 @@ public class PluginManager
             Optional<CatalogStoreManager> catalogStoreManager,
             CatalogFactory connectorFactory,
             GlobalFunctionCatalog globalFunctionCatalog,
+            LanguageFunctionEngineManager languageFunctionEngineManager,
             ResourceGroupManager<?> resourceGroupManager,
             AccessControlManager accessControlManager,
             Optional<PasswordAuthenticatorManager> passwordAuthenticatorManager,
@@ -116,12 +140,14 @@ public class PluginManager
             BlockEncodingManager blockEncodingManager,
             HandleResolver handleResolver,
             ExchangeManagerRegistry exchangeManagerRegistry,
-            SpoolingManagerRegistry spoolingManagerRegistry)
+            SpoolingManagerRegistry spoolingManagerRegistry,
+            CacheManagerRegistry cacheManagerRegistry)
     {
         this.pluginsProvider = requireNonNull(pluginsProvider, "pluginsProvider is null");
         this.catalogStoreManager = requireNonNull(catalogStoreManager, "catalogStoreManager is null");
         this.connectorFactory = requireNonNull(connectorFactory, "connectorFactory is null");
         this.globalFunctionCatalog = requireNonNull(globalFunctionCatalog, "globalFunctionCatalog is null");
+        this.languageFunctionEngineManager = requireNonNull(languageFunctionEngineManager, "languageFunctionEngineManager is null");
         this.resourceGroupManager = requireNonNull(resourceGroupManager, "resourceGroupManager is null");
         this.accessControlManager = requireNonNull(accessControlManager, "accessControlManager is null");
         this.passwordAuthenticatorManager = requireNonNull(passwordAuthenticatorManager, "passwordAuthenticatorManager is null");
@@ -135,6 +161,7 @@ public class PluginManager
         this.handleResolver = requireNonNull(handleResolver, "handleResolver is null");
         this.exchangeManagerRegistry = requireNonNull(exchangeManagerRegistry, "exchangeManagerRegistry is null");
         this.spoolingManagerRegistry = requireNonNull(spoolingManagerRegistry, "spoolingManagerRegistry is null");
+        this.cacheManagerRegistry = requireNonNull(cacheManagerRegistry, "cacheManagerRegistry is null");
     }
 
     @Override
@@ -202,7 +229,7 @@ public class PluginManager
         }
 
         for (Type type : plugin.getTypes()) {
-            log.info("Registering type %s", type.getTypeSignature());
+            log.info("Registering type %s", type);
             typeRegistry.addType(type);
         }
 
@@ -222,6 +249,11 @@ public class PluginManager
             InternalFunctionBundleBuilder builder = InternalFunctionBundle.builder();
             functions.forEach(builder::functions);
             globalFunctionCatalog.addFunctions(builder.build());
+        }
+
+        for (LanguageFunctionEngine languageFunctionEngine : plugin.getLanguageFunctionEngines()) {
+            log.info("Registering language function engine %s", languageFunctionEngine.getLanguage());
+            languageFunctionEngineManager.addLanguageFunctionEngine(languageFunctionEngine);
         }
 
         for (SessionPropertyConfigurationManagerFactory sessionConfigFactory : plugin.getSessionPropertyConfigurationManagerFactories()) {
@@ -277,12 +309,17 @@ public class PluginManager
             log.info("Registering spooling manager %s", spoolingManagerFactory.getName());
             spoolingManagerRegistry.addSpoolingManagerFactory(spoolingManagerFactory);
         }
+
+        for (BlobCacheManagerFactory factory : plugin.getBlobCacheManagerFactories()) {
+            log.info("Registering blob cache manager %s", factory.getName());
+            cacheManagerRegistry.addBlobCacheManagerFactory(factory);
+        }
     }
 
     public static PluginClassLoader createClassLoader(String pluginName, List<URL> urls)
     {
         ClassLoader parent = PluginManager.class.getClassLoader();
-        return new PluginClassLoader(pluginName, urls, parent, SPI_PACKAGES);
+        return new PluginClassLoader(pluginName, urls, parent, SPI_PACKAGES, SPI_PACKAGES_EXCLUDED);
     }
 
     public interface PluginsProvider

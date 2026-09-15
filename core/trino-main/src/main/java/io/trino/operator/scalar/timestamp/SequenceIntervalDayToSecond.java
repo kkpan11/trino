@@ -27,7 +27,7 @@ import static io.trino.operator.scalar.SequenceFunction.checkValidStep;
 import static io.trino.spi.type.TimestampType.MAX_SHORT_PRECISION;
 import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.TimestampTypes.writeLongTimestamp;
-import static io.trino.type.DateTimes.MICROSECONDS_PER_MILLISECOND;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static java.lang.Math.multiplyExact;
 
 @ScalarFunction("sequence")
@@ -53,7 +53,7 @@ public final class SequenceIntervalDayToSecond
 
         int length = checkMaxEntry((stop - start) / step + 1L);
 
-        BlockBuilder blockBuilder = SHORT_TYPE.createBlockBuilder(null, length);
+        BlockBuilder blockBuilder = SHORT_TYPE.createFixedSizeBlockBuilder(length);
         for (long i = 0, value = start; i < length; ++i, value += step) {
             SHORT_TYPE.writeLong(blockBuilder, value);
         }
@@ -75,7 +75,7 @@ public final class SequenceIntervalDayToSecond
 
         int length = checkMaxEntry((stopMicros - startMicros) / step + 1L);
 
-        BlockBuilder blockBuilder = LONG_TYPE.createBlockBuilder(null, length);
+        BlockBuilder blockBuilder = LONG_TYPE.createFixedSizeBlockBuilder(length);
         for (long i = 0, epochMicros = startMicros; i < length; ++i, epochMicros += step) {
             writeLongTimestamp(blockBuilder, epochMicros, start.getPicosOfMicro());
         }

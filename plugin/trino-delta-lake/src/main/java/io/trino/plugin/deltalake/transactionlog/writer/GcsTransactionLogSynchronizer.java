@@ -16,22 +16,24 @@ package io.trino.plugin.deltalake.transactionlog.writer;
 import com.google.inject.Inject;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
-import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.deltalake.DeltaLakeFileSystemFactory;
+import io.trino.plugin.deltalake.DeltaLakeTableCredentials;
 import io.trino.spi.connector.ConnectorSession;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.FileAlreadyExistsException;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
 public class GcsTransactionLogSynchronizer
         implements TransactionLogSynchronizer
 {
-    private final TrinoFileSystemFactory fileSystemFactory;
+    private final DeltaLakeFileSystemFactory fileSystemFactory;
 
     @Inject
-    public GcsTransactionLogSynchronizer(TrinoFileSystemFactory fileSystemFactory)
+    public GcsTransactionLogSynchronizer(DeltaLakeFileSystemFactory fileSystemFactory)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
     }
@@ -39,9 +41,9 @@ public class GcsTransactionLogSynchronizer
     // This approach is compatible with OSS Delta Lake
     // https://github.com/delta-io/delta/blob/225e2bbf9ecaf034d08ef8d2fee1929e51c951bf/storage/src/main/java/io/delta/storage/GCSLogStore.java
     @Override
-    public void write(ConnectorSession session, String clusterId, Location newLogEntryPath, byte[] entryContents)
+    public void write(ConnectorSession session, Optional<DeltaLakeTableCredentials> tableCredentials, String clusterId, Location newLogEntryPath, byte[] entryContents)
     {
-        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session, tableCredentials);
         try {
             fileSystem.newOutputFile(newLogEntryPath).createExclusive(entryContents);
         }

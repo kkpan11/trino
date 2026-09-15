@@ -50,7 +50,8 @@ public abstract class BaseTestRewriteLikeWithCaseSensitivity
             @Override
             public Map<String, ColumnHandle> getAssignments()
             {
-                return Map.of("case_insensitive_value", new JdbcColumnHandle("case_insensitive_value", JDBC_BIGINT, VARCHAR),
+                return Map.of(
+                        "case_insensitive_value", new JdbcColumnHandle("case_insensitive_value", JDBC_BIGINT, VARCHAR),
                         "case_sensitive_value", new JdbcColumnHandle("case_sensitive_value", new JdbcTypeHandle(Types.VARCHAR, Optional.of("varchar"), Optional.of(10), Optional.empty(), Optional.empty(), Optional.of(CASE_SENSITIVE)), VARCHAR));
             }
 
@@ -63,8 +64,8 @@ public abstract class BaseTestRewriteLikeWithCaseSensitivity
             @Override
             public Optional<ParameterizedExpression> defaultRewrite(ConnectorExpression expression)
             {
-                if (expression instanceof Variable) {
-                    String name = ((Variable) expression).getName();
+                if (expression instanceof Variable variable) {
+                    String name = variable.getName();
                     return Optional.of(new ParameterizedExpression("\"" + name.replace("\"", "\"\"") + "\"", ImmutableList.of(new QueryParameter(expression.getType(), Optional.of(name)))));
                 }
                 return Optional.empty();

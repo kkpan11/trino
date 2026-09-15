@@ -13,7 +13,6 @@
  */
 package io.trino.spi.connector;
 
-import io.trino.spi.Page;
 import io.trino.spi.metrics.Metrics;
 
 import java.io.Closeable;
@@ -54,17 +53,26 @@ public interface ConnectorPageSource
     boolean isFinished();
 
     /**
-     * Gets the next page of data.  This method is allowed to return null.
+     * Gets the next page of data. This method is allowed to return null.
+     * This method is not called after {@link #isFinished()} returns {@code true}.
      */
-    Page getNextPage();
+    default SourcePage getNextSourcePage()
+    {
+        throw new UnsupportedOperationException();
+    }
 
     /**
      * Get the total memory that needs to be reserved in the memory pool.
      * This memory should include any buffers, etc. that are used for reading data.
      *
      * @return the memory used so far in table read
+     * @deprecated Implementations should report memory through the {@link MemoryContext} supplied to {@link ConnectorPageSourceProvider}.
      */
-    long getMemoryUsage();
+    @Deprecated
+    default long getMemoryUsage()
+    {
+        return 0;
+    }
 
     /**
      * Immediately finishes this page source.  Trino will always call this method.

@@ -17,8 +17,13 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.predicate.DiscreteValues;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Ranges;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.CharType;
+import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
+
+import java.util.Collection;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.jdbc.JdbcMetadataSessionProperties.getDomainCompactionThreshold;
@@ -34,7 +39,7 @@ public interface PredicatePushdownController
         return new DomainPushdownResult(domain, Domain.all(domain.getType()));
     };
 
-    PredicatePushdownController DISABLE_PUSHDOWN = (session, domain) -> new DomainPushdownResult(
+    PredicatePushdownController DISABLE_PUSHDOWN = (_, domain) -> new DomainPushdownResult(
             Domain.all(domain.getType()),
             domain);
 
@@ -43,7 +48,7 @@ public interface PredicatePushdownController
                 domain.getType() instanceof VarcharType || domain.getType() instanceof CharType,
                 "CASE_INSENSITIVE_CHARACTER_PUSHDOWN can be used only for chars and varchars");
 
-        if (domain.isOnlyNull()) {
+        if (domain.isOnlyNull() || domain.getValues().isAll()) {
             return FULL_PUSHDOWN.apply(session, domain);
         }
 
@@ -61,6 +66,18 @@ public interface PredicatePushdownController
         }
         return new DomainPushdownResult(simplifiedDomain, domain);
     };
+
+    static PredicatePushdownController pushdownDiscreteValues(Type type)
+    {
+        return (session, domain) -> {
+            Optional<Collection<Object>> expandedRange = domain.getValues().tryExpandRanges(getDomainCompactionThreshold(session));
+            if (expandedRange.isPresent()) {
+                Domain convertedDiscreteDomain = Domain.create(ValueSet.copyOf(type, expandedRange.get()), domain.isNullAllowed());
+                return new DomainPushdownResult(convertedDiscreteDomain, Domain.all(domain.getType()));
+            }
+            return FULL_PUSHDOWN.apply(session, domain);
+        };
+    }
 
     DomainPushdownResult apply(ConnectorSession session, Domain domain);
 

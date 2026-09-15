@@ -20,6 +20,7 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static org.assertj.core.api.Assertions.assertThat;
 
 final class TestMysqlEventListenerConfig
 {
@@ -27,18 +28,36 @@ final class TestMysqlEventListenerConfig
     void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(MysqlEventListenerConfig.class)
-                .setUrl(null));
+                .setUrl(null)
+                .setTerminateOnInitializationFailure(true));
     }
 
     @Test
     void testExplicitPropertyMappings()
     {
         Map<String, String> properties = Map.of(
-                "mysql-event-listener.db.url", "abc");
+                "mysql-event-listener.db.url", "jdbc:mysql://example.net:3306",
+                "mysql-event-listener.terminate-on-initialization-failure", "false");
 
         MysqlEventListenerConfig expected = new MysqlEventListenerConfig()
-                .setUrl("abc");
+                .setUrl("jdbc:mysql://example.net:3306")
+                .setTerminateOnInitializationFailure(false);
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    void testIsValidUrl()
+    {
+        assertThat(isValidUrl("jdbc:mysql://example.net:3306")).isTrue();
+        assertThat(isValidUrl("jdbc:mysql://example.net:3306/")).isTrue();
+        assertThat(isValidUrl("jdbc:postgresql://example.net:3306/somedatabase")).isFalse();
+    }
+
+    private static boolean isValidUrl(String url)
+    {
+        return new MysqlEventListenerConfig()
+                .setUrl(url)
+                .isValidUrl();
     }
 }

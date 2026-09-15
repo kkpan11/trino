@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.zip.GZIPOutputStream;
 
@@ -41,7 +42,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestLineReader
 {
     private static final int LINE_READER_INSTANCE_SIZE = instanceSize(TextLineReader.class);
-    private static final int[] SKIP_SIZES = new int[] {1, 2, 3, 13, 101, 331, 443, 701, 853, 1021};
+    private static final int[] SKIP_SIZES = {1, 2, 3, 13, 101, 331, 443, 701, 853, 1021};
+    // code points whose UTF-8 encodings are two, three, and four bytes long
+    private static final int[] NON_ASCII_CODE_POINTS = "ąćęłńóśźżĄĆĘŁŃÓŚŹŻéüñÅ日本語테스트Ελλάδα😀🌐".codePoints().toArray();
 
     @Test
     public void testSimple()
@@ -77,6 +80,25 @@ public class TestLineReader
         StringBuilder line = new StringBuilder();
         for (int length = 1025; length >= 0; length--) {
             randomLine(line, length);
+            lines.add(line.toString());
+        }
+        assertLines(lines.build());
+    }
+
+    @Test
+    public void testNonAsciiLineLength()
+            throws IOException
+    {
+        // The line terminator scan reads eight bytes at a time. Bytes with the high bit set, which
+        // every multi byte UTF-8 sequence contains, must not be mistaken for a terminator at any
+        // alignment or across any word boundary.
+        ImmutableList.Builder<String> lines = ImmutableList.builder();
+        StringBuilder line = new StringBuilder();
+        for (int length = 0; length < 130; length++) {
+            line.setLength(0);
+            for (int i = 0; i < length; i++) {
+                line.appendCodePoint(NON_ASCII_CODE_POINTS[ThreadLocalRandom.current().nextInt(NON_ASCII_CODE_POINTS.length)]);
+            }
             lines.add(line.toString());
         }
         assertLines(lines.build());
@@ -161,7 +183,7 @@ public class TestLineReader
                 continue;
             }
             ExpectedLine expectedLine = testData.expectedLines().get(i);
-            ImmutableSet<Integer> testPositions = ImmutableSet.<Integer>builder()
+            Set<Integer> testPositions = ImmutableSet.<Integer>builder()
                     .add(expectedLine.start())
                     .add(expectedLine.start() + expectedLine.line().length())
                     .add(min(expectedLine.start() + expectedLine.line().length() + 1, expectedLine.endExclusive()))
@@ -262,7 +284,7 @@ public class TestLineReader
         ImmutableList.Builder<ExpectedLine> expectedLines = ImmutableList.builder();
         int startPosition = bom ? 3 : 0;
         for (String line : lines) {
-            int endPosition = min(inputBytes.length, startPosition + line.length() + delimiter.length());
+            int endPosition = min(inputBytes.length, startPosition + utf8Length(line) + utf8Length(delimiter));
             expectedLines.add(new ExpectedLine(line, startPosition, endPosition));
             startPosition = endPosition;
         }
@@ -272,10 +294,15 @@ public class TestLineReader
     private static LineBuffer createLineBuffer(List<String> lines)
     {
         int maxLineLength = lines.stream()
-                .mapToInt(String::length)
+                .mapToInt(TestLineReader::utf8Length)
                 .sum();
         LineBuffer lineBuffer = new LineBuffer(1, max(1, maxLineLength));
         return lineBuffer;
+    }
+
+    private static int utf8Length(String value)
+    {
+        return value.getBytes(UTF_8).length;
     }
 
     private static void randomLine(StringBuilder line, int length)

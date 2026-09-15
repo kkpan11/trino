@@ -46,7 +46,7 @@ public class InternalHiveSplit
     private final long end;
     private final long estimatedFileSize;
     private final long fileModifiedTime;
-    private final Map<String, String> schema;
+    private final Schema schema;
     private final List<HivePartitionKey> partitionKeys;
     private final List<InternalHiveBlock> blocks;
     private final String partitionName;
@@ -70,7 +70,7 @@ public class InternalHiveSplit
             long end,
             long estimatedFileSize,
             long fileModifiedTime,
-            Map<String, String> schema,
+            Schema schema,
             List<HivePartitionKey> partitionKeys,
             List<InternalHiveBlock> blocks,
             OptionalInt readBucketNumber,
@@ -144,7 +144,7 @@ public class InternalHiveSplit
         return fileModifiedTime;
     }
 
-    public Map<String, String> getSchema()
+    public Schema getSchema()
     {
         return schema;
     }
@@ -208,12 +208,12 @@ public class InternalHiveSplit
     public void increaseStart(long value)
     {
         start += value;
-        if (start == currentBlock().getEnd()) {
+        if (start == currentBlock().end()) {
             currentBlockIndex++;
             if (isDone()) {
                 return;
             }
-            verify(start == currentBlock().getStart());
+            verify(start == currentBlock().start());
         }
     }
 
@@ -222,9 +222,9 @@ public class InternalHiveSplit
         long result = INSTANCE_SIZE +
                 estimatedSizeOf(path) +
                 estimatedSizeOf(partitionKeys, HivePartitionKey::estimatedSizeInBytes) +
-                estimatedSizeOf(blocks, InternalHiveBlock::getEstimatedSizeInBytes) +
+                estimatedSizeOf(blocks, InternalHiveBlock::estimatedSizeInBytes) +
                 estimatedSizeOf(partitionName) +
-                estimatedSizeOf(hiveColumnCoercions, (Integer key) -> INTEGER_INSTANCE_SIZE, HiveTypeName::getEstimatedSizeInBytes);
+                estimatedSizeOf(hiveColumnCoercions, (Integer _) -> INTEGER_INSTANCE_SIZE, HiveTypeName::getEstimatedSizeInBytes);
         return toIntExact(result);
     }
 
@@ -249,39 +249,18 @@ public class InternalHiveSplit
                 .toString();
     }
 
-    public static class InternalHiveBlock
+    public record InternalHiveBlock(long start, long end, List<HostAddress> addresses)
     {
         private static final int INSTANCE_SIZE = instanceSize(InternalHiveBlock.class);
         private static final int HOST_ADDRESS_INSTANCE_SIZE = instanceSize(HostAddress.class);
 
-        private final long start;
-        private final long end;
-        private final List<HostAddress> addresses;
-
-        public InternalHiveBlock(long start, long end, List<HostAddress> addresses)
+        public InternalHiveBlock
         {
             checkArgument(start <= end, "block end cannot be before block start");
-            this.start = start;
-            this.end = end;
-            this.addresses = ImmutableList.copyOf(addresses);
+            addresses = ImmutableList.copyOf(addresses);
         }
 
-        public long getStart()
-        {
-            return start;
-        }
-
-        public long getEnd()
-        {
-            return end;
-        }
-
-        public List<HostAddress> getAddresses()
-        {
-            return addresses;
-        }
-
-        public long getEstimatedSizeInBytes()
+        public long estimatedSizeInBytes()
         {
             return INSTANCE_SIZE + estimatedSizeOf(addresses, address -> HOST_ADDRESS_INSTANCE_SIZE + estimatedSizeOf(address.getHostText()));
         }

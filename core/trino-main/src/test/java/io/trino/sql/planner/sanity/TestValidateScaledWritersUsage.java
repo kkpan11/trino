@@ -15,12 +15,12 @@ package io.trino.sql.planner.sanity;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.connector.CatalogHandle;
 import io.trino.connector.MockConnectorFactory;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.TableHandle;
 import io.trino.plugin.tpch.TpchColumnHandle;
 import io.trino.plugin.tpch.TpchTableHandle;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.SchemaTableName;
@@ -65,8 +65,8 @@ public class TestValidateScaledWritersUsage
 {
     private static final PartitioningHandle CUSTOM_HANDLE = new PartitioningHandle(
             Optional.of(TEST_CATALOG_HANDLE),
-            Optional.of(new ConnectorTransactionHandle() { }),
-            new ConnectorPartitioningHandle() { },
+            Optional.of(new ConnectorTransactionHandle() {}),
+            new ConnectorPartitioningHandle() {},
             true);
 
     private PlanTester planTester;
@@ -109,7 +109,7 @@ public class TestValidateScaledWritersUsage
     private MockConnectorFactory createConnectorFactory(String name)
     {
         return MockConnectorFactory.builder()
-                .withGetTableHandle((session, schemaTableName) -> null)
+                .withGetTableHandle((_, _) -> null)
                 .withName(name)
                 .build();
     }

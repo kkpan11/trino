@@ -36,7 +36,7 @@ public class TestDoubleType
 
     public static ValueBlock createTestBlock()
     {
-        BlockBuilder blockBuilder = DOUBLE.createBlockBuilder(null, 15);
+        BlockBuilder blockBuilder = DOUBLE.createFixedSizeBlockBuilder(15);
         DOUBLE.writeDouble(blockBuilder, 11.11);
         DOUBLE.writeDouble(blockBuilder, 11.11);
         DOUBLE.writeDouble(blockBuilder, 11.11);
@@ -60,13 +60,13 @@ public class TestDoubleType
     @Test
     public void testNaNHash()
     {
-        LongArrayBlockBuilder blockBuilder = (LongArrayBlockBuilder) DOUBLE.createBlockBuilder(null, 5);
+        LongArrayBlockBuilder blockBuilder = (LongArrayBlockBuilder) DOUBLE.createFixedSizeBlockBuilder(5);
         DOUBLE.writeDouble(blockBuilder, Double.NaN);
         blockBuilder.writeLong(doubleToLongBits(Double.NaN));
         blockBuilder.writeLong(doubleToRawLongBits(Double.NaN));
         // the following two are the long values of a double NaN
-        blockBuilder.writeLong(-0x000fffffffffffffL);
-        blockBuilder.writeLong(0x7ff8000000000000L);
+        blockBuilder.writeLong(-0x000FFFFFFFFFFFFFL);
+        blockBuilder.writeLong(0x7FF8000000000000L);
         Block block = blockBuilder.build();
 
         BlockPositionHashCode hashCodeOperator = blockTypeOperators.getHashCodeOperator(DOUBLE);

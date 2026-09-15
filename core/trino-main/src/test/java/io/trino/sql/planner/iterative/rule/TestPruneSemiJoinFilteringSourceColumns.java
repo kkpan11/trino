@@ -23,7 +23,6 @@ import io.trino.sql.planner.plan.PlanNode;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.function.Predicate;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -40,15 +39,16 @@ public class TestPruneSemiJoinFilteringSourceColumns
     public void testNotAllColumnsReferenced()
     {
         tester().assertThat(new PruneSemiJoinFilteringSourceColumns())
-                .on(p -> buildSemiJoin(p, symbol -> true))
+                .on(p -> buildSemiJoin(p, _ -> true))
                 .matches(
-                        semiJoin("leftKey", "rightKey", "match",
+                        semiJoin("leftKey",
+                                "rightKey",
+                                "match",
                                 values("leftKey"),
                                 strictProject(
                                         ImmutableMap.of(
-                                                "rightKey", expression(new Reference(BIGINT, "rightKey")),
-                                                "rightKeyHash", expression(new Reference(BIGINT, "rightKeyHash"))),
-                                        values("rightKey", "rightKeyHash", "rightValue"))));
+                                                "rightKey", expression(new Reference(BIGINT, "rightKey"))),
+                                        values("rightKey", "rightValue"))));
     }
 
     @Test
@@ -64,15 +64,12 @@ public class TestPruneSemiJoinFilteringSourceColumns
         Symbol match = p.symbol("match");
         Symbol leftKey = p.symbol("leftKey");
         Symbol rightKey = p.symbol("rightKey");
-        Symbol rightKeyHash = p.symbol("rightKeyHash");
         Symbol rightValue = p.symbol("rightValue");
-        List<Symbol> filteringSourceSymbols = ImmutableList.of(rightKey, rightKeyHash, rightValue);
+        List<Symbol> filteringSourceSymbols = ImmutableList.of(rightKey, rightValue);
         return p.semiJoin(
                 leftKey,
                 rightKey,
                 match,
-                Optional.empty(),
-                Optional.of(rightKeyHash),
                 p.values(leftKey),
                 p.values(
                         filteringSourceSymbols.stream()

@@ -214,7 +214,8 @@ public class TestCostCalculator
     {
         TableScanNode ts1 = tableScan("ts1", new Symbol(BIGINT, "orderkey"));
         TableScanNode ts2 = tableScan("ts2", new Symbol(BIGINT, "orderkey_0"));
-        JoinNode join = join("join",
+        JoinNode join = join(
+                "join",
                 ts1,
                 ts2,
                 JoinNode.DistributionType.PARTITIONED,
@@ -253,7 +254,8 @@ public class TestCostCalculator
     {
         TableScanNode ts1 = tableScan("ts1", new Symbol(BIGINT, "orderkey"));
         TableScanNode ts2 = tableScan("ts2", new Symbol(BIGINT, "orderkey_0"));
-        JoinNode join = join("join",
+        JoinNode join = join(
+                "join",
                 ts1,
                 ts2,
                 JoinNode.DistributionType.REPLICATED,
@@ -412,11 +414,12 @@ public class TestCostCalculator
     {
         TableScanNode ts1 = tableScan("ts1", new Symbol(BIGINT, "orderkey"));
         TableScanNode ts2 = tableScan("ts2", new Symbol(BIGINT, "orderkey_0"));
-        ExchangeNode remoteExchange1 = partitionedExchange(new PlanNodeId("re1"), REMOTE, ts1, ImmutableList.of(new Symbol(BIGINT, "orderkey")), Optional.empty());
-        ExchangeNode remoteExchange2 = partitionedExchange(new PlanNodeId("re2"), REMOTE, ts2, ImmutableList.of(new Symbol(BIGINT, "orderkey_0")), Optional.empty());
-        ExchangeNode localExchange = partitionedExchange(new PlanNodeId("le"), LOCAL, remoteExchange2, ImmutableList.of(new Symbol(BIGINT, "orderkey_0")), Optional.empty());
+        ExchangeNode remoteExchange1 = partitionedExchange(new PlanNodeId("re1"), REMOTE, ts1, ImmutableList.of(new Symbol(BIGINT, "orderkey")));
+        ExchangeNode remoteExchange2 = partitionedExchange(new PlanNodeId("re2"), REMOTE, ts2, ImmutableList.of(new Symbol(BIGINT, "orderkey_0")));
+        ExchangeNode localExchange = partitionedExchange(new PlanNodeId("le"), LOCAL, remoteExchange2, ImmutableList.of(new Symbol(BIGINT, "orderkey_0")));
 
-        JoinNode join = join("join",
+        JoinNode join = join(
+                "join",
                 remoteExchange1,
                 localExchange,
                 JoinNode.DistributionType.PARTITIONED,
@@ -441,9 +444,10 @@ public class TestCostCalculator
         TableScanNode ts1 = tableScan("ts1", new Symbol(BIGINT, "orderkey"));
         TableScanNode ts2 = tableScan("ts2", new Symbol(BIGINT, "orderkey_0"));
         ExchangeNode remoteExchange2 = replicatedExchange(new PlanNodeId("re2"), REMOTE, ts2);
-        ExchangeNode localExchange = partitionedExchange(new PlanNodeId("le"), LOCAL, remoteExchange2, ImmutableList.of(new Symbol(BIGINT, "orderkey_0")), Optional.empty());
+        ExchangeNode localExchange = partitionedExchange(new PlanNodeId("le"), LOCAL, remoteExchange2, ImmutableList.of(new Symbol(BIGINT, "orderkey_0")));
 
-        JoinNode join = join("join",
+        JoinNode join = join(
+                "join",
                 ts1,
                 localExchange,
                 JoinNode.DistributionType.REPLICATED,
@@ -549,7 +553,7 @@ public class TestCostCalculator
             Map<String, PlanCostEstimate> costs,
             Map<String, PlanNodeStatsEstimate> stats)
     {
-        StatsProvider statsProvider = new CachingStatsProvider(statsCalculator(stats), session, new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), session));
+        StatsProvider statsProvider = new CachingStatsProvider(statsCalculator(stats), session, new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), session, () -> false));
         CostProvider costProvider = new TestingCostProvider(costs, costCalculatorUsingExchanges, statsProvider, session);
         SubPlan subPlan = fragment(new Plan(node, StatsAndCosts.create(node, statsProvider, costProvider)));
         return new CostAssertionBuilder(subPlan.getFragment().getStatsAndCosts().getCosts().getOrDefault(node.getId(), PlanCostEstimate.unknown()));
@@ -619,14 +623,14 @@ public class TestCostCalculator
         new CostAssertionBuilder(calculateCost(
                 costCalculatorUsingExchanges,
                 node,
-                planNode -> PlanCostEstimate.unknown(),
-                planNode -> PlanNodeStatsEstimate.unknown()))
+                _ -> PlanCostEstimate.unknown(),
+                _ -> PlanNodeStatsEstimate.unknown()))
                 .hasUnknownComponents();
         new CostAssertionBuilder(calculateCost(
                 costCalculatorWithEstimatedExchanges,
                 node,
-                planNode -> PlanCostEstimate.unknown(),
-                planNode -> PlanNodeStatsEstimate.unknown()))
+                _ -> PlanCostEstimate.unknown(),
+                _ -> PlanNodeStatsEstimate.unknown()))
                 .hasUnknownComponents();
     }
 
@@ -640,7 +644,7 @@ public class TestCostCalculator
 
     private StatsCalculator statsCalculator(Map<String, PlanNodeStatsEstimate> stats)
     {
-        return (node, context) -> requireNonNull(stats.get(node.getId().toString()), "no stats for node");
+        return (node, _) -> requireNonNull(stats.get(node.getId().toString()), "no stats for node");
     }
 
     private PlanCostEstimate calculateCost(
@@ -658,14 +662,14 @@ public class TestCostCalculator
 
     private PlanCostEstimate calculateCost(PlanNode node, CostCalculator costCalculator, StatsCalculator statsCalculator)
     {
-        StatsProvider statsProvider = new CachingStatsProvider(statsCalculator, session, new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), session));
+        StatsProvider statsProvider = new CachingStatsProvider(statsCalculator, session, new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), session, () -> false));
         CostProvider costProvider = new CachingCostProvider(costCalculator, statsProvider, Optional.empty(), session);
         return costProvider.getCost(node);
     }
 
     private PlanCostEstimate calculateCostFragmentedPlan(PlanNode node, StatsCalculator statsCalculator)
     {
-        StatsProvider statsProvider = new CachingStatsProvider(statsCalculator, session, new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), session));
+        StatsProvider statsProvider = new CachingStatsProvider(statsCalculator, session, new CachingTableStatsProvider(planTester.getPlannerContext().getMetadata(), session, () -> false));
         CostProvider costProvider = new CachingCostProvider(costCalculatorUsingExchanges, statsProvider, Optional.empty(), session);
         SubPlan subPlan = fragment(new Plan(node, StatsAndCosts.create(node, statsProvider, costProvider)));
         return subPlan.getFragment().getStatsAndCosts().getCosts().getOrDefault(node.getId(), PlanCostEstimate.unknown());
@@ -803,8 +807,6 @@ public class TestCostCalculator
                 left.getOutputSymbols(),
                 right.getOutputSymbols(),
                 false,
-                Optional.empty(),
-                Optional.empty(),
                 Optional.empty(),
                 Optional.of(distributionType),
                 Optional.empty(),

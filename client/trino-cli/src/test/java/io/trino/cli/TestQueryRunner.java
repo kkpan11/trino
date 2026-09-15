@@ -18,36 +18,39 @@ import io.airlift.units.Duration;
 import io.trino.client.ClientSession;
 import io.trino.client.ClientTypeSignature;
 import io.trino.client.Column;
-import io.trino.client.JsonCodec;
 import io.trino.client.QueryResults;
-import io.trino.client.RawQueryData;
 import io.trino.client.StatementStats;
+import io.trino.client.TrinoJsonCodec;
+import io.trino.client.TypedQueryData;
 import io.trino.client.uri.PropertyName;
 import io.trino.client.uri.TrinoUri;
-import okhttp3.mockwebserver.MockResponse;
-import okhttp3.mockwebserver.MockWebServer;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import mockwebserver3.MockResponse;
+import mockwebserver3.MockWebServer;
+import mockwebserver3.junit5.StartStop;
+import okhttp3.Cache;
+import okhttp3.OkHttpClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Path;
 import java.time.ZoneId;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.Properties;
 
-import static com.google.common.io.ByteStreams.nullOutputStream;
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
 import static com.google.common.net.HttpHeaders.LOCATION;
 import static com.google.common.net.HttpHeaders.SET_COOKIE;
 import static io.trino.cli.ClientOptions.OutputFormat.CSV;
 import static io.trino.cli.TerminalUtils.getTerminal;
 import static io.trino.client.ClientStandardTypes.BIGINT;
-import static io.trino.client.JsonCodec.jsonCodec;
+import static io.trino.client.TrinoJsonCodec.jsonCodec;
 import static io.trino.client.auth.external.ExternalRedirectStrategy.PRINT;
+import static java.io.OutputStream.nullOutputStream;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
@@ -55,39 +58,31 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 @TestInstance(PER_METHOD)
 public class TestQueryRunner
 {
-    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
-    private MockWebServer server;
+    private static final TrinoJsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
 
-    @BeforeEach
-    public void setup()
-            throws IOException
-    {
-        server = new MockWebServer();
-        server.start();
-    }
+    @StartStop
+    private final MockWebServer server = new MockWebServer();
 
-    @AfterEach
-    public void teardown()
-            throws IOException
-    {
-        server.close();
-        server = null;
-    }
+    @TempDir
+    private Path tempDirectory;
 
     @Test
     public void testCookie()
             throws Exception
     {
-        server.enqueue(new MockResponse()
-                .setResponseCode(307)
+        server.enqueue(new MockResponse.Builder()
+                .code(307)
                 .addHeader(LOCATION, server.url("/v1/statement"))
-                .addHeader(SET_COOKIE, "a=apple"));
-        server.enqueue(new MockResponse()
+                .addHeader(SET_COOKIE, "a=apple")
+                .build());
+        server.enqueue(new MockResponse.Builder()
                 .addHeader(CONTENT_TYPE, "application/json")
-                .setBody(createResults(server)));
-        server.enqueue(new MockResponse()
+                .body(createResults(server))
+                .build());
+        server.enqueue(new MockResponse.Builder()
                 .addHeader(CONTENT_TYPE, "application/json")
-                .setBody(createResults(server)));
+                .body(createResults(server))
+                .build());
 
         QueryRunner queryRunner = createQueryRunner(createTrinoUri(server, false), createClientSession(server));
 
@@ -98,9 +93,31 @@ public class TestQueryRunner
             query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, Optional.of(""), false, false);
         }
 
-        assertThat(server.takeRequest().getHeader("Cookie")).isNull();
-        assertThat(server.takeRequest().getHeader("Cookie")).isEqualTo("a=apple");
-        assertThat(server.takeRequest().getHeader("Cookie")).isEqualTo("a=apple");
+        assertThat(server.takeRequest().getHeaders().get("Cookie")).isNull();
+        assertThat(server.takeRequest().getHeaders().get("Cookie")).isEqualTo("a=apple");
+        assertThat(server.takeRequest().getHeaders().get("Cookie")).isEqualTo("a=apple");
+    }
+
+    @Test
+    public void testCloseClosesAllHttpClients()
+    {
+        OkHttpClient httpClient = newClientWithCache("http-client");
+        OkHttpClient segmentHttpClient = newClientWithCache("segment-http-client");
+        QueryRunner queryRunner = new QueryRunner(
+                Theme.DARK,
+                createClientSession(server),
+                false,
+                httpClient,
+                segmentHttpClient,
+                1000,
+                500);
+
+        queryRunner.close();
+
+        assertThat(httpClient.dispatcher().executorService().isShutdown()).isTrue();
+        assertThat(segmentHttpClient.dispatcher().executorService().isShutdown()).isTrue();
+        assertThat(httpClient.cache().isClosed()).isTrue();
+        assertThat(segmentHttpClient.cache().isClosed()).isTrue();
     }
 
     static TrinoUri createTrinoUri(MockWebServer server, boolean insecureSsl)
@@ -115,7 +132,7 @@ public class TestQueryRunner
     {
         return ClientSession.builder()
                 .server(server.url("/").uri())
-                .principal(Optional.of("user"))
+                .user(Optional.of("user"))
                 .source("source")
                 .clientInfo("clientInfo")
                 .catalog("catalog")
@@ -136,30 +153,40 @@ public class TestQueryRunner
                 null,
                 null,
                 ImmutableList.of(new Column("_col0", BIGINT, new ClientTypeSignature(BIGINT))),
-                RawQueryData.of(ImmutableList.of(ImmutableList.of(123))),
+                TypedQueryData.of(ImmutableList.of(ImmutableList.of(123))),
                 StatementStats.builder()
                         .setState("FINISHED")
                         .setProgressPercentage(OptionalDouble.empty())
                         .setRunningPercentage(OptionalDouble.empty())
                         .build(),
-                //new StatementStats("FINISHED", false, true, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null),
+                // new StatementStats("FINISHED", false, true, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null),
                 null,
                 ImmutableList.of(),
                 null,
-                null);
+                OptionalLong.empty());
         return QUERY_RESULTS_CODEC.toJson(queryResults);
     }
 
     static QueryRunner createQueryRunner(TrinoUri uri, ClientSession clientSession)
     {
         return new QueryRunner(
+                Theme.DARK,
                 uri,
                 clientSession,
-                false);
+                false,
+                1000,
+                500);
     }
 
     static PrintStream nullPrintStream()
     {
         return new PrintStream(nullOutputStream());
+    }
+
+    private OkHttpClient newClientWithCache(String cacheDirectory)
+    {
+        return new OkHttpClient.Builder()
+                .cache(new Cache(tempDirectory.resolve(cacheDirectory).toFile(), 1024))
+                .build();
     }
 }

@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Closer;
 import io.trino.memory.context.AggregatedMemoryContext;
-import io.trino.orc.OrcBlockFactory;
 import io.trino.orc.OrcColumn;
 import io.trino.orc.OrcCorruptionException;
 import io.trino.orc.OrcReader;
@@ -29,8 +28,6 @@ import io.trino.orc.stream.BooleanInputStream;
 import io.trino.orc.stream.InputStreamSource;
 import io.trino.orc.stream.InputStreamSources;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.LazyBlock;
-import io.trino.spi.block.LazyBlockLoader;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.RowType;
@@ -54,6 +51,7 @@ import static io.trino.orc.reader.ColumnReaders.createColumnReader;
 import static io.trino.orc.reader.ReaderUtils.toNotNullSupressedBlock;
 import static io.trino.orc.reader.ReaderUtils.verifyStreamType;
 import static io.trino.orc.stream.MissingInputStreamSource.missingStreamSource;
+import static io.trino.spi.block.Bitmap.wordsForBits;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
@@ -63,11 +61,10 @@ public class StructColumnReader
     private static final int INSTANCE_SIZE = instanceSize(StructColumnReader.class);
 
     private final OrcColumn column;
-    private final OrcBlockFactory blockFactory;
 
     private final Map<String, ColumnReader> structFields;
     private final RowType type;
-    private final ImmutableList<String> fieldNames;
+    private final List<String> fieldNames;
 
     private int readOffset;
     private int nextBatchSize;
@@ -83,7 +80,6 @@ public class StructColumnReader
             OrcColumn column,
             OrcReader.ProjectedLayout readLayout,
             AggregatedMemoryContext memoryContext,
-            OrcBlockFactory blockFactory,
             FieldMapperFactory fieldMapperFactory)
             throws OrcCorruptionException
     {
@@ -92,7 +88,6 @@ public class StructColumnReader
         this.type = (RowType) type;
 
         this.column = requireNonNull(column, "column is null");
-        this.blockFactory = requireNonNull(blockFactory, "blockFactory is null");
 
         FieldMapper fieldMapper = fieldMapperFactory.create(column);
         ImmutableList.Builder<String> fieldNames = ImmutableList.builder();
@@ -115,7 +110,6 @@ public class StructColumnReader
                                     fieldStream,
                                     fieldLayout,
                                     memoryContext,
-                                    blockFactory,
                                     fieldMapperFactory));
                 }
             }
@@ -150,23 +144,28 @@ public class StructColumnReader
             }
         }
 
-        boolean[] nullVector = null;
+        long[] valueIsValid = null;
         Block[] blocks;
 
         if (presentStream == null) {
             blocks = getBlocks(nextBatchSize, nextBatchSize, null);
         }
         else {
-            nullVector = new boolean[nextBatchSize];
-            int nullValues = presentStream.getUnsetBits(nextBatchSize, nullVector);
-            if (nullValues != nextBatchSize) {
-                blocks = getBlocks(nextBatchSize, nextBatchSize - nullValues, nullVector);
+            valueIsValid = new long[wordsForBits(nextBatchSize)];
+            int nonNullCount = presentStream.getSetBits(nextBatchSize, valueIsValid);
+            int nullValues = nextBatchSize - nonNullCount;
+            if (nullValues == 0) {
+                valueIsValid = null;
+                blocks = getBlocks(nextBatchSize, nextBatchSize, null);
+            }
+            else if (nullValues != nextBatchSize) {
+                blocks = getBlocks(nextBatchSize, nonNullCount, valueIsValid);
             }
             else {
-                List<Type> typeParameters = type.getTypeParameters();
-                blocks = new Block[typeParameters.size()];
-                for (int i = 0; i < typeParameters.size(); i++) {
-                    blocks[i] = RunLengthEncodedBlock.create(typeParameters.get(i).createBlockBuilder(null, 0).appendNull().build(), nextBatchSize);
+                List<Type> fieldTypes = type.getFieldTypes();
+                blocks = new Block[fieldTypes.size()];
+                for (int i = 0; i < fieldTypes.size(); i++) {
+                    blocks[i] = RunLengthEncodedBlock.create(fieldTypes.get(i).createBlockBuilder(null, 0).appendNull().build(), nextBatchSize);
                 }
             }
         }
@@ -177,7 +176,7 @@ public class StructColumnReader
                 .count() == 1);
 
         // Struct is represented as a row block
-        Block rowBlock = RowBlock.fromNotNullSuppressedFieldBlocks(nextBatchSize, Optional.ofNullable(nullVector), blocks);
+        Block rowBlock = RowBlock.fromNotNullSuppressedFieldBlocks(nextBatchSize, Optional.ofNullable(valueIsValid), blocks);
 
         readOffset = 0;
         nextBatchSize = 0;
@@ -237,7 +236,8 @@ public class StructColumnReader
                 .toString();
     }
 
-    private Block[] getBlocks(int positionCount, int nonNullCount, boolean[] nullVector)
+    private Block[] getBlocks(int positionCount, int nonNullCount, long[] valueIsValid)
+            throws IOException
     {
         Block[] blocks = new Block[fieldNames.size()];
 
@@ -248,13 +248,11 @@ public class StructColumnReader
             if (columnReader != null) {
                 columnReader.prepareNextRead(nonNullCount);
 
-                LazyBlockLoader lazyBlockLoader = blockFactory.createLazyBlockLoader(columnReader::readBlock, true);
-                if (nullVector == null) {
-                    blocks[i] = new LazyBlock(positionCount, lazyBlockLoader);
+                Block block = columnReader.readBlock();
+                if (valueIsValid != null) {
+                    block = toNotNullSupressedBlock(positionCount, valueIsValid, block);
                 }
-                else {
-                    blocks[i] = new LazyBlock(positionCount, () -> toNotNullSupressedBlock(positionCount, nullVector, lazyBlockLoader.load()));
-                }
+                blocks[i] = block;
             }
             else {
                 blocks[i] = RunLengthEncodedBlock.create(type.getFields().get(i).getType(), null, positionCount);

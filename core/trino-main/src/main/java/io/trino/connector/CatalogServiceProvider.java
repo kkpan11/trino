@@ -13,7 +13,6 @@
  */
 package io.trino.connector;
 
-import io.trino.spi.connector.CatalogHandle;
 import jakarta.validation.constraints.NotNull;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -27,7 +26,7 @@ public interface CatalogServiceProvider<T>
 
     static <T> CatalogServiceProvider<T> fail(String message)
     {
-        return catalogName -> {
+        return _ -> {
             throw new IllegalStateException(message);
         };
     }

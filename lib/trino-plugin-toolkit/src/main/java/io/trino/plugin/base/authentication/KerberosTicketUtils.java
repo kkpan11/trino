@@ -23,9 +23,7 @@ public final class KerberosTicketUtils
 {
     private static final float TICKET_RENEW_WINDOW = 0.80f;
 
-    private KerberosTicketUtils()
-    {
-    }
+    private KerberosTicketUtils() {}
 
     public static KerberosTicket getTicketGrantingTicket(Subject subject)
     {
@@ -49,7 +47,7 @@ public final class KerberosTicketUtils
      * Check whether the server principal is the TGS's principal
      *
      * @param ticket the original TGT (the ticket that is obtained when a
-     * kinit is done)
+     *         kinit is done)
      * @return true or false
      */
     public static boolean isOriginalTicketGrantingTicket(KerberosTicket ticket)

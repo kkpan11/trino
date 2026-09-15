@@ -14,11 +14,13 @@
 package io.trino.execution;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.client.NodeVersion;
+import io.trino.exchange.ExchangeMetricsCollector;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.TestingMetadataManager;
 import io.trino.security.AccessControl;
 import io.trino.security.AllowAllAccessControl;
+import io.trino.spi.NodeVersion;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.sql.tree.Identifier;
@@ -34,13 +36,13 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.parallel.Execution;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
-import static io.trino.metadata.MetadataManager.testMetadataManagerBuilder;
 import static io.trino.testing.TestingSession.testSession;
 import static io.trino.transaction.InMemoryTransactionManager.createTestTransactionManager;
 import static java.util.Collections.emptyList;
@@ -66,7 +68,7 @@ public class TestSetPathTask
         transactionManager = createTestTransactionManager();
         accessControl = new AllowAllAccessControl();
 
-        metadata = testMetadataManagerBuilder()
+        metadata = TestingMetadataManager.builder()
                 .withTransactionManager(transactionManager)
                 .build();
     }
@@ -122,8 +124,10 @@ public class TestSetPathTask
                 metadata,
                 WarningCollector.NOOP,
                 createPlanOptimizersStatsCollector(),
+                new ExchangeMetricsCollector(ImmutableList::of, Duration.ofMillis(1)),
                 Optional.empty(),
                 true,
+                Optional.empty(),
                 new NodeVersion("test"));
     }
 

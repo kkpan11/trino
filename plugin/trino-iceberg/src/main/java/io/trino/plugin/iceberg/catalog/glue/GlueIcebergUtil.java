@@ -13,9 +13,6 @@
  */
 package io.trino.plugin.iceberg.catalog.glue;
 
-import com.amazonaws.services.glue.model.Column;
-import com.amazonaws.services.glue.model.StorageDescriptor;
-import com.amazonaws.services.glue.model.TableInput;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.iceberg.TypeConverter;
@@ -24,15 +21,18 @@ import jakarta.annotation.Nullable;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
+import software.amazon.awssdk.services.glue.model.Column;
+import software.amazon.awssdk.services.glue.model.StorageDescriptor;
+import software.amazon.awssdk.services.glue.model.TableInput;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.collect.ImmutableList.builderWithExpectedSize;
 import static io.trino.metastore.Table.TABLE_COMMENT;
 import static io.trino.metastore.TableInfo.ICEBERG_MATERIALIZED_VIEW_COMMENT;
@@ -41,9 +41,11 @@ import static io.trino.plugin.hive.TableType.EXTERNAL_TABLE;
 import static io.trino.plugin.hive.TableType.VIRTUAL_VIEW;
 import static io.trino.plugin.iceberg.IcebergUtil.COLUMN_TRINO_NOT_NULL_PROPERTY;
 import static io.trino.plugin.iceberg.IcebergUtil.COLUMN_TRINO_TYPE_ID_PROPERTY;
+import static io.trino.plugin.iceberg.IcebergUtil.TRINO_TABLE_COMMENT_CACHE_PREVENTED;
 import static io.trino.plugin.iceberg.IcebergUtil.TRINO_TABLE_METADATA_INFO_VALID_FOR;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
+import static java.util.Objects.requireNonNullElse;
 import static org.apache.iceberg.BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE;
 import static org.apache.iceberg.BaseMetastoreTableOperations.METADATA_LOCATION_PROP;
 import static org.apache.iceberg.BaseMetastoreTableOperations.TABLE_TYPE_PROP;
@@ -62,12 +64,15 @@ public final class GlueIcebergUtil
     private static final int GLUE_COLUMN_COMMENT_LENGTH_LIMIT = 255;
     // Limit per Glue API docs (https://docs.aws.amazon.com/glue/latest/webapi/API_Column.html as of this writing)
     private static final int GLUE_COLUMN_PARAMETER_LENGTH_LIMIT = 512000;
+    // Column comment pattern per Glue API docs (https://docs.aws.amazon.com/glue/latest/webapi/API_Column.html as of this writing)
+    private static final Pattern GLUE_COLUMN_COMMENT_PATTERN = Pattern.compile("[\\u0020-\\uD7FF\\uE000-\\uFFFD\\uD800\\uDC00-\\uDBFF\\uDFFF\\t]*");
 
     public static TableInput getTableInput(
             TypeManager typeManager,
             String tableName,
             Optional<String> owner,
             TableMetadata metadata,
+            @Nullable String tableLocation,
             String newMetadataLocation,
             Map<String, String> parameters,
             boolean cacheTableMetadata)
@@ -77,38 +82,44 @@ public final class GlueIcebergUtil
         parameters.put(METADATA_LOCATION_PROP, newMetadataLocation);
         parameters.remove(TRINO_TABLE_METADATA_INFO_VALID_FOR); // no longer valid
 
-        TableInput tableInput = new TableInput()
-                .withName(tableName)
-                .withOwner(owner.orElse(null))
+        StorageDescriptor.Builder storageDescriptor = StorageDescriptor.builder()
+                .location(tableLocation);
+
+        TableInput.Builder tableInput = TableInput.builder()
+                .name(tableName)
+                .owner(owner.orElse(null))
                 // Iceberg does not distinguish managed and external tables, all tables are treated the same and marked as EXTERNAL
-                .withTableType(EXTERNAL_TABLE.name());
+                .tableType(EXTERNAL_TABLE.name())
+                .storageDescriptor(storageDescriptor.build());
 
         if (cacheTableMetadata) {
             // Store table metadata sufficient to answer information_schema.columns and system.metadata.table_comments queries, which are often queried in bulk by e.g. BI tools
-            String comment = metadata.properties().get(TABLE_COMMENT);
             Optional<List<Column>> glueColumns = glueColumns(typeManager, metadata);
 
-            boolean canPersistComment = (comment == null || comment.length() <= GLUE_TABLE_PARAMETER_LENGTH_LIMIT);
-            boolean canPersistColumnInfo = glueColumns.isPresent();
-            boolean canPersistMetadata = canPersistComment && canPersistColumnInfo;
+            glueColumns.ifPresent(columns -> tableInput.storageDescriptor(
+                    storageDescriptor.columns(columns).build()));
 
-            if (canPersistMetadata) {
-                tableInput.withStorageDescriptor(new StorageDescriptor()
-                        .withColumns(glueColumns.get()));
-
-                if (comment != null) {
+            String comment = metadata.properties().get(TABLE_COMMENT);
+            if (comment != null) {
+                if (comment.length() <= GLUE_TABLE_PARAMETER_LENGTH_LIMIT) {
                     parameters.put(TABLE_COMMENT, comment);
+                    parameters.remove(TRINO_TABLE_COMMENT_CACHE_PREVENTED);
                 }
                 else {
                     parameters.remove(TABLE_COMMENT);
+                    parameters.put(TRINO_TABLE_COMMENT_CACHE_PREVENTED, "true");
                 }
-                parameters.put(TRINO_TABLE_METADATA_INFO_VALID_FOR, newMetadataLocation);
             }
+            else {
+                parameters.remove(TABLE_COMMENT);
+                parameters.remove(TRINO_TABLE_COMMENT_CACHE_PREVENTED);
+            }
+            parameters.put(TRINO_TABLE_METADATA_INFO_VALID_FOR, newMetadataLocation);
         }
 
-        tableInput.withParameters(parameters);
+        tableInput.parameters(parameters);
 
-        return tableInput;
+        return tableInput.build();
     }
 
     private static Optional<List<Column>> glueColumns(TypeManager typeManager, TableMetadata metadata)
@@ -119,16 +130,18 @@ public final class GlueIcebergUtil
         boolean firstColumn = true;
         for (Types.NestedField icebergColumn : icebergColumns) {
             String glueTypeString = toGlueTypeStringLossy(icebergColumn.type());
+            String columnComment = requireNonNullElse(icebergColumn.doc(), "");
             if (icebergColumn.name().length() > GLUE_COLUMN_NAME_LENGTH_LIMIT ||
-                    firstNonNull(icebergColumn.doc(), "").length() > GLUE_COLUMN_COMMENT_LENGTH_LIMIT ||
-                    glueTypeString.length() > GLUE_COLUMN_TYPE_LENGTH_LIMIT) {
+                    columnComment.length() > GLUE_COLUMN_COMMENT_LENGTH_LIMIT ||
+                    glueTypeString.length() > GLUE_COLUMN_TYPE_LENGTH_LIMIT ||
+                    !GLUE_COLUMN_COMMENT_PATTERN.matcher(columnComment).matches()) {
                 return Optional.empty();
             }
             String trinoTypeId = TypeConverter.toTrinoType(icebergColumn.type(), typeManager).getTypeId().getId();
-            Column column = new Column()
-                    .withName(icebergColumn.name())
-                    .withType(glueTypeString)
-                    .withComment(icebergColumn.doc());
+            Column.Builder column = Column.builder()
+                    .name(icebergColumn.name())
+                    .type(glueTypeString)
+                    .comment(icebergColumn.doc());
 
             ImmutableMap.Builder<String, String> parameters = ImmutableMap.builder();
             if (icebergColumn.isRequired()) {
@@ -141,8 +154,8 @@ public final class GlueIcebergUtil
                 // Store type parameter for some (first) column so that we can later detect whether column parameters weren't erased by something.
                 parameters.put(COLUMN_TRINO_TYPE_ID_PROPERTY, trinoTypeId);
             }
-            column.setParameters(parameters.buildOrThrow());
-            glueColumns.add(column);
+            column.parameters(parameters.buildOrThrow());
+            glueColumns.add(column.build());
 
             firstColumn = false;
         }
@@ -153,69 +166,62 @@ public final class GlueIcebergUtil
     // Copied from org.apache.iceberg.aws.glue.IcebergToGlueConverter#toTypeString
     private static String toGlueTypeStringLossy(Type type)
     {
-        switch (type.typeId()) {
-            case BOOLEAN:
-                return "boolean";
-            case INTEGER:
-                return "int";
-            case LONG:
-                return "bigint";
-            case FLOAT:
-                return "float";
-            case DOUBLE:
-                return "double";
-            case DATE:
-                return "date";
-            case TIME:
-            case STRING:
-            case UUID:
-                return "string";
-            case TIMESTAMP:
-                return "timestamp";
-            case FIXED:
-            case BINARY:
-                return "binary";
-            case DECIMAL:
+        return switch (type.typeId()) {
+            case BOOLEAN -> "boolean";
+            case INTEGER -> "int";
+            case LONG -> "bigint";
+            case FLOAT -> "float";
+            case DOUBLE -> "double";
+            case DATE -> "date";
+            case TIME, STRING, UUID -> "string";
+            case TIMESTAMP, TIMESTAMP_NANO -> "timestamp";
+            case FIXED, BINARY -> "binary";
+            case DECIMAL -> {
                 final Types.DecimalType decimalType = (Types.DecimalType) type;
-                return format("decimal(%s,%s)", decimalType.precision(), decimalType.scale());
-            case STRUCT:
+                yield format("decimal(%s,%s)", decimalType.precision(), decimalType.scale());
+            }
+            case STRUCT -> {
                 final Types.StructType structType = type.asStructType();
                 final String nameToType =
                         structType.fields().stream()
                                 .map(f -> format("%s:%s", f.name(), toGlueTypeStringLossy(f.type())))
                                 .collect(Collectors.joining(","));
-                return format("struct<%s>", nameToType);
-            case LIST:
+                yield format("struct<%s>", nameToType);
+            }
+            case LIST -> {
                 final Types.ListType listType = type.asListType();
-                return format("array<%s>", toGlueTypeStringLossy(listType.elementType()));
-            case MAP:
+                yield format("array<%s>", toGlueTypeStringLossy(listType.elementType()));
+            }
+            case MAP -> {
                 final Types.MapType mapType = type.asMapType();
-                return format(
+                yield format(
                         "map<%s,%s>", toGlueTypeStringLossy(mapType.keyType()), toGlueTypeStringLossy(mapType.valueType()));
-            default:
-                return type.typeId().name().toLowerCase(Locale.ENGLISH);
-        }
+            }
+            default -> type.typeId().name().toLowerCase(Locale.ENGLISH);
+        };
     }
 
     public static TableInput getViewTableInput(String viewName, String viewOriginalText, @Nullable String owner, Map<String, String> parameters)
     {
-        return new TableInput()
-                .withName(viewName)
-                .withTableType(VIRTUAL_VIEW.name())
-                .withViewOriginalText(viewOriginalText)
-                .withViewExpandedText(PRESTO_VIEW_EXPANDED_TEXT_MARKER)
-                .withOwner(owner)
-                .withParameters(parameters);
+        return TableInput.builder()
+                .name(viewName)
+                .tableType(VIRTUAL_VIEW.name())
+                .viewOriginalText(viewOriginalText)
+                .viewExpandedText(PRESTO_VIEW_EXPANDED_TEXT_MARKER)
+                .owner(owner)
+                .parameters(parameters)
+                .build();
     }
 
     public static TableInput getMaterializedViewTableInput(String viewName, String viewOriginalText, String owner, Map<String, String> parameters)
     {
-        return new TableInput()
-                .withName(viewName)
-                .withTableType(VIRTUAL_VIEW.name())
-                .withViewOriginalText(viewOriginalText)
-                .withViewExpandedText(ICEBERG_MATERIALIZED_VIEW_COMMENT)
-                .withOwner(owner)
-                .withParameters(parameters);
+        return TableInput.builder()
+                .name(viewName)
+                .tableType(VIRTUAL_VIEW.name())
+                .viewOriginalText(viewOriginalText)
+                .viewExpandedText(ICEBERG_MATERIALIZED_VIEW_COMMENT)
+                .owner(owner)
+                .parameters(parameters)
+                .build();
     }
 }

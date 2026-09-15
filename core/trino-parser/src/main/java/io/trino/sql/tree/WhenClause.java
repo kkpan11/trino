@@ -17,34 +17,91 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
+
+import static java.util.Objects.requireNonNull;
 
 public class WhenClause
         extends Expression
 {
-    private final Expression operand;
+    /// What this WHEN clause matches on. [Operand] carries a value expression — a boolean for
+    /// searched CASE, an equality target for simple CASE. [Partial] carries a SQL:2023 F262
+    /// predicate fragment evaluated against the surrounding simple-CASE operand.
+    public sealed interface Match
+    {
+        /// The wrapped [Node]; used by tree-walking visitors.
+        Node node();
+    }
+
+    public record Operand(Expression expression)
+            implements Match
+    {
+        public Operand
+        {
+            requireNonNull(expression, "expression is null");
+        }
+
+        @Override
+        public Node node()
+        {
+            return expression;
+        }
+    }
+
+    public record Partial(Predicate predicate)
+            implements Match
+    {
+        public Partial
+        {
+            requireNonNull(predicate, "predicate is null");
+        }
+
+        @Override
+        public Node node()
+        {
+            return predicate;
+        }
+    }
+
+    private final Match match;
     private final Expression result;
 
-    public WhenClause(Expression operand, Expression result)
+    public WhenClause(NodeLocation location, Match match, Expression result)
     {
-        this(Optional.empty(), operand, result);
+        super(location);
+        this.match = requireNonNull(match, "match is null");
+        this.result = requireNonNull(result, "result is null");
     }
 
     public WhenClause(NodeLocation location, Expression operand, Expression result)
     {
-        this(Optional.of(location), operand, result);
+        this(location, new Operand(operand), result);
     }
 
-    private WhenClause(Optional<NodeLocation> location, Expression operand, Expression result)
+    /// SQL:2023 F262 extended-CASE WHEN clause: the match side is a predicate fragment (the
+    /// `<when operand>` production) over the surrounding simple-CASE operand. The LHS is
+    /// supplied implicitly by the enclosing [SimpleCaseExpression].
+    public WhenClause(NodeLocation location, Predicate predicate, Expression result)
     {
-        super(location);
-        this.operand = operand;
-        this.result = result;
+        this(location, new Partial(predicate), result);
     }
 
+    public Match getMatch()
+    {
+        return match;
+    }
+
+    /// Returns the value-expression match side — a boolean condition for searched CASE, or an
+    /// equality target for simple CASE. Throws when this clause carries an F262 predicate fragment
+    /// instead.
+    ///
+    /// @deprecated Prefer [#getMatch()] and pattern-match on the [Match] variant.
+    @Deprecated
     public Expression getOperand()
     {
-        return operand;
+        if (match instanceof Operand operand) {
+            return operand.expression();
+        }
+        throw new IllegalStateException("WhenClause is a predicate-fragment match, not an operand: " + match);
     }
 
     public Expression getResult()
@@ -61,7 +118,7 @@ public class WhenClause
     @Override
     public List<Node> getChildren()
     {
-        return ImmutableList.of(operand, result);
+        return ImmutableList.of(match.node(), result);
     }
 
     @Override
@@ -75,14 +132,13 @@ public class WhenClause
         }
 
         WhenClause that = (WhenClause) o;
-        return Objects.equals(operand, that.operand) &&
-                Objects.equals(result, that.result);
+        return match.equals(that.match) && result.equals(that.result);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(operand, result);
+        return Objects.hash(match, result);
     }
 
     @Override

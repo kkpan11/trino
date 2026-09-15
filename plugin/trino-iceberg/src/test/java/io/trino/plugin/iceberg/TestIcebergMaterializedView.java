@@ -16,19 +16,25 @@ package io.trino.plugin.iceberg;
 import io.trino.Session;
 import io.trino.metastore.HiveMetastore;
 import io.trino.metastore.Table;
-import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
+import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.sql.tree.ExplainType;
+import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
 
+import java.nio.file.Path;
 import java.util.Map;
-import java.util.Optional;
 
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.iceberg.IcebergQueryRunner.ICEBERG_CATALOG;
+import static io.trino.plugin.iceberg.IcebergTestUtils.getHiveMetastore;
+import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.apache.iceberg.BaseMetastoreTableOperations.METADATA_LOCATION_PROP;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
+@Execution(SAME_THREAD) // Uses file metastore sharing location between catalogs
 public class TestIcebergMaterializedView
         extends BaseIcebergMaterializedViewTest
 {
@@ -39,18 +45,26 @@ public class TestIcebergMaterializedView
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        QueryRunner queryRunner = IcebergQueryRunner.builder()
+        Session icebergSession = testSessionBuilder()
+                .setCatalog(ICEBERG_CATALOG)
+                .setSchema("tpch")
                 .build();
+        QueryRunner queryRunner = DistributedQueryRunner.builder(icebergSession).build();
         try {
-            metastore = ((IcebergConnector) queryRunner.getCoordinator().getConnector(ICEBERG_CATALOG)).getInjector()
-                    .getInstance(HiveMetastoreFactory.class)
-                    .createMetastore(Optional.empty());
+            Path baseDataDir = queryRunner.getCoordinator().getBaseDataDir();
+            queryRunner.installPlugin(new TestingIcebergPlugin(baseDataDir));
+            queryRunner.createCatalog("iceberg", "iceberg", Map.of(
+                    "iceberg.catalog.type", "TESTING_FILE_METASTORE",
+                    // Intentionally sharing the file metastore directory with Hive
+                    "hive.metastore.catalog.dir", "local:///iceberg-catalog",
+                    "iceberg.hive-catalog-name", "hive"));
+
+            metastore = getHiveMetastore(queryRunner);
 
             queryRunner.createCatalog("iceberg2", "iceberg", Map.of(
                     "iceberg.catalog.type", "TESTING_FILE_METASTORE",
-                    "hive.metastore.catalog.dir", queryRunner.getCoordinator().getBaseDataDir().resolve("iceberg2-catalog").toString(),
-                    "iceberg.hive-catalog-name", "hive",
-                    "fs.hadoop.enabled", "true"));
+                    "hive.metastore.catalog.dir", "local:///iceberg2-catalog",
+                    "iceberg.hive-catalog-name", "hive"));
 
             secondIceberg = Session.builder(queryRunner.getDefaultSession())
                     .setCatalog("iceberg2")
@@ -58,15 +72,20 @@ public class TestIcebergMaterializedView
 
             queryRunner.createCatalog("iceberg_legacy_mv", "iceberg", Map.of(
                     "iceberg.catalog.type", "TESTING_FILE_METASTORE",
-                    "hive.metastore.catalog.dir", queryRunner.getCoordinator().getBaseDataDir().resolve("iceberg_data").toString(),
+                    // Intentionally sharing the file metastore directory with Iceberg
+                    "hive.metastore.catalog.dir", "local:///iceberg-catalog",
                     "iceberg.hive-catalog-name", "hive",
-                    "iceberg.materialized-views.hide-storage-table", "false",
-                    "fs.hadoop.enabled", "true"));
+                    "iceberg.materialized-views.hide-storage-table", "false"));
 
             queryRunner.execute(secondIceberg, "CREATE SCHEMA " + secondIceberg.getSchema().orElseThrow());
 
+            queryRunner.installPlugin(new TpchPlugin());
+            queryRunner.createCatalog("tpch", "tpch");
+
             queryRunner.installPlugin(createMockConnectorPlugin());
             queryRunner.createCatalog("mock", "mock");
+
+            queryRunner.execute("CREATE SCHEMA tpch");
         }
         catch (Throwable e) {
             closeAllSuppress(e, queryRunner);
@@ -78,7 +97,7 @@ public class TestIcebergMaterializedView
     @Override
     protected String getSchemaDirectory()
     {
-        return "local:///tpch";
+        return "local:///iceberg-catalog/tpch";
     }
 
     @Override
@@ -98,9 +117,10 @@ public class TestIcebergMaterializedView
         assertUpdate(secondIceberg, createTable, 1); // this one will be used by MV
         assertUpdate(defaultIceberg, createTable, 1); // this one exists so that it can be mistakenly treated as the base table
 
-        assertUpdate(defaultIceberg, """
-                            CREATE MATERIALIZED VIEW iceberg.tpch.mv_on_iceberg2
-                            AS SELECT sum(value) AS s FROM iceberg2.tpch.common_base_table
+        assertUpdate(defaultIceberg,
+                """
+                CREATE MATERIALIZED VIEW iceberg.tpch.mv_on_iceberg2
+                AS SELECT sum(value) AS s FROM iceberg2.tpch.common_base_table
                 """);
 
         // The MV is initially stale

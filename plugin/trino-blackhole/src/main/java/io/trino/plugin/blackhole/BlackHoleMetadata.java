@@ -22,6 +22,7 @@ import io.airlift.units.Duration;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorAnalyzeMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
@@ -34,6 +35,7 @@ import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.ConnectorViewDefinition;
+import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SaveMode;
@@ -53,16 +55,20 @@ import io.trino.spi.type.Type;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.plugin.blackhole.BlackHoleConnector.DISTRIBUTED_ON;
@@ -136,9 +142,7 @@ public class BlackHoleMetadata
     }
 
     @Override
-    public void finishStatisticsCollection(ConnectorSession session, ConnectorTableHandle tableHandle, Collection<ComputedStatistics> computedStatistics)
-    {
-    }
+    public void finishStatisticsCollection(ConnectorSession session, ConnectorTableHandle tableHandle, Collection<ComputedStatistics> computedStatistics) {}
 
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
@@ -185,15 +189,46 @@ public class BlackHoleMetadata
     @Override
     public Iterator<TableColumnsMetadata> streamTableColumns(ConnectorSession session, SchemaTablePrefix prefix)
     {
-        return tables.values().stream()
+        throw new UnsupportedOperationException("The deprecated streamTableColumns is not supported because streamRelationColumns is implemented instead");
+    }
+
+    @Override
+    public Iterator<RelationColumnsMetadata> streamRelationColumns(
+            ConnectorSession session,
+            Optional<String> schemaName,
+            UnaryOperator<Set<SchemaTableName>> relationFilter)
+    {
+        Map<SchemaTableName, RelationColumnsMetadata> relationColumns = new HashMap<>();
+        SchemaTablePrefix prefix = schemaName.map(SchemaTablePrefix::new).orElseGet(SchemaTablePrefix::new);
+
+        tables.values().stream()
                 .filter(table -> prefix.matches(table.toSchemaTableName()))
-                .map(handle -> TableColumnsMetadata.forTable(handle.toSchemaTableName(), handle.toTableMetadata().getColumns()))
+                .map(BlackHoleTableHandle::toTableMetadata)
+                .forEach(columnsMetadata -> {
+                    SchemaTableName name = columnsMetadata.getTable();
+                    relationColumns.put(name, RelationColumnsMetadata.forTable(name, columnsMetadata.getColumns()));
+                });
+
+        for (Entry<SchemaTableName, ConnectorViewDefinition> entry : getViews(session, schemaName).entrySet()) {
+            relationColumns.put(entry.getKey(), RelationColumnsMetadata.forView(entry.getKey(), entry.getValue().getColumns()));
+        }
+
+        return relationFilter.apply(relationColumns.keySet()).stream()
+                .map(relationColumns::get)
                 .iterator();
     }
 
     @Override
-    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column)
+    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
     {
+        if (position instanceof ColumnPosition.First) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding columns with FIRST clause");
+        }
+        if (position instanceof ColumnPosition.After) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding columns with AFTER clause");
+        }
+        verify(position instanceof ColumnPosition.Last, "ColumnPosition must be instance of Last");
+
         BlackHoleTableHandle table = (BlackHoleTableHandle) tableHandle;
         List<BlackHoleColumnHandle> columns = ImmutableList.<BlackHoleColumnHandle>builderWithExpectedSize(table.columnHandles().size() + 1)
                 .addAll(table.columnHandles())
@@ -343,8 +378,11 @@ public class BlackHoleMetadata
 
         if (((splitCount > 0) || (pagesPerSplit > 0) || (rowsPerPage > 0)) &&
                 ((splitCount == 0) || (pagesPerSplit == 0) || (rowsPerPage == 0))) {
-            throw new TrinoException(INVALID_TABLE_PROPERTY, format("All properties [%s, %s, %s] must be set if any are set",
-                    SPLIT_COUNT_PROPERTY, PAGES_PER_SPLIT_PROPERTY, ROWS_PER_PAGE_PROPERTY));
+            throw new TrinoException(INVALID_TABLE_PROPERTY, format(
+                    "All properties [%s, %s, %s] must be set if any are set",
+                    SPLIT_COUNT_PROPERTY,
+                    PAGES_PER_SPLIT_PROPERTY,
+                    ROWS_PER_PAGE_PROPERTY));
         }
 
         Duration pageProcessingDelay = (Duration) tableMetadata.getProperties().get(PAGE_PROCESSING_DELAY);
@@ -403,13 +441,16 @@ public class BlackHoleMetadata
     }
 
     @Override
-    public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, RetryMode retryMode)
+    public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, Map<Integer, Collection<ColumnHandle>> updateCaseColumns, RetryMode retryMode)
     {
         return new BlackHoleMergeTableHandle((BlackHoleTableHandle) tableHandle);
     }
 
     @Override
-    public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle, List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics) {}
+    public Optional<ConnectorOutputMetadata> finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle, List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    {
+        return Optional.empty();
+    }
 
     @Override
     public void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle) {}
@@ -430,13 +471,19 @@ public class BlackHoleMetadata
     @Override
     public List<SchemaTableName> listViews(ConnectorSession session, Optional<String> schemaName)
     {
-        return ImmutableList.copyOf(views.keySet());
+        return schemaName.map(schema -> views.keySet().stream()
+                        .filter(view -> view.getSchemaName().equals(schema))
+                        .collect(toImmutableList()))
+                .orElseGet(() -> ImmutableList.copyOf(views.keySet()));
     }
 
     @Override
     public Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, Optional<String> schemaName)
     {
-        return ImmutableMap.copyOf(views);
+        return schemaName.map(schema -> views.entrySet().stream()
+                        .filter(view -> view.getKey().getSchemaName().equals(schema))
+                        .collect(toImmutableMap(Entry::getKey, Entry::getValue)))
+                .orElseGet(() -> ImmutableMap.copyOf(views));
     }
 
     @Override

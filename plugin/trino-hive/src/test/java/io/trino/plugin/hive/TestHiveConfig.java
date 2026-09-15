@@ -20,6 +20,8 @@ import io.airlift.units.DataSize.Unit;
 import io.airlift.units.Duration;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
@@ -29,7 +31,6 @@ import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDe
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
-import static io.trino.plugin.hive.HiveConfig.CONFIGURATION_HIVE_PARTITION_PROJECTION_ENABLED;
 import static io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.APPEND;
 import static io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE;
 import static io.trino.plugin.hive.util.TestHiveUtil.nonDefaultTimeZone;
@@ -42,6 +43,7 @@ public class TestHiveConfig
         assertRecordedDefaults(recordDefaults(HiveConfig.class)
                 .setSingleStatementWritesOnly(false)
                 .setMaxSplitSize(DataSize.of(64, Unit.MEGABYTE))
+                .setParquetMaxSplitSize(DataSize.of(120, Unit.MEGABYTE))
                 .setMaxPartitionsPerScan(1_000_000)
                 .setMaxPartitionsForEagerLoad(100_000)
                 .setMaxOutstandingSplits(3_000)
@@ -50,8 +52,6 @@ public class TestHiveConfig
                 .setPerTransactionMetastoreCacheMaximumSize(1000)
                 .setMinPartitionBatchSize(10)
                 .setMaxPartitionBatchSize(100)
-                .setMaxInitialSplits(200)
-                .setMaxInitialSplitSize(DataSize.of(32, Unit.MEGABYTE))
                 .setSplitLoaderConcurrency(64)
                 .setMaxSplitsPerSecond(null)
                 .setDomainCompactionThreshold(1000)
@@ -64,7 +64,7 @@ public class TestHiveConfig
                 .setMaxPartitionDropsPerQuery(100_000)
                 .setRecursiveDirWalkerEnabled(false)
                 .setIgnoreAbsentPartitions(false)
-                .setHiveStorageFormat(HiveStorageFormat.ORC)
+                .setHiveStorageFormat(HiveStorageFormat.PARQUET)
                 .setHiveCompressionCodec(HiveCompressionOption.GZIP)
                 .setRespectTableFormat(true)
                 .setImmutablePartitions(false)
@@ -74,7 +74,6 @@ public class TestHiveConfig
                 .setSortedWritingEnabled(true)
                 .setPropagateTableScanSortingProperties(false)
                 .setMaxPartitionsPerWriter(100)
-                .setWriteValidationThreads(16)
                 .setValidateBucketing(true)
                 .setParallelPartitionedBucketedWrites(true)
                 .setTextMaxLineLength(DataSize.of(100, Unit.MEGABYTE))
@@ -87,7 +86,7 @@ public class TestHiveConfig
                 .setSkipTargetCleanupOnRollback(false)
                 .setBucketExecutionEnabled(true)
                 .setTableStatisticsEnabled(true)
-                .setOptimizeMismatchedBucketCount(false)
+                .setOptimizeMismatchedBucketCount(true)
                 .setWritesToNonManagedTablesEnabled(false)
                 .setCreatesOfNonManagedTablesEnabled(true)
                 .setPartitionStatisticsSampleSize(100)
@@ -99,6 +98,7 @@ public class TestHiveConfig
                 .setFileStatusCacheExpireAfterWrite(new Duration(1, TimeUnit.MINUTES))
                 .setFileStatusCacheMaxRetainedSize(DataSize.of(1, GIGABYTE))
                 .setFileStatusCacheTables(ImmutableList.of())
+                .setFileStatusCacheExcludedTables(ImmutableList.of())
                 .setPerTransactionFileStatusCacheMaxRetainedSize(DataSize.of(100, MEGABYTE))
                 .setTranslateHiveViews(false)
                 .setLegacyHiveViewTranslation(false)
@@ -117,16 +117,23 @@ public class TestHiveConfig
                 .setDeltaLakeCatalogName(null)
                 .setHudiCatalogName(null)
                 .setAutoPurge(false)
-                .setPartitionProjectionEnabled(false)
-                .setS3StorageClassFilter(S3StorageClassFilter.READ_ALL));
+                .setPartitionProjectionEnabled(true)
+                .setS3GlacierFilter(S3GlacierFilter.READ_ALL)
+                .setMetadataParallelism(8)
+                .setMetadataVirtualThreadsEnabled(true)
+                .setProtobufDescriptorsLocation(null)
+                .setProtobufDescriptorsCacheRefreshInterval(new Duration(1, TimeUnit.DAYS))
+                .setProtobufDescriptorsCacheMaxSize(64));
     }
 
     @Test
     public void testExplicitPropertyMappings()
+            throws IOException
     {
         Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("hive.single-statement-writes", "true")
                 .put("hive.max-split-size", "256MB")
+                .put("hive.parquet.max-split-size", "200MB")
                 .put("hive.max-partitions-per-scan", "123")
                 .put("hive.max-partitions-for-eager-load", "122")
                 .put("hive.max-outstanding-splits", "10")
@@ -135,8 +142,6 @@ public class TestHiveConfig
                 .put("hive.per-transaction-metastore-cache-maximum-size", "500")
                 .put("hive.metastore.partition-batch-size.min", "1")
                 .put("hive.metastore.partition-batch-size.max", "1000")
-                .put("hive.max-initial-splits", "10")
-                .put("hive.max-initial-split-size", "16MB")
                 .put("hive.split-loader-concurrency", "1")
                 .put("hive.max-splits-per-second", "1")
                 .put("hive.domain-compaction-threshold", "42")
@@ -152,7 +157,6 @@ public class TestHiveConfig
                 .put("hive.create-empty-bucket-files", "true")
                 .put("hive.delete-schema-locations-fallback", "true")
                 .put("hive.max-partitions-per-writers", "222")
-                .put("hive.write-validation-threads", "11")
                 .put("hive.validate-bucketing", "false")
                 .put("hive.parallel-partitioned-bucketed-writes", "false")
                 .put("hive.force-local-scheduling", "true")
@@ -172,7 +176,7 @@ public class TestHiveConfig
                 .put("hive.sorted-writing", "false")
                 .put("hive.propagate-table-scan-sorting-properties", "true")
                 .put("hive.table-statistics-enabled", "false")
-                .put("hive.optimize-mismatched-bucket-count", "true")
+                .put("hive.optimize-mismatched-bucket-count", "false")
                 .put("hive.non-managed-table-writes-enabled", "true")
                 .put("hive.non-managed-table-creates-enabled", "false")
                 .put("hive.partition-statistics-sample-size", "1234")
@@ -182,6 +186,7 @@ public class TestHiveConfig
                 .put("hive.temporary-staging-directory-path", "updated")
                 .put("hive.delegate-transactional-managed-table-location-to-metastore", "true")
                 .put("hive.file-status-cache-tables", "foo.bar1, foo.bar2")
+                .put("hive.file-status-cache.excluded-tables", "bar.baz1")
                 .put("hive.file-status-cache.max-retained-size", "1000B")
                 .put("hive.file-status-cache-expire-time", "30m")
                 .put("hive.per-transaction-file-status-cache.max-retained-size", "42B")
@@ -202,13 +207,19 @@ public class TestHiveConfig
                 .put("hive.delta-lake-catalog-name", "delta")
                 .put("hive.hudi-catalog-name", "hudi")
                 .put("hive.auto-purge", "true")
-                .put(CONFIGURATION_HIVE_PARTITION_PROJECTION_ENABLED, "true")
-                .put("hive.s3.storage-class-filter", "READ_NON_GLACIER_AND_RESTORED")
+                .put("hive.partition-projection-enabled", "false")
+                .put("hive.s3-glacier-filter", "READ_NON_GLACIER_AND_RESTORED")
+                .put("hive.metadata.parallelism", "10")
+                .put("hive.metadata.virtual-threads-enabled", "false")
+                .put("hive.protobuf.descriptors.location", "/tmp")
+                .put("hive.protobuf.descriptors.cache.max-size", "8")
+                .put("hive.protobuf.descriptors.cache.refresh-interval", "10s")
                 .buildOrThrow();
 
         HiveConfig expected = new HiveConfig()
                 .setSingleStatementWritesOnly(true)
                 .setMaxSplitSize(DataSize.of(256, Unit.MEGABYTE))
+                .setParquetMaxSplitSize(DataSize.of(200, Unit.MEGABYTE))
                 .setMaxPartitionsPerScan(123)
                 .setMaxPartitionsForEagerLoad(122)
                 .setMaxOutstandingSplits(10)
@@ -217,8 +228,6 @@ public class TestHiveConfig
                 .setPerTransactionMetastoreCacheMaximumSize(500)
                 .setMinPartitionBatchSize(1)
                 .setMaxPartitionBatchSize(1000)
-                .setMaxInitialSplits(10)
-                .setMaxInitialSplitSize(DataSize.of(16, Unit.MEGABYTE))
                 .setSplitLoaderConcurrency(1)
                 .setMaxSplitsPerSecond(1)
                 .setDomainCompactionThreshold(42)
@@ -239,7 +248,6 @@ public class TestHiveConfig
                 .setCreateEmptyBucketFiles(true)
                 .setDeleteSchemaLocationsFallback(true)
                 .setMaxPartitionsPerWriter(222)
-                .setWriteValidationThreads(11)
                 .setValidateBucketing(false)
                 .setParallelPartitionedBucketedWrites(false)
                 .setTextMaxLineLength(DataSize.of(13, Unit.MEGABYTE))
@@ -254,7 +262,7 @@ public class TestHiveConfig
                 .setSortedWritingEnabled(false)
                 .setPropagateTableScanSortingProperties(true)
                 .setTableStatisticsEnabled(false)
-                .setOptimizeMismatchedBucketCount(true)
+                .setOptimizeMismatchedBucketCount(false)
                 .setWritesToNonManagedTablesEnabled(true)
                 .setCreatesOfNonManagedTablesEnabled(false)
                 .setPartitionStatisticsSampleSize(1234)
@@ -264,6 +272,7 @@ public class TestHiveConfig
                 .setTemporaryStagingDirectoryPath("updated")
                 .setDelegateTransactionalManagedTableLocationToMetastore(true)
                 .setFileStatusCacheTables(ImmutableList.of("foo.bar1", "foo.bar2"))
+                .setFileStatusCacheExcludedTables(ImmutableList.of("bar.baz1"))
                 .setFileStatusCacheMaxRetainedSize(DataSize.ofBytes(1000))
                 .setFileStatusCacheExpireAfterWrite(new Duration(30, TimeUnit.MINUTES))
                 .setPerTransactionFileStatusCacheMaxRetainedSize(DataSize.ofBytes(42))
@@ -284,8 +293,13 @@ public class TestHiveConfig
                 .setDeltaLakeCatalogName("delta")
                 .setHudiCatalogName("hudi")
                 .setAutoPurge(true)
-                .setPartitionProjectionEnabled(true)
-                .setS3StorageClassFilter(S3StorageClassFilter.READ_NON_GLACIER_AND_RESTORED);
+                .setPartitionProjectionEnabled(false)
+                .setS3GlacierFilter(S3GlacierFilter.READ_NON_GLACIER_AND_RESTORED)
+                .setMetadataParallelism(10)
+                .setMetadataVirtualThreadsEnabled(false)
+                .setProtobufDescriptorsLocation(Path.of("/tmp"))
+                .setProtobufDescriptorsCacheMaxSize(8)
+                .setProtobufDescriptorsCacheRefreshInterval(new Duration(10, TimeUnit.SECONDS));
 
         assertFullMapping(properties, expected);
     }

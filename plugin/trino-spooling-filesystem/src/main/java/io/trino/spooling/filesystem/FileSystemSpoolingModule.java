@@ -29,8 +29,8 @@ import io.trino.filesystem.s3.S3FileSystemFactory;
 import io.trino.filesystem.s3.S3FileSystemModule;
 import io.trino.filesystem.switching.SwitchingFileSystemFactory;
 import io.trino.filesystem.tracing.TracingFileSystemFactory;
-import io.trino.spi.protocol.SpoolingManager;
-import io.trino.spi.protocol.SpoolingManagerContext;
+import io.trino.spi.spool.SpoolingManager;
+import io.trino.spi.spool.SpoolingManagerContext;
 
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -38,8 +38,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 
 import static com.google.inject.multibindings.MapBinder.newMapBinder;
+import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.concurrent.Threads.threadsNamed;
-import static io.trino.plugin.base.ClosingBinder.closingBinder;
+import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class FileSystemSpoolingModule
         extends AbstractConfigurationAwareModule
@@ -77,6 +78,14 @@ public class FileSystemSpoolingModule
                     .toInstance(Executors.newScheduledThreadPool(1, threadsNamed("segment-pruner-%d")));
 
             closingBinder(binder).registerExecutor(Key.get(ScheduledExecutorService.class, ForSegmentPruner.class));
+        }
+
+        switch (config.getLayout()) {
+            case SIMPLE -> binder.bind(FileSystemLayout.class).to(SimpleFileSystemLayout.class);
+            case PARTITIONED -> {
+                configBinder(binder).bindConfig(PartitionedLayoutConfig.class);
+                binder.bind(FileSystemLayout.class).to(PartitionedFileSystemLayout.class);
+            }
         }
     }
 

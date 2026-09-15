@@ -50,11 +50,11 @@ public class MapColumnWriter
     {
         ColumnarMap columnarMap = ColumnarMap.toColumnarMap(columnChunk.getBlock());
 
-        ImmutableList<DefLevelWriterProvider> defLevelWriterProviders = ImmutableList.<DefLevelWriterProvider>builder()
+        List<DefLevelWriterProvider> defLevelWriterProviders = ImmutableList.<DefLevelWriterProvider>builder()
                 .addAll(columnChunk.getDefLevelWriterProviders())
                 .add(DefLevelWriterProviders.of(columnarMap, maxDefinitionLevel)).build();
 
-        ImmutableList<RepLevelWriterProvider> repLevelIterables = ImmutableList.<RepLevelWriterProvider>builder()
+        List<RepLevelWriterProvider> repLevelIterables = ImmutableList.<RepLevelWriterProvider>builder()
                 .addAll(columnChunk.getRepLevelWriterProviders())
                 .add(RepLevelWriterProviders.of(columnarMap, maxRepetitionLevel)).build();
 
@@ -77,9 +77,17 @@ public class MapColumnWriter
     }
 
     @Override
-    public long getBufferedBytes()
+    public long getEstimatedBufferedBytes(CompressionStats compressionStats)
     {
-        return keyWriter.getBufferedBytes() + valueWriter.getBufferedBytes();
+        return keyWriter.getEstimatedBufferedBytes(compressionStats) + valueWriter.getEstimatedBufferedBytes(compressionStats);
+    }
+
+    @Override
+    public CompressionStats getCompressionStats()
+    {
+        CompressionStats keyStats = keyWriter.getCompressionStats();
+        CompressionStats valueStats = valueWriter.getCompressionStats();
+        return keyStats.add(valueStats);
     }
 
     @Override

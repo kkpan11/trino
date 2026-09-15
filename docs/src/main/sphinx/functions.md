@@ -12,12 +12,12 @@ Refer to the following sections for further details:
 In addition, Trino supports implementation of [custom
 functions](/develop/functions) or [custom table
 functions](/develop/table-functions) provided by a plugin, and creation of
-user-defined functions as [SQL routines](/routines).
+[](/udf).
 
 ## Functions by name
 
 If you are looking for a specific function or operator by name use
-[](/sql/show-functions), or refer the to the following resources:
+[](/sql/show-functions), or refer to the following resources:
 
 :::{toctree}
 :maxdepth: 1
@@ -32,6 +32,7 @@ functions/list-by-topic
 :maxdepth: 1
 
 Aggregate           <functions/aggregate>
+AI                  <functions/ai>
 Array               <functions/array>
 Binary              <functions/binary>
 Bitwise             <functions/bitwise>
@@ -39,6 +40,7 @@ Color               <functions/color>
 Comparison          <functions/comparison>
 Conditional         <functions/conditional>
 Conversion          <functions/conversion>
+DataSketches        <functions/datasketches>
 Date and time       <functions/datetime>
 Decimal             <functions/decimal>
 Geospatial          <functions/geospatial>
@@ -51,6 +53,7 @@ Machine learning    <functions/ml>
 Map                 <functions/map>
 Math                <functions/math>
 Quantile digest     <functions/qdigest>
+Row                 <functions/row>
 Regular expression  <functions/regexp>
 Session             <functions/session>
 Set Digest          <functions/setdigest>
@@ -61,5 +64,6 @@ Teradata            <functions/teradata>
 T-Digest            <functions/tdigest>
 URL                 <functions/url>
 UUID                <functions/uuid>
+Variant             <functions/variant>
 Window              <functions/window>
 ```

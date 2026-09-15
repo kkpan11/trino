@@ -16,9 +16,9 @@ package io.trino.spi.type;
 import io.airlift.slice.XxHash64;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
@@ -48,6 +48,7 @@ import static java.lang.invoke.MethodHandles.lookup;
 public final class TimeType
         extends AbstractLongType
 {
+    public static final String NAME = "time";
     private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION = extractOperatorDeclaration(TimeType.class, lookup(), long.class);
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
@@ -72,7 +73,7 @@ public final class TimeType
 
     private TimeType(int precision)
     {
-        super(new TypeSignature(StandardTypes.TIME, TypeSignatureParameter.numericParameter(precision)));
+        super(new TypeDescriptor(NAME, TypeParameter.numericParameter(precision)));
         this.precision = precision;
     }
 
@@ -90,13 +91,19 @@ public final class TimeType
     }
 
     @Override
+    public String getDisplayName()
+    {
+        return NAME + "(" + precision + ")";
+    }
+
+    @Override
     public TypeOperatorDeclaration getTypeOperatorDeclaration(TypeOperators typeOperators)
     {
         return TYPE_OPERATOR_DECLARATION;
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public Object getObjectValue(Block block, int position)
     {
         if (block.isNull(position)) {
             return null;
@@ -108,7 +115,7 @@ public final class TimeType
     @Override
     public Optional<Range> getRange()
     {
-        return Optional.of(new Range(0, PICOSECONDS_PER_DAY));
+        return Optional.of(new Range(0L, PICOSECONDS_PER_DAY));
     }
 
     @Override
@@ -135,7 +142,8 @@ public final class TimeType
     private static long readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
     }
@@ -143,28 +151,28 @@ public final class TimeType
     @ScalarOperator(READ_VALUE)
     private static void writeFlat(
             long value,
-            byte[] fixedSizeSlice,
-            int fixedSizeOffset,
-            byte[] unusedVariableSizeSlice,
-            int unusedVariableSizeOffset)
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         LONG_HANDLE.set(fixedSizeSlice, fixedSizeOffset, value);
     }
 
     @ScalarOperator(EQUAL)
-    public static boolean equalOperator(long left, long right)
+    private static boolean equalOperator(long left, long right)
     {
         return left == right;
     }
 
     @ScalarOperator(HASH_CODE)
-    public static long hashCodeOperator(long value)
+    private static long hashCodeOperator(long value)
     {
         return AbstractLongType.hash(value);
     }
 
     @ScalarOperator(XX_HASH_64)
-    public static long xxHash64Operator(long value)
+    private static long xxHash64Operator(long value)
     {
         return XxHash64.hash(value);
     }
@@ -176,13 +184,13 @@ public final class TimeType
     }
 
     @ScalarOperator(LESS_THAN)
-    public static boolean lessThan(long left, long right)
+    private static boolean lessThan(long left, long right)
     {
         return left < right;
     }
 
     @ScalarOperator(LESS_THAN_OR_EQUAL)
-    public static boolean lessThanOrEqual(long left, long right)
+    private static boolean lessThanOrEqual(long left, long right)
     {
         return left <= right;
     }

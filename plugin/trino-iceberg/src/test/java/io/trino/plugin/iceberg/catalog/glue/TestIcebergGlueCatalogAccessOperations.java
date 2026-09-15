@@ -19,6 +19,7 @@ import com.google.common.collect.Multiset;
 import io.airlift.log.Logger;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.trino.Session;
+import io.trino.plugin.hive.FlociS3AndGlue;
 import io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod;
 import io.trino.plugin.hive.metastore.glue.GlueMetastoreStats;
 import io.trino.plugin.iceberg.IcebergConnector;
@@ -30,7 +31,6 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 
@@ -50,7 +50,10 @@ import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_TABLE;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.GET_TABLES;
 import static io.trino.plugin.hive.metastore.glue.GlueMetastoreMethod.UPDATE_TABLE;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.COLLECT_EXTENDED_STATISTICS_ON_WRITE;
+import static io.trino.plugin.iceberg.TableType.ALL_ENTRIES;
+import static io.trino.plugin.iceberg.TableType.ALL_MANIFESTS;
 import static io.trino.plugin.iceberg.TableType.DATA;
+import static io.trino.plugin.iceberg.TableType.ENTRIES;
 import static io.trino.plugin.iceberg.TableType.FILES;
 import static io.trino.plugin.iceberg.TableType.HISTORY;
 import static io.trino.plugin.iceberg.TableType.MANIFESTS;
@@ -69,11 +72,6 @@ import static java.util.stream.Collectors.toCollection;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-/*
- * The test currently uses AWS Default Credential Provider Chain,
- * See https://docs.aws.amazon.com/sdk-for-java/v1/developer-guide/credentials.html#credentials-default
- * on ways to set your AWS credentials which will be needed to run this test.
- */
 @Execution(SAME_THREAD)
 public class TestIcebergGlueCatalogAccessOperations
         extends AbstractTestQueryFramework
@@ -89,20 +87,21 @@ public class TestIcebergGlueCatalogAccessOperations
     protected QueryRunner createQueryRunner()
             throws Exception
     {
+        FlociS3AndGlue floci = closeAfterClass(new FlociS3AndGlue());
+        String bucketName = "test-iceberg-glue-access-operations-" + randomNameSuffix();
+        floci.createBucket(bucketName);
         DistributedQueryRunner queryRunner = IcebergQueryRunner.builder(testSchema)
                 .addCoordinatorProperty("optimizer.experimental-max-prefetched-information-schema-prefixes", Integer.toString(MAX_PREFIXES_COUNT))
                 .addIcebergProperty("iceberg.catalog.type", "glue")
-                .addIcebergProperty("hive.metastore.glue.default-warehouse-dir", "local:///glue")
-                .setSchemaInitializer(SchemaInitializer.builder().withSchemaName(testSchema).build())
+                .addIcebergProperty("hive.metastore.glue.default-warehouse-dir", "s3://%s/".formatted(bucketName))
+                .addIcebergProperty("fs.s3.enabled", "true")
+                .addIcebergProperties(floci.s3AndGlueProperties())
+                .setSchemaInitializer(SchemaInitializer.builder()
+                        .withSchemaName(testSchema)
+                        .build())
                 .build();
         glueStats = ((IcebergConnector) queryRunner.getCoordinator().getConnector("iceberg")).getInjector().getInstance(GlueMetastoreStats.class);
         return queryRunner;
-    }
-
-    @AfterAll
-    public void cleanUpSchema()
-    {
-        getQueryRunner().execute("DROP SCHEMA " + testSchema);
     }
 
     @Test
@@ -160,8 +159,7 @@ public class TestIcebergGlueCatalogAccessOperations
                     ImmutableMultiset.<GlueMetastoreMethod>builder()
                             .addCopies(GET_DATABASE, 2)
                             .add(CREATE_TABLE)
-                            .addCopies(GET_TABLE, 5)
-                            .add(UPDATE_TABLE)
+                            .addCopies(GET_TABLE, 2)
                             .build());
         }
         finally {
@@ -282,7 +280,7 @@ public class TestIcebergGlueCatalogAccessOperations
 
             assertGlueMetastoreApiInvocations("REFRESH MATERIALIZED VIEW test_refresh_mview_view",
                     ImmutableMultiset.<GlueMetastoreMethod>builder()
-                            .addCopies(GET_TABLE, 4)
+                            .addCopies(GET_TABLE, 6)
                             .add(UPDATE_TABLE)
                             .build());
         }
@@ -324,11 +322,11 @@ public class TestIcebergGlueCatalogAccessOperations
             // getting relations with their types, like some tools do
             assertGlueMetastoreApiInvocations(
                     """
-                            SELECT table_name, IF(mv.name IS NOT NULL, 'MATERIALIZED VIEW', table_type) AS table_type
-                            FROM information_schema.tables t
-                            JOIN system.metadata.materialized_views mv ON t.table_schema = mv.schema_name AND t.table_name = mv.name
-                            WHERE t.table_schema = CURRENT_SCHEMA AND mv.catalog_name = CURRENT_CATALOG
-                            """,
+                    SELECT table_name, IF(mv.name IS NOT NULL, 'MATERIALIZED VIEW', table_type) AS table_type
+                    FROM information_schema.tables t
+                    JOIN system.metadata.materialized_views mv ON t.table_schema = mv.schema_name AND t.table_name = mv.name
+                    WHERE t.table_schema = CURRENT_SCHEMA AND mv.catalog_name = CURRENT_CATALOG
+                    """,
                     ImmutableMultiset.<GlueMetastoreMethod>builder()
                             .addCopies(GET_TABLES, 2)
                             .build());
@@ -445,6 +443,12 @@ public class TestIcebergGlueCatalogAccessOperations
                             .add(GET_TABLE)
                             .build());
 
+            // select from $all_manifests
+            assertGlueMetastoreApiInvocations("SELECT * FROM \"test_select_snapshots$all_manifests\"",
+                    ImmutableMultiset.<GlueMetastoreMethod>builder()
+                            .add(GET_TABLE)
+                            .build());
+
             // select from $manifests
             assertGlueMetastoreApiInvocations("SELECT * FROM \"test_select_snapshots$manifests\"",
                     ImmutableMultiset.<GlueMetastoreMethod>builder()
@@ -463,6 +467,18 @@ public class TestIcebergGlueCatalogAccessOperations
                             .add(GET_TABLE)
                             .build());
 
+            // select from $all_entries
+            assertGlueMetastoreApiInvocations("SELECT * FROM \"test_select_snapshots$all_entries\"",
+                    ImmutableMultiset.<GlueMetastoreMethod>builder()
+                            .add(GET_TABLE)
+                            .build());
+
+            // select from $entries
+            assertGlueMetastoreApiInvocations("SELECT * FROM \"test_select_snapshots$entries\"",
+                    ImmutableMultiset.<GlueMetastoreMethod>builder()
+                            .add(GET_TABLE)
+                            .build());
+
             // select from $properties
             assertGlueMetastoreApiInvocations("SELECT * FROM \"test_select_snapshots$properties\"",
                     ImmutableMultiset.<GlueMetastoreMethod>builder()
@@ -475,12 +491,13 @@ public class TestIcebergGlueCatalogAccessOperations
                             .add(GET_TABLE)
                             .build());
 
-            assertQueryFails("SELECT * FROM \"test_select_snapshots$materialized_view_storage\"",
+            assertQueryFails(
+                    "SELECT * FROM \"test_select_snapshots$materialized_view_storage\"",
                     "Table '" + testSchema + ".test_select_snapshots\\$materialized_view_storage' not found");
 
             // This test should get updated if a new system table is added.
             assertThat(TableType.values())
-                    .containsExactly(DATA, HISTORY, METADATA_LOG_ENTRIES, SNAPSHOTS, MANIFESTS, PARTITIONS, FILES, PROPERTIES, REFS, MATERIALIZED_VIEW_STORAGE);
+                    .containsExactly(DATA, HISTORY, METADATA_LOG_ENTRIES, SNAPSHOTS, ALL_MANIFESTS, MANIFESTS, PARTITIONS, FILES, ALL_ENTRIES, ENTRIES, PROPERTIES, REFS, MATERIALIZED_VIEW_STORAGE);
         }
         finally {
             getQueryRunner().execute("DROP TABLE IF EXISTS test_select_snapshots");

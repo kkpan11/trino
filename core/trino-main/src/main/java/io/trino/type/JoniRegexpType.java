@@ -18,9 +18,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 
 import static io.trino.operator.scalar.JoniRegexpCasts.joniRegexp;
 
@@ -32,11 +31,17 @@ public class JoniRegexpType
 
     public JoniRegexpType()
     {
-        super(new TypeSignature(NAME), JoniRegexp.class);
+        super(new TypeDescriptor(NAME), JoniRegexp.class);
     }
 
     @Override
-    public Object getObjectValue(ConnectorSession session, Block block, int position)
+    public String getDisplayName()
+    {
+        return NAME;
+    }
+
+    @Override
+    public Object getObjectValue(Block block, int position)
     {
         if (block.isNull(position)) {
             return null;

@@ -17,9 +17,16 @@ import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
+import io.airlift.units.Duration;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+
+import java.util.concurrent.TimeUnit;
+
+import static java.lang.Math.max;
 
 public class AzureFileSystemConfig
 {
@@ -37,6 +44,14 @@ public class AzureFileSystemConfig
     private int maxWriteConcurrency = 8;
     private DataSize maxSingleUploadSize = DataSize.of(4, Unit.MEGABYTE);
     private Integer maxHttpRequests = 2 * Runtime.getRuntime().availableProcessors();
+    /**
+     * Matches {@link reactor.netty.resources.ConnectionProvider#DEFAULT_POOL_MAX_CONNECTIONS}
+     */
+    private int maxHttpConnections = 2 * max(Runtime.getRuntime().availableProcessors(), 8);
+    private Duration connectionPoolMaxIdleTime = new Duration(5, TimeUnit.MINUTES);
+    private Duration httpRequestTimeout = new Duration(10, TimeUnit.MINUTES);
+    private String applicationId = "Trino";
+    private boolean multipartWriteEnabled;
 
     @NotNull
     public AuthType getAuthType()
@@ -126,6 +141,77 @@ public class AzureFileSystemConfig
     public AzureFileSystemConfig setMaxHttpRequests(int maxHttpRequests)
     {
         this.maxHttpRequests = maxHttpRequests;
+        return this;
+    }
+
+    @Min(16)
+    @Max(1024)
+    public int getMaxHttpConnections()
+    {
+        return maxHttpConnections;
+    }
+
+    @Config("azure.max-http-connections")
+    @ConfigDescription("Maximum number of pooled HTTP connections")
+    public AzureFileSystemConfig setMaxHttpConnections(int maxHttpConnections)
+    {
+        this.maxHttpConnections = maxHttpConnections;
+        return this;
+    }
+
+    @NotNull
+    public Duration getConnectionPoolMaxIdleTime()
+    {
+        return connectionPoolMaxIdleTime;
+    }
+
+    @Config("azure.connection-pool-max-idle-time")
+    @ConfigDescription("Maximum idle time for pooled HTTP connections")
+    public AzureFileSystemConfig setConnectionPoolMaxIdleTime(Duration connectionPoolMaxIdleTime)
+    {
+        this.connectionPoolMaxIdleTime = connectionPoolMaxIdleTime;
+        return this;
+    }
+
+    @NotNull
+    public Duration getHttpRequestTimeout()
+    {
+        return httpRequestTimeout;
+    }
+
+    @Config("azure.http-request-timeout")
+    @ConfigDescription("Maximum time for an HTTP request to complete")
+    public AzureFileSystemConfig setHttpRequestTimeout(Duration httpRequestTimeout)
+    {
+        this.httpRequestTimeout = httpRequestTimeout;
+        return this;
+    }
+
+    @Size(max = 50)
+    @NotNull
+    public String getApplicationId()
+    {
+        return applicationId;
+    }
+
+    @Config("azure.application-id")
+    @ConfigDescription("Suffix that will be added to HTTP User-Agent header to identify the application")
+    public AzureFileSystemConfig setApplicationId(String applicationId)
+    {
+        this.applicationId = applicationId;
+        return this;
+    }
+
+    public boolean isMultipartWriteEnabled()
+    {
+        return multipartWriteEnabled;
+    }
+
+    @Config("azure.multipart-write-enabled")
+    @ConfigDescription("Enable multipart writes for large files")
+    public AzureFileSystemConfig setMultipartWriteEnabled(boolean multipartWriteEnabled)
+    {
+        this.multipartWriteEnabled = multipartWriteEnabled;
         return this;
     }
 }

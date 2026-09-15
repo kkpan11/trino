@@ -47,16 +47,17 @@ import static io.trino.plugin.opa.TestHelpers.createMockHttpClient;
 import static io.trino.plugin.opa.TestHelpers.createOpaAuthorizer;
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestOpaBatchAccessControlFiltering
+final class TestOpaBatchAccessControlFiltering
 {
     @Test
-    public void testFilterViewQueryOwnedBy()
+    void testFilterViewQueryOwnedBy()
     {
         Identity identityOne = Identity.ofUser("user-one");
         Identity identityTwo = Identity.ofUser("user-two");
         Identity identityThree = Identity.ofUser("user-three");
 
-        String expectedRequest = """
+        String expectedRequest =
+                """
                 {
                     "operation": "FilterViewQueryOwnedBy",
                     "filterResources": [
@@ -79,7 +80,8 @@ public class TestOpaBatchAccessControlFiltering
                             }
                         }
                     ]
-                }""";
+                }\
+                """;
         assertAccessControlMethodBehaviour(
                 (accessControl, systemSecurityContext, identities) -> accessControl.filterViewQueryOwnedBy(systemSecurityContext.getIdentity(), identities),
                 identityOne,
@@ -89,9 +91,10 @@ public class TestOpaBatchAccessControlFiltering
     }
 
     @Test
-    public void testFilterCatalogs()
+    void testFilterCatalogs()
     {
-        String expectedRequest = """
+        String expectedRequest =
+                """
                 {
                     "operation": "FilterCatalogs",
                     "filterResources": [
@@ -111,15 +114,17 @@ public class TestOpaBatchAccessControlFiltering
                             }
                         }
                     ]
-                }""";
+                }\
+                """;
         assertAccessControlMethodBehaviour(
                 OpaAccessControl::filterCatalogs, "catalog_one", "catalog_two", "catalog_three", ImmutableSet.of(expectedRequest));
     }
 
     @Test
-    public void testFilterSchemas()
+    void testFilterSchemas()
     {
-        String expectedRequest = """
+        String expectedRequest =
+                """
                 {
                     "operation": "FilterSchemas",
                     "filterResources": [
@@ -142,7 +147,8 @@ public class TestOpaBatchAccessControlFiltering
                             }
                         }
                     ]
-                }""";
+                }\
+                """;
         assertAccessControlMethodBehaviour(
                 (accessControl, systemSecurityContext, items) -> accessControl.filterSchemas(systemSecurityContext, "my_catalog", items),
                 "schema_one",
@@ -152,9 +158,10 @@ public class TestOpaBatchAccessControlFiltering
     }
 
     @Test
-    public void testFilterTables()
+    void testFilterTables()
     {
-        String expectedRequest = """
+        String expectedRequest =
+                """
                 {
                     "operation": "FilterTables",
                     "filterResources": [
@@ -180,7 +187,8 @@ public class TestOpaBatchAccessControlFiltering
                             }
                         }
                     ]
-                }""";
+                }\
+                """;
         assertAccessControlMethodBehaviour(
                 (accessControl, systemSecurityContext, items) -> accessControl.filterTables(systemSecurityContext, "my_catalog", items),
                 new SchemaTableName("schema_one", "table_one"),
@@ -190,7 +198,7 @@ public class TestOpaBatchAccessControlFiltering
     }
 
     @Test
-    public void testFilterColumns()
+    void testFilterColumns()
     {
         SchemaTableName tableOne = SchemaTableName.schemaTableName("my_schema", "table_one");
         SchemaTableName tableTwo = SchemaTableName.schemaTableName("my_schema", "table_two");
@@ -208,7 +216,7 @@ public class TestOpaBatchAccessControlFiltering
                         TEST_IDENTITY,
                         parsedRequest -> {
                             String tableName = parsedRequest.at("/input/action/filterResources/0/table/tableName").asText();
-                            String responseContents = switch(tableName) {
+                            String responseContents = switch (tableName) {
                                 case "table_one" -> "{\"result\": [0, 1]}";
                                 case "table_two" -> "{\"result\": [1]}";
                                 default -> "{\"result\": []}";
@@ -222,7 +230,8 @@ public class TestOpaBatchAccessControlFiltering
                 requestedColumns);
 
         Set<String> expectedRequests = Stream.of("table_one", "table_two", "table_three")
-                .map(tableName -> """
+                .map(tableName ->
+                        """
                         {
                             "operation": "FilterColumns",
                             "filterResources": [
@@ -247,7 +256,7 @@ public class TestOpaBatchAccessControlFiltering
     }
 
     @Test
-    public void testEmptyFilterColumns()
+    void testEmptyFilterColumns()
     {
         assertFilteringAccessControlMethodDoesNotSendRequests(
                 accessControl -> accessControl.filterColumns(TEST_SECURITY_CONTEXT, "my_catalog", ImmutableMap.of()).entrySet());
@@ -263,7 +272,7 @@ public class TestOpaBatchAccessControlFiltering
     }
 
     @Test
-    public void testFilterColumnErrorCases()
+    void testFilterColumnErrorCases()
     {
         assertAccessControlMethodThrowsForIllegalResponses(
                 accessControl -> accessControl.filterColumns(
@@ -275,9 +284,10 @@ public class TestOpaBatchAccessControlFiltering
     }
 
     @Test
-    public void testFilterFunctions()
+    void testFilterFunctions()
     {
-        String expectedRequest = """
+        String expectedRequest =
+                """
                 {
                     "operation": "FilterFunctions",
                     "filterResources": [
@@ -303,7 +313,8 @@ public class TestOpaBatchAccessControlFiltering
                             }
                         }
                     ]
-                }""";
+                }\
+                """;
         assertAccessControlMethodBehaviour(
                 (authorizer, systemSecurityContext, items) -> authorizer.filterFunctions(systemSecurityContext, "my_catalog", items),
                 new SchemaFunctionName("my_schema", "function_one"),
@@ -313,7 +324,11 @@ public class TestOpaBatchAccessControlFiltering
     }
 
     private static <T> void assertAccessControlMethodBehaviour(
-            FunctionalHelpers.Function3<OpaAccessControl, SystemSecurityContext, Set<T>, Collection<T>> method, T obj1, T obj2, T obj3, Set<String> expectedRequests)
+            FunctionalHelpers.Function3<OpaAccessControl, SystemSecurityContext, Set<T>, Collection<T>> method,
+            T obj1,
+            T obj2,
+            T obj3,
+            Set<String> expectedRequests)
     {
         assertFilteringAccessControlMethodDoesNotSendRequests(accessControl -> method.apply(accessControl, TEST_SECURITY_CONTEXT, ImmutableSet.of()));
 
@@ -347,7 +362,7 @@ public class TestOpaBatchAccessControlFiltering
 
     private static void assertFilteringAccessControlMethodDoesNotSendRequests(Function<OpaAccessControl, Collection<?>> method)
     {
-        InstrumentedHttpClient httpClientForEmptyRequest = createMockHttpClient(OPA_SERVER_BATCH_URI, request -> OK_RESPONSE);
+        InstrumentedHttpClient httpClientForEmptyRequest = createMockHttpClient(OPA_SERVER_BATCH_URI, _ -> OK_RESPONSE);
         assertThat(method.apply(createOpaAuthorizer(batchFilteringOpaConfig(), httpClientForEmptyRequest))).isEmpty();
         assertThat(httpClientForEmptyRequest.getRequests()).isEmpty();
     }

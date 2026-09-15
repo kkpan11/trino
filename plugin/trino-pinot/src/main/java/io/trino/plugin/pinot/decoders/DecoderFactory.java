@@ -34,9 +34,7 @@ import static java.util.Objects.requireNonNull;
 
 public class DecoderFactory
 {
-    private DecoderFactory()
-    {
-    }
+    private DecoderFactory() {}
 
     public static Decoder createDecoder(Type type)
     {
@@ -68,7 +66,7 @@ public class DecoderFactory
         if (type instanceof VarbinaryType) {
             return new VarbinaryDecoder();
         }
-        if (type.getTypeSignature().getBase().equals(JSON)) {
+        if (type.getBaseName().equals(JSON)) {
             return new JsonDecoder();
         }
         return new VarcharDecoder();

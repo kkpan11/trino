@@ -62,7 +62,7 @@ public class SparkExpressionBuilder
             case SparkExpressionBaseParser.MINUS -> ArithmeticBinaryExpression.Operator.SUBTRACT;
             case SparkExpressionBaseParser.ASTERISK -> ArithmeticBinaryExpression.Operator.MULTIPLY;
             case SparkExpressionBaseParser.SLASH -> ArithmeticBinaryExpression.Operator.DIVIDE;
-            case SparkExpressionBaseParser.PERCENT -> ArithmeticBinaryExpression.Operator.MODULUS;
+            case SparkExpressionBaseParser.PERCENT -> ArithmeticBinaryExpression.Operator.MODULO;
             case SparkExpressionBaseParser.AMPERSAND -> ArithmeticBinaryExpression.Operator.BITWISE_AND;
             case SparkExpressionBaseParser.CIRCUMFLEX -> ArithmeticBinaryExpression.Operator.BITWISE_XOR;
             default -> throw new UnsupportedOperationException("Unsupported operator: " + operator.getText());
@@ -81,7 +81,7 @@ public class SparkExpressionBuilder
     @Override
     public SparkExpression visitAnd(SparkExpressionBaseParser.AndContext context)
     {
-        verify(context.booleanExpression().size() == 2, "AND operator expects two expressions: " + context.booleanExpression());
+        verify(context.booleanExpression().size() == 2, "AND operator expects two expressions: %s", context.booleanExpression());
         return new LogicalExpression(
                 LogicalExpression.Operator.AND,
                 visit(context.left, SparkExpression.class),
@@ -91,7 +91,7 @@ public class SparkExpressionBuilder
     @Override
     public Object visitOr(SparkExpressionBaseParser.OrContext context)
     {
-        verify(context.booleanExpression().size() == 2, "AND operator expects two expressions: " + context.booleanExpression());
+        verify(context.booleanExpression().size() == 2, "AND operator expects two expressions: %s", context.booleanExpression());
         return new LogicalExpression(
                 LogicalExpression.Operator.OR,
                 visit(context.left, SparkExpression.class),
@@ -121,20 +121,13 @@ public class SparkExpressionBuilder
     private static ComparisonExpression.Operator getComparisonOperator(Token symbol)
     {
         return switch (symbol.getType()) {
-            case SparkExpressionBaseLexer.EQ:
-                yield ComparisonExpression.Operator.EQUAL;
-            case SparkExpressionBaseLexer.NEQ:
-                yield ComparisonExpression.Operator.NOT_EQUAL;
-            case SparkExpressionBaseLexer.LT:
-                yield ComparisonExpression.Operator.LESS_THAN;
-            case SparkExpressionBaseLexer.LTE:
-                yield ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
-            case SparkExpressionBaseLexer.GT:
-                yield ComparisonExpression.Operator.GREATER_THAN;
-            case SparkExpressionBaseLexer.GTE:
-                yield ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
-            default:
-                throw new IllegalArgumentException("Unsupported operator: " + symbol.getText());
+            case SparkExpressionBaseLexer.EQ -> ComparisonExpression.Operator.EQUAL;
+            case SparkExpressionBaseLexer.NEQ -> ComparisonExpression.Operator.NOT_EQUAL;
+            case SparkExpressionBaseLexer.LT -> ComparisonExpression.Operator.LESS_THAN;
+            case SparkExpressionBaseLexer.LTE -> ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
+            case SparkExpressionBaseLexer.GT -> ComparisonExpression.Operator.GREATER_THAN;
+            case SparkExpressionBaseLexer.GTE -> ComparisonExpression.Operator.GREATER_THAN_OR_EQUAL;
+            default -> throw new IllegalArgumentException("Unsupported operator: " + symbol.getText());
         };
     }
 
@@ -246,7 +239,7 @@ public class SparkExpressionBuilder
     {
         BASE,
         ESCAPED,
-        UNICODE_SEQUENCE
+        UNICODE_SEQUENCE,
     }
 
     @Override

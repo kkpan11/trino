@@ -17,9 +17,7 @@ import com.google.common.collect.ImmutableList;
 import io.trino.plugin.hive.PartitionUpdate.UpdateMode;
 import io.trino.spi.Page;
 
-import java.io.Closeable;
 import java.util.Optional;
-import java.util.function.Consumer;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -32,7 +30,6 @@ public class HiveWriter
     private final String fileName;
     private final String writePath;
     private final String targetPath;
-    private final Consumer<HiveWriter> onCommit;
     private final HiveWriterStats hiveWriterStats;
 
     private long rowCount;
@@ -45,7 +42,6 @@ public class HiveWriter
             String fileName,
             String writePath,
             String targetPath,
-            Consumer<HiveWriter> onCommit,
             HiveWriterStats hiveWriterStats)
     {
         this.fileWriter = requireNonNull(fileWriter, "fileWriter is null");
@@ -54,7 +50,6 @@ public class HiveWriter
         this.fileName = requireNonNull(fileName, "fileName is null");
         this.writePath = requireNonNull(writePath, "writePath is null");
         this.targetPath = requireNonNull(targetPath, "targetPath is null");
-        this.onCommit = requireNonNull(onCommit, "onCommit is null");
         this.hiveWriterStats = requireNonNull(hiveWriterStats, "hiveWriterStats is null");
     }
 
@@ -73,11 +68,6 @@ public class HiveWriter
         return fileWriter.getMemoryUsage();
     }
 
-    public long getRowCount()
-    {
-        return rowCount;
-    }
-
     public void append(Page dataPage)
     {
         // getRegionSizeInBytes for each row can be expensive; use getRetainedSizeInBytes for estimation
@@ -87,11 +77,9 @@ public class HiveWriter
         inputSizeInBytes += dataPage.getSizeInBytes();
     }
 
-    public Closeable commit()
+    public RollbackAction commit()
     {
-        Closeable rollbackAction = fileWriter.commit();
-        onCommit.accept(this);
-        return rollbackAction;
+        return fileWriter.commit();
     }
 
     long getValidationCpuNanos()

@@ -60,6 +60,7 @@ public class TestSplitPruning
     {
         return DeltaLakeQueryRunner.builder()
                 .addDeltaProperty("delta.register-table-procedure.enabled", "true")
+                .addDeltaProperty("fs.hadoop.enabled", "true")
                 .build();
     }
 
@@ -253,7 +254,7 @@ public class TestSplitPruning
 
     /**
      * Test that partition filter that cannot be converted to a {@link io.trino.spi.predicate.Domain}
-     * gets applied (and not forgotten) when there is another, Domain-convertable filter.
+     * gets applied (and not forgotten) when there is another, Domain-convertible filter.
      * <p>
      * In the past, that caused a significant decrease in the connector's performance.
      */

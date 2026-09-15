@@ -49,7 +49,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.airlift.testing.Assertions.assertGreaterThan;
 import static io.airlift.units.DataSize.succinctBytes;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
@@ -152,7 +151,7 @@ public class TestWindowOperator
         MaterializedResult expected = expectedBuilder.build();
 
         List<Page> pages = toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages);
-        assertGreaterThan(pages.size(), 1, "Expected more than one output page");
+        assertThat(pages).as("Expected more than one output page").hasSizeGreaterThan(1);
 
         MaterializedResult actual = toMaterializedResult(driverContext.getSession(), expected.getTypes(), pages);
         assertThat(actual.getMaterializedRows()).isEqualTo(expected.getMaterializedRows());
@@ -487,7 +486,7 @@ public class TestWindowOperator
         for (int i = 0; i < 500_000; ++i) {
             pageBuilder.row("b", 0L);
         }
-        List<Page> input = pageBuilder.build();
+        Page input = pageBuilder.buildPage();
 
         WindowOperatorFactory operatorFactory = createFactoryUnbounded(
                 ImmutableList.of(VARCHAR, BIGINT),
@@ -500,16 +499,16 @@ public class TestWindowOperator
                 false);
 
         DriverContext driverContext = createDriverContext(1000);
-        Operator operator = operatorFactory.createOperator(driverContext);
-        operatorFactory.noMoreOperators();
-        assertThat(operator.isFinished()).isFalse();
-        assertThat(operator.needsInput()).isTrue();
-        operator.addInput(input.get(0));
-        operator.finish();
-        operator.getOutput();
+        try (Operator operator = operatorFactory.createOperator(driverContext)) {
+            operatorFactory.noMoreOperators();
+            assertThat(operator.isFinished()).isFalse();
+            assertThat(operator.needsInput()).isTrue();
+            operator.addInput(input);
+            operator.finish();
+            operator.getOutput();
 
-        // this should not fail
-        operator.close();
+            // implicit close should not fail
+        }
     }
 
     @Test

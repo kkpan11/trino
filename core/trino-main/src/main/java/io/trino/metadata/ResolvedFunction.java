@@ -15,14 +15,14 @@ package io.trino.metadata;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import io.trino.spi.connector.CatalogHandle;
+import io.trino.connector.CatalogHandle;
 import io.trino.spi.function.BoundSignature;
 import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.function.FunctionId;
 import io.trino.spi.function.FunctionKind;
 import io.trino.spi.function.FunctionNullability;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.type.TypeDescriptor;
 
 import java.util.Map;
 import java.util.Set;
@@ -36,8 +36,9 @@ public record ResolvedFunction(
         FunctionId functionId,
         FunctionKind functionKind,
         boolean deterministic,
+        boolean neverFails,
         FunctionNullability functionNullability,
-        Map<TypeSignature, Type> typeDependencies,
+        Map<TypeDescriptor, Type> typeDependencies,
         Set<ResolvedFunction> functionDependencies)
 {
     public ResolvedFunction

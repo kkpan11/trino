@@ -15,6 +15,10 @@ Trino supports three functions for querying JSON data:
 is based on the same mechanism of exploring and processing JSON input using
 JSON path.
 
+For convenient navigation of `JSON`-typed columns, Trino also supports the
+{ref}`JSON simplified accessor <json-simplified-accessor>` syntax, which lets
+you reach into JSON values using familiar dotted/subscripted notation.
+
 Trino also supports two functions for generating JSON data --
 {ref}`json_array<json-array>`, and {ref}`json_object<json-object>`.
 
@@ -570,10 +574,61 @@ Let `<path>` return a sequence of three JSON arrays:
 <path>.size() --> 3, 4, 2
 ```
 
-### Limitations
+### Trino-specific behavior
 
-The SQL standard describes the `datetime()` JSON path item method and the
-`like_regex()` JSON path predicate. Trino does not support them.
+Without a format template, `datetime()` parses the value as the most specific of
+`DATE` / `TIME(p)` / `TIME(p) WITH TIME ZONE` / `TIMESTAMP(p)` /
+`TIMESTAMP(p) WITH TIME ZONE` based on the value's shape.
+
+The `datetime()` format template is a string of fields and literal text.
+Fields are case-insensitive and consume digits from the value; literal text
+must match the value verbatim.
+
+Supported fields:
+
+| Field            | Width | Description                                              |
+|------------------|-------|----------------------------------------------------------|
+| `YYYY` `YYY` `YY` `Y` | 4 / 3 / 2 / 1 | Year. Widths below 4 are prefixed with the leading digits of the reference year `1970` (e.g. `YY=24` → `1924`). |
+| `RRRR` `RR`      | 4 / 2 | Rounded year. With width 2, values 0–49 map to the current century, 50–99 to the previous century. |
+| `MM`             | 2     | Month, 1–12. |
+| `DD`             | 2     | Day of month, 1–31. |
+| `DDD`            | 3     | Day of year, 1–366. Mutually exclusive with `MM` / `DD`. |
+| `HH24`           | 2     | Hour of day, 0–23. Mutually exclusive with `HH` / `HH12` / `A.M.` / `P.M.`. |
+| `HH` `HH12`      | 2     | Hour of half-day, 1–12. Requires `A.M.` or `P.M.`. |
+| `A.M.` `P.M.`    | 4     | Half-day marker. Case-insensitive (both `a.m.` and `A.M.` are accepted). Requires `HH` or `HH12`. |
+| `MI`             | 2     | Minute, 0–59. |
+| `SS`             | 2     | Second, 0–59. |
+| `SSSSS`          | 5     | Second of day, 0–86399. Mutually exclusive with `HH` / `HH12` / `HH24` / `MI` / `SS` / `A.M.` / `P.M.`. |
+| `FF1`–`FF9`      | 1–9   | Fractional seconds, with the given digit width. |
+| `TZH`            | 3     | Time zone hour offset with sign, e.g. `+05` or `-08`. |
+| `TZM`            | 2     | Time zone minute offset, 0–59. Requires `TZH`. |
+
+Literal text is any of the single-character delimiters `-`, `.`, `/`, `,`,
+`'`, `;`, `:`, ` ` (space), or a double-quoted string (escape an embedded `"`
+as `""`). Two adjacent delimiters are rejected; a delimiter next to a quoted
+literal is fine.
+
+Examples:
+
+```text
+YYYY-MM-DD                          -> 2024-01-02
+YYYY-MM-DD"T"HH24:MI:SS.FF3         -> 2024-01-02T12:34:56.789
+HH12:MI:SS A.M.                     -> 09:30:00 P.M.
+YYYY-MM-DD HH24:MI:SS.FF3 TZH:TZM   -> 2024-01-02 12:34:56.789 +05:30
+```
+
+Trino additionally accepts `FF10`, `FF11`, and `FF12` to match Trino's maximum
+`TIME(p)` / `TIMESTAMP(p)` precision of 12 — these widths are a Trino
+extension and may not be portable across other SQL/JSON implementations.
+
+`like_regex()` accepts the standard SQL/XQuery flags (`i`, `m`, `s`, `x`).
+
+#### Limitations
+
+- `\s`, `\d`, and `\w` match only ASCII characters, not the full Unicode
+  character classes defined by XQuery.
+- The XML name-class escapes `\i`, `\I`, `\c`, and `\C` are not supported.
+- The `x` extended-mode flag may not be supported in all configurations.
 
 (json-path-modes)=
 ### JSON path modes
@@ -600,7 +655,7 @@ The following table shows the differences between the two modes.
   - ERROR
   - The array is automatically unnested, and the operation is performed on
     each array element.
-* - Performing an operation which requires an array on an non-array, e.g.:
+* - Performing an operation which requires an array on a non-array, e.g.:
 
     `$[0]`, `$[*]`, `$.size()`
   - ERROR
@@ -648,6 +703,111 @@ method, the item `"a"` causes type mismatch.
 ```text
 <path>.floor() --> ERROR
 ```
+
+(json-simplified-accessor)=
+## JSON simplified accessor
+
+For convenient navigation of a `JSON`-typed value, Trino lets you write
+dotted/subscripted accessor chains that read as if you were navigating a row
+or array. The receiver of the chain must be a value of declared type `JSON`;
+each step extends a JSON path applied to that value.
+
+| Syntax | Equivalent to |
+|--------|---------------|
+| `j.name` | `JSON_QUERY(j, 'lax $.name' WITH CONDITIONAL ARRAY WRAPPER NULL ON EMPTY NULL ON ERROR)` |
+| `j."FooBar"` | `JSON_QUERY(j, 'lax $."FooBar"' …)` — delimited identifier, case-sensitive |
+| `j.'foo bar'` | same as the delimited form |
+| `j[3]` | `JSON_QUERY(j, 'lax $[3]' …)` — integer subscript |
+| `j[*]` | `JSON_QUERY(j, 'lax $[*]' …)` — array wildcard |
+| `j.*` (in `SELECT`) | `JSON_QUERY(j, 'lax $.*' …)` — member wildcard, produces one `VARCHAR` column |
+| `j.name.bigint()` | `JSON_VALUE(j, 'lax $.name' RETURNING BIGINT …)` — item method |
+| `j.payload.amount.decimal(18,2)` | `JSON_VALUE(j, 'lax $.payload.amount' RETURNING DECIMAL(18,2) …)` |
+
+Member, index, wildcard, and item-method steps compose freely:
+`j.rows[1].cells[*]`, `j.items[0].label`, `j.payload.*`, etc.
+
+### Case sensitivity
+
+Member-name identifiers are matched case-sensitively against the JSON keys
+they reference:
+
+* `j.Foo` matches the member literally named `Foo`.
+* `j."Foo"` and `j.'Foo'` are the same path — both quote the member name.
+
+This is different from regular SQL identifier handling, where `j.foo` and
+`j.FOO` refer to the same column. The JSON path language is case-sensitive,
+and the simplified accessor preserves the source case so JSON keys match
+exactly as written.
+
+Item-method names (`bigint`, `time`, `decimal`, …) are SQL identifiers and
+remain case-insensitive — `j.x.BIGINT()`, `j.x.Bigint()`, and `j.x.bigint()`
+all resolve to the same item method.
+
+### Item methods
+
+Item methods cover the same set of casts that `json_value`'s `RETURNING`
+clause does. The supported names and the type they return:
+
+| Method | Returns |
+|--------|---------|
+| `bigint()` | `BIGINT` |
+| `boolean()` | `BOOLEAN` |
+| `date()` | `DATE` |
+| `decimal()` | `DECIMAL` (unparameterized) |
+| `decimal(p)` | `DECIMAL(p)` |
+| `decimal(p, s)` | `DECIMAL(p, s)` |
+| `integer()` | `INTEGER` |
+| `number()` | `DOUBLE` |
+| `string()` | `VARCHAR` |
+| `time()` | `TIME(3)` |
+| `time(p)` | `TIME(p)` |
+| `time_tz()` | `TIME(3) WITH TIME ZONE` |
+| `time_tz(p)` | `TIME(p) WITH TIME ZONE` |
+| `timestamp()` | `TIMESTAMP(3)` |
+| `timestamp(p)` | `TIMESTAMP(p)` |
+| `timestamp_tz()` | `TIMESTAMP(3) WITH TIME ZONE` |
+| `timestamp_tz(p)` | `TIMESTAMP(p) WITH TIME ZONE` |
+
+The `ON EMPTY` and `ON ERROR` clauses default to `NULL`.
+
+### Member wildcard in `SELECT`
+
+`SELECT j.*` is shorthand for `SELECT JSON_QUERY(j, 'lax $.*' …)`. It
+produces one `VARCHAR` output column whose value is a JSON array of the
+top-level members of `j`. An optional `AS (column_alias)` may supply the
+output column's name:
+
+```
+SELECT j.* AS (payload) FROM (VALUES (CAST('{"a":1,"b":2}' AS JSON))) AS t(j);
+```
+
+```text
+  payload
+-----------
+ [1,2]
+(1 row)
+```
+
+The same wildcard is also recognized inside subscripted chains in a value-
+expression position, where it expands the path under that prefix:
+`j.payload.*`, `j.items[*]`, `j.items[*].label`, etc.
+
+### Outer scope
+
+The receiver of the chain may reference a column from an outer scope, for
+correlated subqueries:
+
+```
+SELECT (SELECT o.j.foo)
+FROM (VALUES (CAST('{"foo":1}' AS JSON))) AS o(j);
+```
+
+An outer-scope receiver is supported for member access (`o.j.foo`),
+subscripts (`o.j.items[0]`), item methods on a subscripted chain
+(`o.j.items[0].bigint()`), and the member wildcard (`o.j.*`). Item methods
+applied directly to a dotted member chain without an intervening subscript —
+e.g. `o.j.foo.bigint()` — are not supported on outer-scope columns; query
+the column locally or insert an explicit `JSON_VALUE` call in those cases.
 
 (json-exists)=
 ## json_exists
@@ -715,8 +875,8 @@ identifiers are upper-cased. Therefore, it is recommended to use quoted
 identifiers in the `PASSING` clause:
 
 ```text
-'lax $.$KeyName' PASSING nation.name AS KeyName --> ERROR; no passed value found
-'lax $.$KeyName' PASSING nation.name AS "KeyName" --> correct
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS KeyName --> ERROR; no passed value found
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS "KeyName" --> correct
 ```
 
 ### Examples
@@ -837,8 +997,8 @@ identifiers are upper-cased. Therefore, it is recommended to use quoted
 identifiers in the `PASSING` clause:
 
 ```text
-'lax $.$KeyName' PASSING nation.name AS KeyName --> ERROR; no passed value found
-'lax $.$KeyName' PASSING nation.name AS "KeyName" --> correct
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS KeyName --> ERROR; no passed value found
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS "KeyName" --> correct
 ```
 
 The `ARRAY WRAPPER` clause lets you modify the output by wrapping the results
@@ -1033,8 +1193,8 @@ identifiers are upper-cased. Therefore, it is recommended to use quoted
 identifiers in the `PASSING` clause:
 
 ```text
-'lax $.$KeyName' PASSING nation.name AS KeyName --> ERROR; no passed value found
-'lax $.$KeyName' PASSING nation.name AS "KeyName" --> correct
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS KeyName --> ERROR; no passed value found
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS "KeyName" --> correct
 ```
 
 If the path returns an empty sequence, the `ON EMPTY` clause is applied. The
@@ -1053,6 +1213,11 @@ to the `ON ERROR` clause are:
 - Input conversion errors, such as malformed JSON
 - JSON path evaluation errors, e.g. division by zero
 - Returned scalar not convertible to the desired type
+
+The `DEFAULT` expression in `ON EMPTY` and `ON ERROR` is only evaluated when
+the corresponding branch is taken. If evaluation of the `ON EMPTY` default
+itself raises a data exception, the failure cascades to the `ON ERROR` clause.
+Subqueries are not supported in `DEFAULT` expressions.
 
 ### Examples
 
@@ -1137,6 +1302,246 @@ FROM customers
 | 101 | '16'      |
 | 102 | 'missing' |
 | 103 | 'missing' |
+
+
+(json-table)=
+## json_table
+
+The `json_table` clause extracts a table from a JSON value. Use this clause to
+transform JSON data into a relational format, making it easier to query and
+analyze. Use `json_table` in the `FROM` clause of a
+[`SELECT`](select-json-table) statement to create a table from JSON data.
+
+```text
+JSON_TABLE(
+    json_input,
+    json_path [ AS path_name ]
+    [ PASSING value AS parameter_name [, ...] ]
+    COLUMNS (
+        column_definition [, ...] )
+    [ PLAN ( json_table_specific_plan )
+      | PLAN DEFAULT ( json_table_default_plan ) ]
+    [ { ERROR | EMPTY } ON ERROR ]
+)
+```
+
+The `COLUMNS` clause supports the following `column_definition` arguments:
+
+```text
+column_name FOR ORDINALITY
+| column_name type
+    [ FORMAT JSON [ ENCODING { UTF8 | UTF16 | UTF32 } ] ]
+    [ PATH json_path ]
+    [ { WITHOUT | WITH { CONDITIONAL | UNCONDITIONAL } } [ ARRAY ] WRAPPER ]
+    [ { KEEP | OMIT } QUOTES [ ON SCALAR STRING ] ]
+    [ { ERROR | NULL | EMPTY { [ARRAY] | OBJECT } | DEFAULT expression } ON EMPTY ]
+    [ { ERROR | NULL | DEFAULT expression } ON ERROR ]
+| NESTED [ PATH ] json_path [ AS path_name ] COLUMNS ( column_definition [, ...] )
+```
+
+`json_input` is a character string or a binary string. It must contain a single
+JSON item.
+
+`json_path` is a string literal containing the path mode specification and the
+path expression. It follows the syntax rules described in
+[](json-path-syntax-and-semantics).
+
+```text
+'strict ($.price + $.tax)?(@ > 99.9)'
+'lax $[0 to 1].floor()?(@ > 10)'
+```
+
+In the `PASSING` clause, pass values as named parameters that the `json_path`
+expression can reference.
+
+```text
+PASSING orders.totalprice AS o_price,
+        orders.tax % 10 AS o_tax
+```
+
+Use named parameters to reference the values in the path expression. Prefix
+named parameters with `$`.
+
+```text
+'lax $?(@.price > $o_price || @.tax > $o_tax)'
+```
+
+You can also pass JSON values in the `PASSING` clause. Use `FORMAT JSON` to
+specify the format and `ENCODING` to specify the encoding:
+
+```text
+PASSING orders.json_desc FORMAT JSON AS o_desc,
+        orders.binary_record FORMAT JSON ENCODING UTF16 AS o_rec
+```
+
+The `json_path` value is case-sensitive. The SQL identifiers are uppercase. Use
+quoted identifiers in the `PASSING` clause:
+
+```text
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS KeyName --> ERROR; no passed value found
+'lax $.keyvalue()?(@.name == $KeyName).value' PASSING nation.name AS "KeyName" --> correct
+```
+
+The `PLAN` clause specifies how to join columns from different paths. Use
+`OUTER` or `INNER` to define how to join parent paths with their child paths.
+Use `CROSS` or `UNION` to join siblings.
+
+`COLUMNS` defines the schema of your table. Each `column_definition` specifies
+how to extract and format your `json_input` value into a relational column.
+
+`PLAN` is an optional clause to control how to process and join nested JSON
+data.
+
+`ON ERROR` specifies how to handle processing errors. `ERROR ON ERROR` throws an
+error. `EMPTY ON ERROR` returns an empty result set.
+
+For each value column with `DEFAULT` in its `ON EMPTY` or `ON ERROR` clause,
+the default expression is only evaluated when the corresponding branch is
+taken, and if the `ON EMPTY` default itself raises a data exception, the
+failure cascades to the `ON ERROR` clause. Subqueries are not supported in
+`json_table` `DEFAULT` expressions.
+
+`column_name` specifies a column name.
+
+`FOR ORDINALITY` adds a row number column to the output table, starting at `1`.
+Specify the column name in the column definition:
+
+```text
+row_num FOR ORDINALITY
+```
+
+`NESTED PATH` extracts data from nested levels of a `json_input` value. Each
+`NESTED PATH` clause can contain `column_definition` values.
+
+The `json_table` function returns a result set that you can use like any other
+table in your queries. You can join the result set with other tables or
+combine multiple arrays from your JSON data.
+
+You can also process nested JSON objects without parsing the data multiple
+times.
+
+Use `json_table` as a lateral join to process JSON data from another table.
+
+### Examples
+
+The following query uses `json_table` to extract values from a JSON array and
+return them as rows in a table with three columns:
+
+```sql
+SELECT
+      *
+FROM
+      json_table(
+                '[
+                  {"id":1,"name":"Africa","wikiDataId":"Q15"},
+                  {"id":2,"name":"Americas","wikiDataId":"Q828"},
+                  {"id":3,"name":"Asia","wikiDataId":"Q48"},
+                  {"id":4,"name":"Europe","wikiDataId":"Q51"}
+                ]',
+                'strict $' COLUMNS (
+                  NESTED PATH 'strict $[*]' COLUMNS (
+                    id integer PATH 'strict $.id',
+                    name varchar PATH 'strict $.name',
+                    wiki_data_id varchar PATH 'strict $."wikiDataId"'
+                  )
+                )
+              );
+```
+
+| id | child     | wiki_data_id  |
+| -- | --------- | ------------- |
+|  1 | Africa    | Q1            |
+|  2 | Americas  | Q828          |
+|  3 | Asia      | Q48           |
+|  4 | Europe    | Q51           |
+
+The following query uses `json_table` to extract values from an array of nested
+JSON objects. It flattens the nested JSON data into a single table. The example
+query processes an array of continent names, where each continent contains an
+array of countries and their populations.
+
+The `NESTED PATH 'lax $[*]'` clause iterates through the continent objects,
+while the `NESTED PATH 'lax $.countries[*]'` iterates through each country
+within each continent. This creates a flat table structure with four rows
+combining each continent with each of its countries. Continent values repeat for
+each of their countries.
+
+```sql
+SELECT
+      *
+FROM
+      json_table(
+                '[
+                    {"continent": "Asia", "countries": [
+                        {"name": "Japan", "population": 125.7},
+                        {"name": "Thailand", "population": 71.6}
+                    ]},
+                    {"continent": "Europe", "countries": [
+                        {"name": "France", "population": 67.4},
+                        {"name": "Germany", "population": 83.2}
+                    ]}
+                ]',
+                'lax $' COLUMNS (
+                    NESTED PATH 'lax $[*]' COLUMNS (
+                        continent varchar PATH 'lax $.continent',
+                        NESTED PATH 'lax $.countries[*]' COLUMNS (
+                            country varchar PATH 'lax $.name',
+                            population double PATH 'lax $.population'
+                        )
+                    )
+                ));
+```
+
+| continent  | country   | population    |
+| ---------- | --------- | ------------- |
+| Asia       | Japan     | 125.7         |
+| Asia       | Thailand  | 71.6          |
+| Europe     | France    | 67.4          |
+| Europe     | Germany   | 83.2          |
+
+The following query uses `PLAN` to specify an `OUTER` join between a parent path
+and a child path:
+
+```sql
+SELECT
+      *
+FROM
+      JSON_TABLE(
+                '[]',
+                'lax $' AS "root_path"
+                COLUMNS(
+                    a varchar(1) PATH 'lax "A"',
+                    NESTED PATH 'lax $[*]' AS "nested_path"
+                            COLUMNS (b varchar(1) PATH 'lax "B"'))
+                PLAN ("root_path" OUTER "nested_path")
+                );
+```
+
+| a    | b    |
+| ---- | ---- |
+| A    | null |
+
+The following query uses `PLAN` to specify an `INNER` join between a parent path
+and a child path:
+
+```sql
+SELECT
+      *
+FROM
+      JSON_TABLE(
+                '[]',
+                'lax $' AS "root_path"
+                COLUMNS(
+                    a varchar(1) PATH 'lax "A"',
+                    NESTED PATH 'lax $[*]' AS "nested_path"
+                            COLUMNS (b varchar(1) PATH 'lax "B"'))
+                PLAN ("root_path" INNER "nested_path")
+                );
+```
+
+| a    | b    |
+| ---- | ---- |
+| null | null |
 
 (json-array)=
 ## json_array
@@ -1591,6 +1996,9 @@ and any interior quotes will not be escaped).
 
 We recommend against using this function. It cannot be fixed without
 impacting existing usages and may be removed in a future release.
+
+Use {ref}`json_query<json-query>` instead with JSONPath array indexing
+syntax, e.g., `json_query(json_array, 'lax $[0]')`.
 :::
 
 Returns the element at the specified index into the `json_array`.

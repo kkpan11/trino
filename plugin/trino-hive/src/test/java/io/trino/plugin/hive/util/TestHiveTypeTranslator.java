@@ -19,6 +19,7 @@ import io.trino.metastore.HiveType;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
@@ -26,7 +27,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
-import static io.airlift.testing.Assertions.assertContains;
 import static io.trino.plugin.hive.util.HiveTypeTranslator.toHiveType;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -39,13 +39,12 @@ import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
-import static io.trino.spi.type.TypeSignature.mapType;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Fail.fail;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestHiveTypeTranslator
 {
@@ -62,7 +61,7 @@ public class TestHiveTypeTranslator
             .put(createDecimalType(5, 3), HiveType.valueOf("decimal(5,3)"))
             .put(VARBINARY, HiveType.HIVE_BINARY)
             .put(new ArrayType(TIMESTAMP_MILLIS), HiveType.valueOf("array<timestamp>"))
-            .put(TESTING_TYPE_MANAGER.getType(mapType(BOOLEAN.getTypeSignature(), VARBINARY.getTypeSignature())), HiveType.valueOf("map<boolean,binary>"))
+            .put(new MapType(BOOLEAN, VARBINARY, TESTING_TYPE_MANAGER.getTypeOperators()), HiveType.valueOf("map<boolean,binary>"))
             .put(RowType.from(List.of(field("col0", INTEGER), field("col1", VARBINARY))), HiveType.valueOf("struct<col0:int,col1:binary>"))
             .buildOrThrow();
 
@@ -84,19 +83,12 @@ public class TestHiveTypeTranslator
 
     private static void assertInvalidTypeTranslation(Type type, ErrorCode errorCode, String message)
     {
-        try {
-            toHiveType(type);
-            fail("expected exception");
-        }
-        catch (TrinoException e) {
-            try {
-                assertThat(e.getErrorCode()).isEqualTo(errorCode);
-                assertContains(e.getMessage(), message);
-            }
-            catch (Throwable failure) {
-                failure.addSuppressed(e);
-                throw failure;
-            }
-        }
+        assertThatThrownBy(() -> toHiveType(type))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(e -> {
+                    TrinoException trinoException = (TrinoException) e;
+                    assertThat(trinoException.getErrorCode()).isEqualTo(errorCode);
+                    assertThat(trinoException).hasMessageContaining(message);
+                });
     }
 }

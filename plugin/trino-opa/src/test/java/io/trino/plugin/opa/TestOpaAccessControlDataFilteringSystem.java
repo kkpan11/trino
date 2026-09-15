@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 @Testcontainers
 @TestInstance(PER_CLASS)
-public class TestOpaAccessControlDataFilteringSystem
+final class TestOpaAccessControlDataFilteringSystem
 {
     @Container
     private static final OpaContainer OPA_CONTAINER = new OpaContainer();
@@ -46,7 +46,8 @@ public class TestOpaAccessControlDataFilteringSystem
     private static final String OPA_ROW_LEVEL_FILTERING_POLICY_NAME = "rowFilters";
     private static final String OPA_COLUMN_MASKING_POLICY_NAME = "columnMask";
     private static final String OPA_BATCH_COLUMN_MASKING_POLICY_NAME = "batchColumnMasks";
-    private static final String SAMPLE_ROW_LEVEL_FILTERING_POLICY = """
+    private static final String SAMPLE_ROW_LEVEL_FILTERING_POLICY =
+            """
             package trino
             import future.keywords.in
             import future.keywords.if
@@ -64,8 +65,10 @@ public class TestOpaAccessControlDataFilteringSystem
                 table_resource.catalogName == "sample_catalog"
                 table_resource.schemaName == "sample_schema"
                 table_resource.tableName == "restricted_table"
-            }""";
-    private static final String SAMPLE_COLUMN_MASKING_POLICY = """
+            }\
+            """;
+    private static final String SAMPLE_COLUMN_MASKING_POLICY =
+            """
             package trino
             import future.keywords.in
             import future.keywords.if
@@ -119,7 +122,7 @@ public class TestOpaAccessControlDataFilteringSystem
     }
 
     @Test
-    public void testRowFilteringEnabled()
+    void testRowFilteringEnabled()
             throws Exception
     {
         setupTrinoWithOpa(
@@ -137,7 +140,7 @@ public class TestOpaAccessControlDataFilteringSystem
     }
 
     @Test
-    public void testRowFilteringDisabledDoesNothing()
+    void testRowFilteringDisabledDoesNothing()
             throws Exception
     {
         setupTrinoWithOpa(
@@ -154,18 +157,18 @@ public class TestOpaAccessControlDataFilteringSystem
     }
 
     @Test
-    public void testColumnMasking()
+    void testColumnMasking()
             throws Exception
     {
         testColumnMasking(
                 new OpaConfig()
-                    .setOpaUri(OPA_CONTAINER.getOpaUriForPolicyPath(OPA_ALLOW_POLICY_NAME))
-                    .setOpaColumnMaskingUri(OPA_CONTAINER.getOpaUriForPolicyPath(OPA_COLUMN_MASKING_POLICY_NAME)));
+                        .setOpaUri(OPA_CONTAINER.getOpaUriForPolicyPath(OPA_ALLOW_POLICY_NAME))
+                        .setOpaColumnMaskingUri(OPA_CONTAINER.getOpaUriForPolicyPath(OPA_COLUMN_MASKING_POLICY_NAME)));
     }
 
     @Test
-    public void testBatchColumnMasking()
-        throws Exception
+    void testBatchColumnMasking()
+            throws Exception
     {
         testColumnMasking(
                 new OpaConfig()
@@ -236,7 +239,7 @@ public class TestOpaAccessControlDataFilteringSystem
     }
 
     @Test
-    public void testColumnMaskingDisabledDoesNothing()
+    void testColumnMaskingDisabledDoesNothing()
             throws Exception
     {
         setupTrinoWithOpa(new OpaConfig().setOpaUri(OPA_CONTAINER.getOpaUriForPolicyPath(OPA_ALLOW_POLICY_NAME)));
@@ -251,7 +254,7 @@ public class TestOpaAccessControlDataFilteringSystem
     }
 
     @Test
-    public void testColumnMaskingAndRowFiltering()
+    void testColumnMaskingAndRowFiltering()
             throws Exception
     {
         setupTrinoWithOpa(
@@ -263,7 +266,8 @@ public class TestOpaAccessControlDataFilteringSystem
         // Admin has no restrictions
         // Any other user can only see rows where "user_type" is not "customer"
         // And cannot see any data for field "user_name"
-        String policy = """
+        String policy =
+                """
                 package trino
                 import future.keywords.in
                 import future.keywords.if
@@ -284,7 +288,8 @@ public class TestOpaAccessControlDataFilteringSystem
                 columnMask := {"expression": "NULL"} if {
                     not is_admin
                     column_resource.columnName == "user_name"
-                }""";
+                }\
+                """;
         OPA_CONTAINER.submitPolicy(policy);
 
         @Language("SQL") String selectUserNameData = "SELECT user_name FROM sample_catalog.sample_schema.restricted_table";
@@ -312,17 +317,17 @@ public class TestOpaAccessControlDataFilteringSystem
     {
         this.runner = QueryRunnerHelper.withOpaConfig(opaConfig);
         MockConnectorFactory connectorFactory = MockConnectorFactory.builder()
-                .withListSchemaNames(session -> ImmutableList.of("sample_schema"))
-                .withListTables((session, schema) -> ImmutableList.<String>builder()
+                .withListSchemaNames(_ -> ImmutableList.of("sample_schema"))
+                .withListTables((_, _) -> ImmutableList.<String>builder()
                         .add("restricted_table")
                         .add("unrestricted_table")
                         .build())
-                .withGetColumns(schemaTableName -> ImmutableList.<ColumnMetadata>builder()
+                .withGetColumns(_ -> ImmutableList.<ColumnMetadata>builder()
                         .add(ColumnMetadata.builder().setName("user_type").setType(VarcharType.VARCHAR).build())
                         .add(ColumnMetadata.builder().setName("user_name").setType(VarcharType.VARCHAR).build())
                         .add(ColumnMetadata.builder().setName("user_phone").setType(IntegerType.INTEGER).build())
                         .build())
-                .withData(schemaTableName -> ImmutableList.<List<?>>builder()
+                .withData(_ -> ImmutableList.<List<?>>builder()
                         .addAll(DUMMY_CUSTOMERS_IN_TABLE.stream().map(customer -> ImmutableList.of("customer", customer, customer.hashCode())).collect(toImmutableSet()))
                         .addAll(DUMMY_INTERNAL_USERS_IN_TABLE.stream().map(internalUser -> ImmutableList.of("internal_user", internalUser, internalUser.hashCode())).collect(toImmutableSet()))
                         .build())

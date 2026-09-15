@@ -25,6 +25,7 @@ import io.trino.metastore.IntegerStatistics;
 import io.trino.metastore.PartitionStatistics;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HiveConfig;
+import io.trino.plugin.hive.statistics.AbstractHiveStatisticsProvider.PartitionsRowCount;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SchemaTableName;
@@ -53,15 +54,14 @@ import static io.trino.metastore.HiveColumnStatistics.createIntegerColumnStatist
 import static io.trino.metastore.HivePartition.UNPARTITIONED_ID;
 import static io.trino.metastore.HiveType.HIVE_LONG;
 import static io.trino.metastore.HiveType.HIVE_STRING;
+import static io.trino.metastore.Partitions.HIVE_DEFAULT_DYNAMIC_PARTITION;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.PARTITION_KEY;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static io.trino.plugin.hive.HiveColumnHandle.createBaseColumn;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_CORRUPTED_COLUMN_STATISTICS;
-import static io.trino.plugin.hive.HivePartitionKey.HIVE_DEFAULT_DYNAMIC_PARTITION;
 import static io.trino.plugin.hive.HivePartitionManager.parsePartition;
 import static io.trino.plugin.hive.HiveTestUtils.SESSION;
 import static io.trino.plugin.hive.HiveTestUtils.getHiveSession;
-import static io.trino.plugin.hive.statistics.AbstractHiveStatisticsProvider.PartitionsRowCount;
 import static io.trino.plugin.hive.statistics.AbstractHiveStatisticsProvider.calculateDataSize;
 import static io.trino.plugin.hive.statistics.AbstractHiveStatisticsProvider.calculateDataSizeForPartitioningKey;
 import static io.trino.plugin.hive.statistics.AbstractHiveStatisticsProvider.calculateDistinctPartitionKeys;
@@ -188,8 +188,7 @@ public class TestMetastoreHiveStatisticsProvider
         validatePartitionStatistics(
                 TABLE,
                 ImmutableMap.of(
-                        PARTITION,
-                        PartitionStatistics.builder()
+                        PARTITION, PartitionStatistics.builder()
                                 .setBasicStatistics(new HiveBasicStatistics(0, 0, 0, 0))
                                 .setColumnStatistics(ImmutableMap.of(COLUMN, createDoubleColumnStatistics(OptionalDouble.of(NaN), OptionalDouble.of(NaN), OptionalLong.empty(), OptionalLong.empty())))
                                 .build()));
@@ -708,12 +707,13 @@ public class TestMetastoreHiveStatisticsProvider
     @Test
     public void testGetTableStatisticsSampling()
     {
-        HiveStatisticsProvider statisticsProvider = new AbstractHiveStatisticsProvider() {
+        HiveStatisticsProvider statisticsProvider = new AbstractHiveStatisticsProvider()
+        {
             @Override
             protected Map<String, PartitionStatistics> getPartitionsStatistics(ConnectorSession session, SchemaTableName table, List<HivePartition> hivePartitions, Set<String> columns)
             {
                 assertThat(table).isEqualTo(TABLE);
-                assertThat(hivePartitions.size()).isEqualTo(1);
+                assertThat(hivePartitions).hasSize(1);
                 return ImmutableMap.of();
             }
         };
@@ -894,7 +894,8 @@ public class TestMetastoreHiveStatisticsProvider
 
     private static PartitionStatistics booleanDistinctValuesCount(OptionalLong trueCount, OptionalLong falseCount, OptionalLong nullsCount)
     {
-        return new PartitionStatistics(HiveBasicStatistics.createEmptyStatistics(),
+        return new PartitionStatistics(
+                HiveBasicStatistics.createEmptyStatistics(),
                 ImmutableMap.of(COLUMN, createBooleanColumnStatistics(trueCount, falseCount, nullsCount)));
     }
 

@@ -34,7 +34,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 
-import static io.trino.spooling.filesystem.FileSystemSpooledSegmentHandle.getExpirationFromLocation;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
@@ -43,25 +42,27 @@ public class FileSystemSegmentPruner
     private final Logger log = Logger.get(FileSystemSegmentPruner.class);
 
     private final TrinoFileSystem fileSystem;
+    private final FileSystemLayout layout;
     private final ScheduledExecutorService executor;
     private final boolean enabled;
     private final Duration interval;
-    private final Location location;
+    private final Location rootLocation;
     private final long batchSize;
     private boolean closed;
 
     private boolean filesAreOrdered = true;
 
     @Inject
-    public FileSystemSegmentPruner(FileSystemSpoolingConfig config, TrinoFileSystemFactory fileSystemFactory, @ForSegmentPruner ScheduledExecutorService executor)
+    public FileSystemSegmentPruner(FileSystemSpoolingConfig config, TrinoFileSystemFactory fileSystemFactory, FileSystemLayout layout, @ForSegmentPruner ScheduledExecutorService executor)
     {
         this.fileSystem = requireNonNull(fileSystemFactory, "fileSystemFactory is null")
                 .create(ConnectorIdentity.ofUser("ignored"));
+        this.layout = requireNonNull(layout, "layout is null");
         this.executor = requireNonNull(executor, "executor is null");
         this.enabled = config.isPruningEnabled();
         this.interval = config.getPruningInterval();
         this.batchSize = config.getPruningBatchSize();
-        this.location = Location.of(config.getLocation());
+        this.rootLocation = Location.of(config.getLocation());
     }
 
     @PostConstruct
@@ -90,17 +91,30 @@ public class FileSystemSegmentPruner
     }
 
     @VisibleForTesting
-    void pruneExpiredBefore(Instant expiredBefore)
+    long pruneExpiredBefore(Instant expiredBefore)
     {
         if (closed) {
-            return;
+            return 0;
         }
+
+        long pruned = 0;
+        for (Location location : layout.searchPaths(rootLocation)) {
+            log.debug("Pruning location: %s", location);
+            pruned += doPrune(expiredBefore, location);
+        }
+        return pruned;
+    }
+
+    private long doPrune(Instant expiredBefore, Location location)
+    {
+        long pruned = 0;
+
         try {
             List<Location> expiredSegments = new ArrayList<>();
             FileIterator iterator = orderDetectingIterator(fileSystem.listFiles(location));
             while (iterator.hasNext()) {
                 FileEntry file = iterator.next();
-                Optional<Instant> handle = getExpirationFromLocation(file.location());
+                Optional<Instant> handle = layout.getExpiration(file.location());
                 // Not a spooled segment
                 if (handle.isEmpty()) {
                     continue;
@@ -109,20 +123,24 @@ public class FileSystemSegmentPruner
                 if (handle.get().isBefore(expiredBefore)) {
                     expiredSegments.add(file.location());
                     if (expiredSegments.size() >= batchSize) {
+                        pruned += expiredSegments.size();
                         pruneExpiredSegments(expiredBefore, expiredSegments);
+                        expiredSegments.clear();
                     }
                 }
                 else if (filesAreOrdered) {
                     // First non expired segment was found, no need to check the rest
                     // since we know that files are lexicographically ordered.
                     pruneExpiredSegments(expiredBefore, expiredSegments);
-                    return;
+                    return pruned + expiredSegments.size();
                 }
             }
             pruneExpiredSegments(expiredBefore, expiredSegments);
+            return pruned + expiredSegments.size();
         }
         catch (IOException e) {
             log.error(e, "Failed to prune segments");
+            return pruned;
         }
     }
 
@@ -135,9 +153,9 @@ public class FileSystemSegmentPruner
         try {
             int batchSize = expiredSegments.size();
 
-            Instant oldest = getExpirationFromLocation(expiredSegments.getFirst())
+            Instant oldest = layout.getExpiration(expiredSegments.getFirst())
                     .orElseThrow(() -> new IllegalStateException("No expiration time found for " + expiredSegments.getFirst()));
-            Instant newest = getExpirationFromLocation(expiredSegments.getLast())
+            Instant newest = layout.getExpiration(expiredSegments.getLast())
                     .orElseThrow(() -> new IllegalStateException("No expiration time found for " + expiredSegments.getLast()));
             fileSystem.deleteFiles(expiredSegments);
             log.info("Pruned %d segments expired before %s [oldest: %s, newest: %s]", batchSize, expiredBefore, oldest, newest);

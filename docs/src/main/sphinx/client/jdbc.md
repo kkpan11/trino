@@ -5,13 +5,20 @@ users to access Trino using Java-based applications, and other non-Java
 applications running in a JVM. Both desktop and server-side applications, such
 as those used for reporting and database development, use the JDBC driver.
 
+The JDBC driver uses the [](/client/client-protocol) over HTTP/HTTPS to
+communicate with the coordinator on the cluster.
+
 ## Requirements
 
 The Trino JDBC driver has the following requirements:
 
-- Java version 8 or higher.
+- Java version 11 or higher. Java 22 or higher is recommended for improved
+  decompression performance.
 - All users that connect to Trino with the JDBC driver must be granted access to
   query tables in the `system.jdbc` schema.
+- Network access over HTTP/HTTPS to the coordinator of the Trino cluster.
+- Network access to the configured object storage, if the
+  [](jdbc-spooling-protocol) is enabled.
 
 The JDBC driver version should be identical to the version of the Trino cluster,
 or newer. Older versions typically work, but only a subset is regularly tested.
@@ -20,7 +27,7 @@ Versions before 350 are not supported.
 (jdbc-installation)=
 ## Installation
 
-Download {maven_download}`jdbc` and add it to the classpath of your Java application.
+Download {download_mc}`jdbc` and add it to the classpath of your Java application.
 
 The driver is also available from Maven Central:
 
@@ -45,14 +52,11 @@ classpath, you'll typically need to restart your application in order to
 recognize the new driver. Then, depending on your application, you
 may need to manually register and configure the driver.
 
-The CLI uses the HTTP protocol and the
-{doc}`Trino client REST API </develop/client-protocol>` to communicate
-with Trino.
-
 ## Registering and configuring the driver
 
 Drivers are commonly loaded automatically by applications once they are added to
-its classpath. If your application does not, such as is the case for some
+the application classpath. If your application does not, such as is the case
+for some
 GUI-based SQL editors, read this section. The steps to register the JDBC driver
 in a UI or on the command line depend upon the specific application you are
 using. Please check your application's documentation.
@@ -139,7 +143,7 @@ may not be specified using both methods.
   - Client tags for selecting resource groups. Example: `abc,xyz`
 * - `path`
   - Set the default [SQL path](/sql/set-path) for the session. Useful for
-    setting a catalog and schema location for [catalog routines](routine-catalog).
+    setting a catalog and schema location for [](udf-catalog).
 * - `traceToken`
   - Trace token for correlating requests across systems.
 * - `source`
@@ -232,6 +236,12 @@ may not be specified using both methods.
     list of key-value pairs. For example, `abc:xyz;example.foo:bar` sets the
     system property `abc` to the value `xyz` and the `foo` property for catalog
     `example` to the value `bar`.
+* - `extraHeaders`
+  - HTTP headers to add to the authenticated HTTP requests, specified as a
+    list of key-value pairs. For example, `X-Trino-Foo:xyz;X-Trino-Bar:bar` 
+    sends the `X-Trino-Foo` header with the value `xyz` and the `X-Trino-Bar`
+    header with the value `bar`. Protocol headers such as `X-Trino-User` cannot be
+    overridden using this parameter.
 * - `externalAuthentication`
   - Set to true if you want to use external authentication via
     [](/security/oauth2). Use a local web browser to authenticate with an
@@ -240,12 +250,17 @@ may not be specified using both methods.
   - Allows the sharing of external authentication tokens between different
     connections for the same authenticated user until the cache is invalidated,
     such as when a client is restarted or when the classloader reloads the JDBC
-    driver. This is disabled by default, with a value of `NONE`. To enable, set
-    the value to `MEMORY`. If the JDBC driver is used in a shared mode by
-    different users, the first registered token is stored and authenticates all
-    users.
+    driver. This is disabled by default, with a value of `NONE`. Set the value
+    to `MEMORY` to cache the token in memory within the same process. Set the
+    value to `SYSTEM` to persist the token to the filesystem (`~/.trino/`),
+    allowing it to be reused across separate CLI or JDBC processes. If the JDBC
+    driver is used in a shared mode by different users, the first registered
+    token is stored and authenticates all users.
 * - `disableCompression`
-  -  Whether compression should be enabled.
+  -  Whether HTTP compression should be disabled. Defaults to `false`.
+* - `disallowLocalRedirect`
+  -  Whether client should reject redirects to localhost, link or site local
+     IP addresses. Defaults to `false`.
 * - `assumeLiteralUnderscoreInMetadataCallsForNonConformingClients`
   - When enabled, the name patterns passed to `DatabaseMetaData` methods are
     treated as underscores. You can use this as a workaround for applications
@@ -261,4 +276,25 @@ may not be specified using both methods.
     `PREPARE <statement>` followed by `EXECUTE <statement>`. This reduces
     network overhead and uses smaller HTTP headers and requires Trino 431 or
     greater.
+* - `encoding`
+  - Set the encoding when using the [spooling protocol](jdbc-spooling-protocol).
+    Valid values are JSON with Zstandard compression, `json+zstd` (recommended),
+    JSON with LZ4 compression `json+lz4`, and uncompressed JSON `json`. By
+    default, the default encoding configured on the cluster is used.
+* - `validateConnection`
+  - Defaults to `false`. If set to `true`, connectivity and credentials are validated 
+    when the connection is created, and when `java.sql.Connection.isValid(int)` is called.
 :::
+
+(jdbc-spooling-protocol)=
+## Spooling protocol
+
+The Trino JDBC driver automatically uses of the spooling protocol to improve
+throughput for client interactions with higher data transfer demands, if the
+[](protocol-spooling) is configured on the cluster.
+
+Optionally use the `encoding` parameter to configure a different desired
+encoding, compared to the default on the cluster.
+
+The JVM process using the JDBC driver must have network access to the spooling
+object storage.

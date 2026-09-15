@@ -60,7 +60,7 @@ import static io.trino.operator.BenchmarkHashAndStreamingAggregationOperators.Co
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.analyzer.TypeDescriptorProvider.fromTypes;
 import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
@@ -118,79 +118,55 @@ public class BenchmarkHashAndStreamingAggregationOperators
             List<Integer> hashChannels;
             int sumChannel;
             switch (groupByTypes) {
-                case "bigint":
+                case "bigint" -> {
                     hashTypes = ImmutableList.of(BIGINT);
                     hashChannels = ImmutableList.of(0);
                     sumChannel = 1;
-                    break;
-
-                case "varchar":
+                }
+                case "varchar" -> {
                     hashTypes = ImmutableList.of(VARCHAR);
                     hashChannels = ImmutableList.of(0);
                     sumChannel = 1;
-                    break;
-
-                case "mixed":
+                }
+                case "mixed" -> {
                     hashTypes = ImmutableList.of(BIGINT, VARCHAR, DOUBLE);
                     hashChannels = ImmutableList.of(0, 1, 2);
                     sumChannel = 3;
-                    break;
-
-                default:
-                    throw new IllegalStateException();
+                }
+                default -> throw new IllegalStateException();
             }
 
             RowPagesBuilder pagesBuilder = RowPagesBuilder.rowPagesBuilder(
-                    hashAggregation,
-                    hashChannels,
                     ImmutableList.<Type>builder()
                             .addAll(hashTypes)
                             .add(BIGINT)
                             .build());
             for (int i = 0; i < TOTAL_PAGES; i++) {
-                BlockBuilder bigintBlockBuilder = BIGINT.createBlockBuilder(null, ROWS_PER_PAGE);
+                BlockBuilder bigintBlockBuilder = BIGINT.createFixedSizeBlockBuilder(ROWS_PER_PAGE);
                 BlockBuilder varcharBlockBuilder = VARCHAR.createBlockBuilder(null, ROWS_PER_PAGE);
-                BlockBuilder doubleBlockBuilder = DOUBLE.createBlockBuilder(null, ROWS_PER_PAGE);
+                BlockBuilder doubleBlockBuilder = DOUBLE.createFixedSizeBlockBuilder(ROWS_PER_PAGE);
 
                 for (int j = 0; j < groupsPerPage; j++) {
                     long groupKey = i * groupsPerPage + j;
 
                     switch (groupByTypes) {
-                        case "bigint":
-                            repeatToBigintBlock(groupKey, rowsPerGroup, bigintBlockBuilder);
-                            break;
-
-                        case "varchar":
-                            repeatToStringBlock(Long.toString(groupKey), rowsPerGroup, varcharBlockBuilder);
-                            break;
-
-                        case "mixed":
+                        case "bigint" -> repeatToBigintBlock(groupKey, rowsPerGroup, bigintBlockBuilder);
+                        case "varchar" -> repeatToStringBlock(Long.toString(groupKey), rowsPerGroup, varcharBlockBuilder);
+                        case "mixed" -> {
                             repeatToBigintBlock(groupKey, rowsPerGroup, bigintBlockBuilder);
                             repeatToStringBlock(Long.toString(groupKey), rowsPerGroup, varcharBlockBuilder);
                             repeatToDoubleBlock(groupKey, rowsPerGroup, doubleBlockBuilder);
-                            break;
-
-                        default:
-                            throw new IllegalStateException();
+                        }
+                        default -> throw new IllegalStateException();
                     }
                 }
 
                 List<Block> blocks;
                 switch (groupByTypes) {
-                    case "bigint":
-                        blocks = ImmutableList.of(bigintBlockBuilder.build());
-                        break;
-
-                    case "varchar":
-                        blocks = ImmutableList.of(varcharBlockBuilder.build());
-                        break;
-
-                    case "mixed":
-                        blocks = ImmutableList.of(bigintBlockBuilder.build(), varcharBlockBuilder.build(), doubleBlockBuilder.build());
-                        break;
-
-                    default:
-                        throw new IllegalStateException();
+                    case "bigint" -> blocks = ImmutableList.of(bigintBlockBuilder.build());
+                    case "varchar" -> blocks = ImmutableList.of(varcharBlockBuilder.build());
+                    case "mixed" -> blocks = ImmutableList.of(bigintBlockBuilder.build(), varcharBlockBuilder.build(), doubleBlockBuilder.build());
+                    default -> throw new IllegalStateException();
                 }
 
                 pagesBuilder.addBlocksPage(
@@ -203,7 +179,7 @@ public class BenchmarkHashAndStreamingAggregationOperators
             pages = pagesBuilder.build();
 
             if (hashAggregation) {
-                operatorFactory = createHashAggregationOperatorFactory(pagesBuilder.getHashChannel(), hashTypes, hashChannels, sumChannel);
+                operatorFactory = createHashAggregationOperatorFactory(hashTypes, hashChannels, sumChannel);
             }
             else {
                 operatorFactory = createStreamingAggregationOperatorFactory(hashTypes, hashChannels, sumChannel);
@@ -235,13 +211,13 @@ public class BenchmarkHashAndStreamingAggregationOperators
         }
 
         private OperatorFactory createHashAggregationOperatorFactory(
-                Optional<Integer> hashChannel,
                 List<Type> hashTypes,
                 List<Integer> hashChannels,
                 int sumChannel)
         {
-            SpillerFactory spillerFactory = (types, localSpillContext, aggregatedMemoryContext) -> null;
+            SpillerFactory spillerFactory = (_, _, _) -> null;
 
+            NullSafeHashCompiler hashCompiler = new NullSafeHashCompiler(TYPE_OPERATORS);
             return new HashAggregationOperatorFactory(
                     0,
                     new PlanNodeId("test"),
@@ -253,16 +229,14 @@ public class BenchmarkHashAndStreamingAggregationOperators
                     ImmutableList.of(
                             COUNT.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty()),
                             LONG_SUM.createAggregatorFactory(SINGLE, ImmutableList.of(sumChannel), OptionalInt.empty())),
-                    hashChannel,
-                    Optional.empty(),
+                    OptionalInt.empty(),
                     100_000,
                     Optional.of(DataSize.of(16, MEGABYTE)),
                     false,
                     succinctBytes(8),
                     succinctBytes(Integer.MAX_VALUE),
                     spillerFactory,
-                    new FlatHashStrategyCompiler(TYPE_OPERATORS),
-                    TYPE_OPERATORS,
+                    new FlatHashStrategyCompiler(TYPE_OPERATORS, hashCompiler),
                     Optional.empty());
         }
 
@@ -369,7 +343,7 @@ public class BenchmarkHashAndStreamingAggregationOperators
         context.cleanup();
     }
 
-    public static void main(String[] args)
+    static void main()
             throws RunnerException
     {
         Benchmarks.benchmark(BenchmarkHashAndStreamingAggregationOperators.class).run();

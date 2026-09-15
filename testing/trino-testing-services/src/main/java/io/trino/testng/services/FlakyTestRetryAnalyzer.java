@@ -14,7 +14,6 @@
 package io.trino.testng.services;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.log.Logger;
 import org.testng.IRetryAnalyzer;
@@ -26,9 +25,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Throwables.getStackTraceAsString;
+import static io.trino.testing.SystemEnvironmentUtils.isEnvSet;
 import static java.lang.String.format;
+import static java.util.stream.Collectors.joining;
 
 public class FlakyTestRetryAnalyzer
         implements IRetryAnalyzer
@@ -54,7 +56,7 @@ public class FlakyTestRetryAnalyzer
 
         Optional<String> enabledSystemPropertyValue = Optional.ofNullable(System.getProperty(ENABLED_SYSTEM_PROPERTY));
         if (!enabledSystemPropertyValue.map(Boolean::parseBoolean)
-                .orElseGet(() -> System.getenv("CONTINUOUS_INTEGRATION") != null)) {
+                .orElseGet(() -> isEnvSet("CONTINUOUS_INTEGRATION"))) {
             log.info(
                     "FlakyTestRetryAnalyzer not enabled: " +
                             "CONTINUOUS_INTEGRATION environment is not detected or " +
@@ -112,7 +114,7 @@ public class FlakyTestRetryAnalyzer
                     "%s::%s(%s)",
                     actualTestClass,
                     method.getMethodName(),
-                    Joiner.on(",").useForNull("null").join(parameters));
+                    Stream.of(parameters).map(String::valueOf).collect(joining(",")));
         }
         return format("%s::%s", actualTestClass, method.getMethodName());
     }

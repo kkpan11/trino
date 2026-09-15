@@ -22,6 +22,8 @@ import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
+import io.trino.parquet.ParquetReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.deltalake.DeltaLakeConfig;
 import io.trino.plugin.deltalake.transactionlog.AddFileEntry;
 import io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry;
@@ -32,8 +34,6 @@ import io.trino.plugin.deltalake.transactionlog.TransactionEntry;
 import io.trino.plugin.deltalake.transactionlog.statistics.DeltaLakeFileStatistics;
 import io.trino.plugin.deltalake.transactionlog.statistics.DeltaLakeJsonFileStatistics;
 import io.trino.plugin.deltalake.transactionlog.statistics.DeltaLakeParquetFileStatistics;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
-import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.SqlRow;
 import io.trino.spi.predicate.TupleDomain;
@@ -46,8 +46,10 @@ import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.time.LocalDateTime;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -56,18 +58,18 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.hdfs.HdfsTestUtils.HDFS_ENVIRONMENT;
+import static io.trino.hdfs.HdfsTestUtils.HDFS_FILE_SYSTEM_STATS;
 import static io.trino.plugin.deltalake.DeltaTestingConnectorSession.SESSION;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.ADD;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.METADATA;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.PROTOCOL;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.REMOVE;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.TRANSACTION;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_ENVIRONMENT;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_FILE_SYSTEM_STATS;
-import static io.trino.spi.predicate.Utils.nativeValueToBlock;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static io.trino.util.DateTimeUtils.parseDate;
@@ -118,7 +120,7 @@ public class TestCheckpointWriter
                         "configOption1", "blah",
                         "configOption2", "plah"),
                 1000);
-        ProtocolEntry protocolEntry = new ProtocolEntry(10, 20, Optional.empty(), Optional.empty());
+        ProtocolEntry protocolEntry = new ProtocolEntry(10, 20, Optional.of(ImmutableSet.of()), Optional.of(ImmutableSet.of()));
         TransactionEntry transactionEntry = new TransactionEntry("appId", 1, 1001);
         AddFileEntry addFileEntryJsonStats = new AddFileEntry(
                 "addFilePathJson",
@@ -196,7 +198,7 @@ public class TestCheckpointWriter
 
         CheckpointWriter writer = new CheckpointWriter(typeManager, checkpointSchemaManager, "test");
 
-        File targetFile = File.createTempFile("testCheckpointWriteReadRoundtrip-", ".checkpoint.parquet");
+        File targetFile = Files.createTempFile("testCheckpointWriteReadRoundtrip-", ".checkpoint.parquet").toFile();
         targetFile.deleteOnExit();
 
         String targetPath = "file://" + targetFile.getAbsolutePath();
@@ -249,16 +251,16 @@ public class TestCheckpointWriter
                         "configOption1", "blah",
                         "configOption2", "plah"),
                 1000);
-        ProtocolEntry protocolEntry = new ProtocolEntry(10, 20, Optional.empty(), Optional.empty());
+        ProtocolEntry protocolEntry = new ProtocolEntry(10, 20, Optional.of(ImmutableSet.of()), Optional.of(ImmutableSet.of()));
         TransactionEntry transactionEntry = new TransactionEntry("appId", 1, 1001);
 
-        Block[] minMaxRowFieldBlocks = new Block[] {
-                nativeValueToBlock(IntegerType.INTEGER, 1L),
-                nativeValueToBlock(createUnboundedVarcharType(), utf8Slice("a"))
+        Block[] minMaxRowFieldBlocks = {
+                writeNativeValue(IntegerType.INTEGER, 1L),
+                writeNativeValue(createUnboundedVarcharType(), utf8Slice("a")),
         };
-        Block[] nullCountRowFieldBlocks = new Block[] {
-                nativeValueToBlock(BigintType.BIGINT, 0L),
-                nativeValueToBlock(BigintType.BIGINT, 15L)
+        Block[] nullCountRowFieldBlocks = {
+                writeNativeValue(BigintType.BIGINT, 0L),
+                writeNativeValue(BigintType.BIGINT, 15L),
         };
         AddFileEntry addFileEntryParquetStats = new AddFileEntry(
                 "addFilePathParquet",
@@ -281,7 +283,7 @@ public class TestCheckpointWriter
                                 .put("byt", 10L)
                                 .put("fl", (long) Float.floatToIntBits(0.100f))
                                 .put("dou", 0.101d)
-                                .put("dat", (long) parseDate("2000-01-01"))
+                                .put("dat", (long) parseDate(utf8Slice("2000-01-01")))
                                 .put("row", new SqlRow(0, minMaxRowFieldBlocks))
                                 .buildOrThrow()),
                         Optional.of(ImmutableMap.<String, Object>builder()
@@ -296,7 +298,7 @@ public class TestCheckpointWriter
                                 .put("byt", 20L)
                                 .put("fl", (long) Float.floatToIntBits(0.200f))
                                 .put("dou", 0.202d)
-                                .put("dat", (long) parseDate("3000-01-01"))
+                                .put("dat", (long) parseDate(utf8Slice("3000-01-01")))
                                 .put("row", new SqlRow(0, minMaxRowFieldBlocks))
                                 .buildOrThrow()),
                         Optional.of(ImmutableMap.<String, Object>builder()
@@ -338,7 +340,7 @@ public class TestCheckpointWriter
 
         CheckpointWriter writer = new CheckpointWriter(typeManager, checkpointSchemaManager, "test");
 
-        File targetFile = File.createTempFile("testCheckpointWriteReadRoundtrip-", ".checkpoint.parquet");
+        File targetFile = Files.createTempFile("testCheckpointWriteReadRoundtrip-", ".checkpoint.parquet").toFile();
         targetFile.deleteOnExit();
 
         String targetPath = "file://" + targetFile.getAbsolutePath();
@@ -380,14 +382,14 @@ public class TestCheckpointWriter
                 ImmutableList.of("part_key"),
                 ImmutableMap.of(),
                 1000);
-        ProtocolEntry protocolEntry = new ProtocolEntry(10, 20, Optional.empty(), Optional.empty());
-        Block[] minMaxRowFieldBlocks = new Block[] {
-                nativeValueToBlock(IntegerType.INTEGER, 1L),
-                nativeValueToBlock(createUnboundedVarcharType(), utf8Slice("a"))
+        ProtocolEntry protocolEntry = new ProtocolEntry(10, 20, Optional.of(ImmutableSet.of()), Optional.of(ImmutableSet.of()));
+        Block[] minMaxRowFieldBlocks = {
+                writeNativeValue(IntegerType.INTEGER, 1L),
+                writeNativeValue(createUnboundedVarcharType(), utf8Slice("a")),
         };
-        Block[] nullCountRowFieldBlocks = new Block[] {
-                nativeValueToBlock(BigintType.BIGINT, 0L),
-                nativeValueToBlock(BigintType.BIGINT, 15L)
+        Block[] nullCountRowFieldBlocks = {
+                writeNativeValue(BigintType.BIGINT, 0L),
+                writeNativeValue(BigintType.BIGINT, 15L),
         };
         AddFileEntry addFileEntryParquetStats = new AddFileEntry(
                 "addFilePathParquet",
@@ -413,7 +415,7 @@ public class TestCheckpointWriter
 
         CheckpointWriter writer = new CheckpointWriter(typeManager, checkpointSchemaManager, "test");
 
-        File targetFile = File.createTempFile("testCheckpointWriteReadRoundtrip-", ".checkpoint.parquet");
+        File targetFile = Files.createTempFile("testCheckpointWriteReadRoundtrip-", ".checkpoint.parquet").toFile();
         targetFile.deleteOnExit();
 
         String targetPath = "file://" + targetFile.getAbsolutePath();
@@ -472,7 +474,7 @@ public class TestCheckpointWriter
             if (statsValue instanceof SqlRow sqlRow) {
                 // todo: this validation is just broken. The only way to compare values is to use types.
                 // see https://github.com/trinodb/trino/issues/19557
-                ImmutableList<String> logicalSizes = sqlRow.getRawFieldBlocks().stream()
+                List<String> logicalSizes = sqlRow.getRawFieldBlocks().stream()
                         .map(block -> block.getUnderlyingValueBlock().getClass().getName())
                         .collect(toImmutableList());
                 comparableStats.put(key, logicalSizes);
@@ -504,7 +506,7 @@ public class TestCheckpointWriter
                 Optional.of(metadataEntry),
                 Optional.of(protocolEntry),
                 new FileFormatDataSourceStats(),
-                new ParquetReaderConfig().toParquetReaderOptions(),
+                ParquetReaderOptions.defaultOptions(),
                 rowStatisticsEnabled,
                 new DeltaLakeConfig().getDomainCompactionThreshold(),
                 TupleDomain.all(),

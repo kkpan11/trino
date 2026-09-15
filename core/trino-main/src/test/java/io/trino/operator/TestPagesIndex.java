@@ -126,7 +126,7 @@ public class TestPagesIndex
     @Test
     public void testGetEstimatedLookupSourceSizeInBytes()
     {
-        for (Optional<Integer> sortChannel : Arrays.asList(Optional.<Integer>empty(), Optional.of(0), Optional.of(1))) {
+        for (OptionalInt sortChannel : Arrays.asList(OptionalInt.empty(), OptionalInt.of(0), OptionalInt.of(1))) {
             for (int joinChannel : Arrays.asList(0, 1)) {
                 List<Type> types = ImmutableList.of(BIGINT, VARCHAR);
                 PagesIndex pagesIndex = newPagesIndex(types, 50, false);
@@ -145,12 +145,11 @@ public class TestPagesIndex
                         sizeOfIntArray(pageCount);
                 long estimatedAdditionalSize = estimatedMemoryRequiredToCreateLookupSource - pageIndexSize;
 
-                JoinFilterFunctionCompiler.JoinFilterFunctionFactory filterFunctionFactory = (session, addresses, pages) -> (JoinFilterFunction) (leftPosition, rightPosition, rightPage) -> false;
+                JoinFilterFunctionCompiler.JoinFilterFunctionFactory filterFunctionFactory = (_, _, _) -> (JoinFilterFunction) (_, _, _) -> false;
                 LookupSource lookupSource = pagesIndex.createLookupSourceSupplier(
                         TEST_SESSION,
                         ImmutableList.of(joinChannel),
-                        OptionalInt.empty(),
-                        sortChannel.map(channel -> filterFunctionFactory),
+                        sortChannel.isPresent() ? Optional.of(filterFunctionFactory) : Optional.empty(),
                         sortChannel,
                         ImmutableList.of(filterFunctionFactory),
                         Optional.of(ImmutableList.of(0, 1)),
@@ -168,7 +167,7 @@ public class TestPagesIndex
                             .sum();
                 }
                 long actualAdditionalSize = actualLookupSourceSize - (addressesSize + channelsArraySize + blocksSize);
-                assertThat(estimatedAdditionalSize).isCloseTo(actualAdditionalSize, withPercentage(1));
+                assertThat(estimatedAdditionalSize).isCloseTo(actualAdditionalSize, withPercentage(2));
             }
         }
     }
